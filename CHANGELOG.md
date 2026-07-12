@@ -2,13 +2,31 @@
 
 ## Unreleased
 
-## 0.7.0 - 2026-04-21
+## 0.7.0 - 2026-07-11
 
-Workspace reorg — no user-facing API changes.
+Stabilizes the multi-runtime release and makes durable job dispatch consistent with the other context primitives.
+
+### Added
+
+- added `ctx.enqueue(name, payload, options?)` as the preferred durable job API; `ctx.queue.enqueue(...)` remains available as a deprecated compatibility alias
+- added PostgreSQL durability coverage for host replacement, retries and DLQ delivery, concurrent claims, expired lease recovery, workflow resumption, and multi-replica cron scheduling
+- added CI builds and PostgreSQL-backed `/health` smoke tests for the Bun, Node, and Deno advanced images
+- added the Chimpbase Cloud and `chimpctl` documentation pages
 
 ### Changed
 
+- upgraded the repository toolchain and CI to Bun 1.3.14
+- aligned examples, plugins, tests, and documentation on `ctx.enqueue(...)`
+- made Node runtime detection safe when Node is unavailable and validated the Node 24 SQLite host path
+- made the Deno advanced image cache application and test dependencies during its build
 - extracted `tools/swarm` to a sibling repo (now `@chimpbase/deployer`); removed `"tools/*"` from chimpbase workspaces and `tools/**/*.ts` from `tsconfig.json`. Cross-repo wiring now lives in a parent workspace at the shared root.
+
+### Fixed
+
+- fixed Bun and Node advanced Docker builds so frozen installs receive a complete workspace view
+- fixed the VitePress production build by declaring its Vue server-renderer dependency explicitly
+- fixed the PostgreSQL CI job to execute the real LISTEN/NOTIFY, mesh, schema, Deno, and durability suites
+- avoided polling the event bus after transactions that committed no events
 
 ## 0.6.0 - 2026-04-18
 
