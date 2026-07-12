@@ -7,7 +7,7 @@ Workers process durable background jobs from queues. Jobs survive process restar
 From any handler with a `ChimpbaseContext`:
 
 ```ts
-await ctx.queue.enqueue("email.send", {
+await ctx.enqueue("email.send", {
   to: "user@example.com",
   subject: "Welcome!",
   body: "Thanks for signing up.",
@@ -17,7 +17,7 @@ await ctx.queue.enqueue("email.send", {
 ### Delayed jobs
 
 ```ts
-await ctx.queue.enqueue("reminder.send", { userId: 42 }, {
+await ctx.enqueue("reminder.send", { userId: 42 }, {
   delayMs: 60_000, // process after 1 minute
 });
 ```

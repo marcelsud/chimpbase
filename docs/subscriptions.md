@@ -118,7 +118,7 @@ Each process gets a unique `originId` — events published by a process are filt
 
 ```ts
 subscription("todo.completed", async (ctx, todo) => {
-  await ctx.queue.enqueue("todo.completed.notify", todo);
+  await ctx.enqueue("todo.completed.notify", todo);
 }, { idempotent: true, name: "enqueueTodoNotification" });
 ```
 

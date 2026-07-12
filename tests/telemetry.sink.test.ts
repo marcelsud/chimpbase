@@ -318,6 +318,7 @@ describe("telemetry sink interface", () => {
 
     host.register(
       action("enqueueAction", async (ctx) => {
+        // Legacy alias remains supported during the ctx.enqueue migration window.
         await ctx.queue.enqueue("test.worker", { data: "hello" });
       }),
       worker("test.worker", async (ctx, payload) => {

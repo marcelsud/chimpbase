@@ -603,6 +603,12 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
   collection: ChimpbaseCollectionClient;
   stream: ChimpbaseStreamClient;
   blobs: ChimpbaseBlobsClient;
+  enqueue<TPayload = unknown>(
+    name: string,
+    payload: TPayload,
+    options?: ChimpbaseQueueEnqueueOptions,
+  ): Promise<void>;
+  /** @deprecated Use `ctx.enqueue(...)` instead. */
   queue: ChimpbaseQueueClient;
   workflow: ChimpbaseWorkflowClient;
   log: ChimpbaseLogger;

@@ -31,7 +31,7 @@ const createCustomer = action({
 const onCustomerCreated = subscription(
   "customer.created",
   async (ctx, payload) => {
-    await ctx.queue.enqueue("customer.welcome", payload);
+    await ctx.enqueue("customer.welcome", payload);
   },
   { idempotent: true, name: "enqueueWelcome" },
 );

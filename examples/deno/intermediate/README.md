@@ -1,6 +1,6 @@
 # examples/deno/intermediate
 
-Deno 2+ port of the async-primitives ladder rung: `subscription`, `worker`, `queue.enqueue`, `cron`, telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
+Deno 2+ port of the async-primitives ladder rung: `subscription`, `worker`, `enqueue`, `cron`, telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
 
 ## Run
 
@@ -16,7 +16,7 @@ SQLite (`node:sqlite`) works out of the box; the `DATABASE_URL` export switches 
 
 - **`ctx.pubsub.publish(event, payload)`** — action publishes a domain event after the DB write commits.
 - **`subscription(event, handler, { idempotent, name })`** — cross-process-safe event handler. Runtime wraps each delivery in a transaction; duplicates dedupe by event id + subscription name.
-- **`ctx.queue.enqueue(queue, payload)`** — durable background job handed to a worker.
+- **`ctx.enqueue(queue, payload)`** — durable background job handed to a worker.
 - **`worker(queue, handler)`** and a DLQ sibling — queue consumers. Postgres queues lock rows with `FOR UPDATE SKIP LOCKED` so multiple replicas share safely.
 - **`cron(name, "5-field cron", handler)`** — UTC-only scheduler; same worker execution path.
 - **`ctx.log / ctx.metric / ctx.trace`** — telemetry on the worker side.

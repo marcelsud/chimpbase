@@ -1020,6 +1020,12 @@ export class ChimpbaseEngine {
       }
     };
 
+    const enqueue = async <TPayload = unknown>(
+      name: string,
+      payload: TPayload,
+      options?: ChimpbaseQueueEnqueueOptions,
+    ): Promise<void> => await this.adapter.queueEnqueue(name, payload, options);
+
     const context: ChimpbaseContext = {
       db: {
         query: <T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []) =>
@@ -1066,12 +1072,9 @@ export class ChimpbaseEngine {
         ): Promise<ChimpbaseStreamEvent<TPayload>[]> => await this.adapter.streamRead<TPayload>(stream, options),
       },
       blobs: this.createBlobsClient(),
+      enqueue,
       queue: {
-        enqueue: async <TPayload = unknown>(
-          name: string,
-          payload: TPayload,
-          options?: ChimpbaseQueueEnqueueOptions,
-        ) => await this.adapter.queueEnqueue(name, payload, options),
+        enqueue,
       },
       workflow: {
         get: async <TInput = unknown, TState = unknown>(
@@ -2233,7 +2236,9 @@ export class ChimpbaseEngine {
         await this.adapter.commitTransaction(this.pendingEvents);
         const justCommitted = this.pendingEvents.splice(0);
         this.committedEvents.push(...justCommitted);
-        await this.eventBus.publish(justCommitted);
+        if (justCommitted.length > 0) {
+          await this.eventBus.publish(justCommitted);
+        }
       }
 
       return result;

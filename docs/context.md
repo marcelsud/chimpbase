@@ -9,7 +9,7 @@ Every handler in Chimpbase — actions, subscriptions, workers, cron jobs, and w
 | **Database** | `ctx.db.query(sql, params)` | Raw SQL queries |
 | | `ctx.db.kysely<T>()` | Typed Kysely query builder |
 | **Pub/Sub** | `ctx.pubsub.publish(event, payload)` | Publish ephemeral events |
-| **Queues** | `ctx.queue.enqueue(name, payload, opts?)` | Enqueue durable background jobs |
+| **Queues** | `ctx.enqueue(name, payload, opts?)` | Enqueue durable background jobs |
 | **Key-Value** | `ctx.kv.get/set/delete/list` | Key-value storage |
 | **Collections** | `ctx.collection.find/insert/update/delete` | Schemaless JSON documents |
 | **Streams** | `ctx.stream.append/read` | Append-only event streams |
@@ -38,7 +38,7 @@ const createOrder = action("createOrder", async (ctx, input) => {
   ctx.pubsub.publish("order.created", { orderId: order.id });
 
   // Queue
-  await ctx.queue.enqueue("order.fulfill", { orderId: order.id });
+  await ctx.enqueue("order.fulfill", { orderId: order.id });
 
   // Logging
   ctx.log.info("order created", { orderId: order.id });

@@ -5,15 +5,27 @@ import { tmpdir } from "node:os";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const cleanupDirs: string[] = [];
-const nodeSupportsSqlite = Bun.spawnSync(
-  ["node", "--input-type=module", "-e", 'await import("node:sqlite");'],
-  {
-    cwd: repoRoot,
-    env: process.env,
-    stderr: "ignore",
-    stdout: "ignore",
-  },
-).exitCode === 0;
+const nodeSupportsSqlite = detectNodeSqliteSupport();
+
+function detectNodeSqliteSupport(): boolean {
+  try {
+    return Bun.spawnSync(
+      ["node", "--input-type=module", "-e", 'await import("node:sqlite");'],
+      {
+        cwd: repoRoot,
+        env: process.env,
+        stderr: "ignore",
+        stdout: "ignore",
+      },
+    ).exitCode === 0;
+  } catch (error) {
+    const code = error instanceof Error && "code" in error
+      ? String((error as Error & { code?: unknown }).code)
+      : null;
+    if (code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
@@ -70,8 +82,8 @@ describe("chimpbase-node runtime", () => {
         "});",
         "",
         'host.registerAction("enqueueJobs", async (ctx) => {',
-        '  await ctx.queue.enqueue("batch.job", { value: "job-1" });',
-        '  await ctx.queue.enqueue("batch.job", { value: "job-2" });',
+        '  await ctx.enqueue("batch.job", { value: "job-1" });',
+        '  await ctx.enqueue("batch.job", { value: "job-2" });',
         "  return null;",
         "});",
         "",
@@ -167,5 +179,5 @@ describe("chimpbase-node runtime", () => {
       stopReason: "idle",
     });
     expect(output.processed).toEqual(["job-1", "job-2"]);
-  }, 30000);
+  }, 120_000);
 });

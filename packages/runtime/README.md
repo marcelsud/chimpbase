@@ -23,7 +23,7 @@ const createCustomer = action({
     name: v.string(),
   }),
   async handler(ctx, input) {
-    await ctx.queue.enqueue("customer.sync", input);
+    await ctx.enqueue("customer.sync", input);
     return { ok: true };
   },
   name: "createCustomer",

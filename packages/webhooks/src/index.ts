@@ -666,7 +666,7 @@ export function chimpbaseWebhooks(
           const events = parseEvents(webhook.events);
           if (events.includes(eventName) || events.includes("*")) {
             const deliveryId = generateDeliveryId();
-            await ctx.queue.enqueue(DELIVERY_WORKER, {
+            await ctx.enqueue(DELIVERY_WORKER, {
               webhookId: webhook.id,
               event: eventName,
               payload,

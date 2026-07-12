@@ -30,7 +30,7 @@ export async function enqueueOrderCompletedNotification(
   ctx: ChimpbaseContext,
   order: OrderRecord,
 ): Promise<void> {
-  await ctx.queue.enqueue("order.completed.notify", {
+  await ctx.enqueue("order.completed.notify", {
     orderId: order.id,
     customer: order.customer,
     amount: order.amount,

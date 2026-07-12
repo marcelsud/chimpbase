@@ -80,8 +80,8 @@ if (!bunSupportsBetterSqlite3) {
       const processed: string[] = [];
 
       host.registerAction("enqueueJobs", async (ctx) => {
-        await ctx.queue.enqueue("batch.job", { value: "job-1" });
-        await ctx.queue.enqueue("batch.job", { value: "job-2" });
+        await ctx.enqueue("batch.job", { value: "job-1" });
+        await ctx.enqueue("batch.job", { value: "job-2" });
         return null;
       });
       host.registerWorker("batch.job", async (_ctx, payload) => {
@@ -177,8 +177,8 @@ if (!dockerAvailable) {
       const processed: string[] = [];
 
       host.registerAction("enqueueJobs", async (ctx) => {
-        await ctx.queue.enqueue("batch.job", { value: "job-1" });
-        await ctx.queue.enqueue("batch.job", { value: "job-2" });
+        await ctx.enqueue("batch.job", { value: "job-1" });
+        await ctx.enqueue("batch.job", { value: "job-2" });
         return null;
       });
       host.registerWorker("batch.job", async (_ctx, payload) => {
@@ -480,7 +480,7 @@ if (!dockerAvailable) {
       });
 
       host.registerAction("enqueueAudit", async (ctx, value) => {
-        await ctx.queue.enqueue("audit.job", { value });
+        await ctx.enqueue("audit.job", { value });
         return null;
       });
       host.registerAction(
@@ -533,7 +533,7 @@ if (!dockerAvailable) {
           {
             eventName: "audit.created",
             handler: async (ctx, event) => {
-              await ctx.queue.enqueue("audit.job", event);
+              await ctx.enqueue("audit.job", event);
             },
             kind: "subscription",
           },
@@ -598,7 +598,7 @@ if (!dockerAvailable) {
 
       host
         .action("enqueueAudit", async (ctx, value) => {
-          await ctx.queue.enqueue("audit.job", { value });
+          await ctx.enqueue("audit.job", { value });
           return { queued: value };
         })
         .action(
@@ -734,7 +734,7 @@ if (!dockerAvailable) {
           "  },",
           "  registrations: [",
           '    action("enqueueAudit", async (ctx, value) => {',
-          '      await ctx.queue.enqueue("audit.job", { value });',
+          '      await ctx.enqueue("audit.job", { value });',
           "      return null;",
           "    }),",
           '    action("listAudit", async (ctx) => await ctx.db.query("SELECT value FROM worker_audit ORDER BY id ASC")),',
@@ -778,7 +778,7 @@ describe("chimpbase-deno runtime guards", () => {
       });
 
       host.registerAction("enqueueMemoryJob", async (ctx) => {
-        await ctx.queue.enqueue("memory.job", { value: "memory" });
+        await ctx.enqueue("memory.job", { value: "memory" });
         return null;
       });
       host.registerWorker("memory.job", async (_ctx, payload) => {
@@ -955,7 +955,7 @@ async function createDenoProjectFixture(label: string, databaseUrl: string): Pro
       "  },",
       "  registrations: [",
       '    action("enqueueAudit", async (ctx, value) => {',
-      '      await ctx.queue.enqueue("audit.job", { value });',
+      '      await ctx.enqueue("audit.job", { value });',
       '      return { queued: value };',
       "    }),",
       '    action("listAudit", async (ctx) => await ctx.db.query("SELECT value FROM worker_audit ORDER BY id ASC")),',

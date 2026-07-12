@@ -4,7 +4,7 @@ const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server:
 const syncCustomer = worker("customer.sync", async (ctx, payload: any) => { ctx.log.info("syncing", { customerId: payload.customerId }); await ctx.db.query("update customers set synced_at = datetime('now') where id = ?1", [payload.customerId]); });
 const syncCustomerDlq = worker("customer.sync.dlq", async (ctx, envelope: any) => { ctx.log.error("failed", { queue: envelope.queue, attempts: envelope.attempts, error: envelope.error, payload: envelope.payload }); });
 const noDlqWorker = worker("nodlq.queue", async () => {}, { dlq: false });
-const triggerSync = action({ args: v.object({ customerId: v.number() }), async handler(ctx, input) { await ctx.db.query("insert into customers (id) values (?1)", [input.customerId]); await ctx.queue.enqueue("customer.sync", { customerId: input.customerId }); await ctx.queue.enqueue("nodlq.queue", { test: true }, { delayMs: 60_000 }); return { ok: true }; } });
+const triggerSync = action({ args: v.object({ customerId: v.number() }), async handler(ctx, input) { await ctx.db.query("insert into customers (id) values (?1)", [input.customerId]); await ctx.enqueue("customer.sync", { customerId: input.customerId }); await ctx.enqueue("nodlq.queue", { test: true }, { delayMs: 60_000 }); return { ok: true }; } });
 class SyncModule { @Worker("deco.sync") async syncDeco(_ctx: any, _p: any) {} }
 chimpbase.register({ syncCustomer, syncCustomerDlq, noDlqWorker, triggerSync }); chimpbase.register(...registrationsFrom(new SyncModule()));
 await chimpbase.start();

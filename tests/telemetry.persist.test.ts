@@ -282,7 +282,7 @@ describe("telemetry stream persistence", () => {
     });
     host.register(
       action("enqueue", async (ctx) => {
-        await ctx.queue.enqueue("work", { x: 1 });
+        await ctx.enqueue("work", { x: 1 });
       }),
       worker("work", async (ctx, payload: { x: number }) => {
         ctx.log.info("processing", { x: payload.x });

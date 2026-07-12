@@ -1,9 +1,9 @@
-FROM oven/bun:1.3-alpine
+FROM oven/bun:1.3.14-alpine
 
 WORKDIR /app
 COPY package.json bun.lock tsconfig.json ./
 COPY packages ./packages
-COPY examples/bun/advanced ./examples/bun/advanced
+COPY examples ./examples
 
 RUN bun install --frozen-lockfile
 

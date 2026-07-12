@@ -55,7 +55,7 @@ chimpbase
   })
 
   .subscription("customer.created", async (ctx, event) => {
-    await ctx.queue.enqueue("customer.sync", event);
+    await ctx.enqueue("customer.sync", event);
   })
 
   .worker("customer.sync", async (ctx, event) => {
@@ -140,9 +140,9 @@ Use ephemeral pub/sub for internal choreography without turning your codebase in
 
 Publish from an action, react in subscriptions, keep the flow explicit.
 
-### `queue.enqueue` + `worker`
+### `enqueue` + `worker`
 
-Use `queue.enqueue(...)` to dispatch durable jobs and `worker(...)` to process them.
+Use `enqueue(...)` to dispatch durable jobs and `worker(...)` to process them.
 
 This is the primitive for “do this later” or “do this out of band”.
 

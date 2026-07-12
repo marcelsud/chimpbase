@@ -26,7 +26,7 @@ export async function meshEmit(
     }
 
     const envelope: BalancedEnvelope = { event, payload };
-    await ctx.queue.enqueue(balancedWorkerName(event), envelope);
+    await ctx.enqueue(balancedWorkerName(event), envelope);
     return;
   }
 

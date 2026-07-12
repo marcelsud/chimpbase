@@ -71,7 +71,7 @@ async function bootInlineApp(overrides?: {
       "INSERT INTO audit_log (item_id, label) VALUES (?1, ?2)",
       [event.id, event.label],
     );
-    await ctx.queue.enqueue("item.notify", event);
+    await ctx.enqueue("item.notify", event);
   };
 
   const notifyItem = async (
@@ -260,4 +260,3 @@ describe("bun runtime regression — inline fixtures", () => {
     }
   });
 });
-

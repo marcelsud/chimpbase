@@ -43,10 +43,10 @@ Three rungs per runtime share the same orders domain so readers compare shape, n
 
 - Prefer Postgres in production. SQLite and memory are supported for local development and tests.
 - The main DSL primitives are `action`, `subscription`, `worker`, `cron`, `route`, and `workflow`.
-- Common runtime context helpers are `ctx.db.query(...)`, `ctx.db.kysely<TDatabase>()`, `ctx.pubsub.publish(...)`, `ctx.queue.enqueue(...)`, `ctx.kv`, `ctx.collection`, `ctx.stream`, `ctx.workflow`, `ctx.secret`, `ctx.log`, `ctx.metric`, `ctx.trace`, and `ctx.action(...)`.
+- Common runtime context helpers are `ctx.db.query(...)`, `ctx.db.kysely<TDatabase>()`, `ctx.pubsub.publish(...)`, `ctx.enqueue(...)`, `ctx.kv`, `ctx.collection`, `ctx.stream`, `ctx.workflow`, `ctx.secret`, `ctx.log`, `ctx.metric`, `ctx.trace`, and `ctx.action(...)`.
 - `action(...)` is a typed RPC unit: validated input, transactional execution, callable from anywhere via `ctx.action(...)` or HTTP.
 - `subscription(...)` handles pubsub events from `ctx.pubsub.publish(...)`. Can be marked `idempotent: true` with a stable `name` to deduplicate cross-process delivery.
-- `worker(...)` plus `queue.enqueue(...)` is the durable background job model. Workers pull from PostgreSQL queues with row-level locking.
+- `worker(...)` plus `enqueue(...)` is the durable background job model. Workers pull from PostgreSQL queues with row-level locking.
 - `cron(...)` uses standard 5-field UTC cron expressions and runs through the same worker execution path.
 - `workflow(...)` is for long-running stateful processes that must survive restarts, time delays, and external signals. Steps are `workflowActionStep`, `workflowSleepStep`, `workflowWaitForSignalStep`.
 - `route(...)` exposes raw HTTP handlers (method, path, handler) when a framework is not in front of the host.

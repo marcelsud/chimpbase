@@ -65,7 +65,7 @@ chimpbase.register({ createCustomer });
 
 chimpbase.register(
   subscription("customer.created", async (ctx, event) => {
-    await ctx.queue.enqueue("customer.sync", event);
+    await ctx.enqueue("customer.sync", event);
   }, { idempotent: true, name: "enqueueCustomerSync" }),
   worker("customer.sync", async (ctx, event) => {
     ctx.log.info("syncing customer", { customerId: event.customerId });
@@ -103,7 +103,7 @@ Chimpbase keeps those concerns close together:
 
 - `action(...)` for business operations
 - `subscription(...)` for internal choreography
-- `queue.enqueue(...)` + `worker(...)` for durable background work
+- `enqueue(...)` + `worker(...)` for durable background work
 - `cron(...)` for recurring work
 - `workflow(...)` for long-running processes
 
@@ -180,7 +180,7 @@ Use `action(...)` for business operations that may be called from HTTP, CLI, wor
 
 Use `subscription(...)` for internal pub/sub reactions. Mark handlers as idempotent when replay safety matters.
 
-### `queue.enqueue` + `worker`
+### `enqueue` + `worker`
 
 Use queues and workers for durable background execution and retries.
 

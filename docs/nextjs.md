@@ -78,7 +78,7 @@ export default {
   registrations: [
     createTodo,
     subscription("todo.created", async (ctx, event) => {
-      await ctx.queue.enqueue("todo.index", event);
+      await ctx.enqueue("todo.index", event);
     }, { idempotent: true, name: "enqueueTodoIndex" }),
     worker("todo.index", async (ctx, payload) => {
       // Update search index, send notifications, etc.

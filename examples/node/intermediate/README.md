@@ -1,6 +1,6 @@
 # examples/node/intermediate
 
-Node 22+ port of the async-primitives ladder rung: `subscription`, `worker`, `queue.enqueue`, `cron`, telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
+Node 22+ port of the async-primitives ladder rung: `subscription`, `worker`, `enqueue`, `cron`, telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
 
 ## Run
 
@@ -16,7 +16,7 @@ SQLite (`node:sqlite`) works out of the box for local play; the `DATABASE_URL` e
 
 - **`ctx.pubsub.publish(event, payload)`** — action publishes a domain event after the DB write commits.
 - **`subscription(event, handler, { idempotent, name })`** — cross-process-safe event handler. The runtime wraps each delivery in a transaction; duplicates are deduped by event id + subscription name.
-- **`ctx.queue.enqueue(queue, payload)`** — durable background job handed to a worker.
+- **`ctx.enqueue(queue, payload)`** — durable background job handed to a worker.
 - **`worker(queue, handler)`** and a DLQ sibling (`worker("...dlq", ...)`) — queue consumers. Postgres queues lock rows with `FOR UPDATE SKIP LOCKED` so multiple replicas can share a queue.
 - **`cron(name, "5-field cron", handler)`** — UTC-only scheduler that runs through the same worker path as queues.
 - **`ctx.log / ctx.metric / ctx.trace`** — telemetry on the worker side.
