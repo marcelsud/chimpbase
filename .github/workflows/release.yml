@@ -43,4 +43,39 @@ jobs:
 
       - name: Publish packages
         if: ${{ !inputs.dry_run }}
-        run: bun run release:publish
+        shell: bash
+        run: |
+          bun run build:publish:packages
+
+          packages=(
+            runtime
+            core
+            tooling
+            postgres
+            host
+            deno
+            node
+            rest-collections
+            otel
+            auth
+            blobs
+            webhooks
+            pact
+            mesh
+            bun
+          )
+
+          for package in "${packages[@]}"; do
+            package_dir="packages/$package"
+            package_name="$(node -p "require('./$package_dir/package.json').name")"
+            package_version="$(node -p "require('./$package_dir/package.json').version")"
+            package_spec="$package_name@$package_version"
+
+            if npm view "$package_spec" version >/dev/null 2>&1; then
+              echo "Skipping $package_spec: already published"
+              continue
+            fi
+
+            echo "Publishing $package_spec"
+            (cd "$package_dir" && npm publish)
+          done
