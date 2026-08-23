@@ -49,7 +49,7 @@ const sendWelcome = worker("customer.welcome", async (ctx, payload: { email: str
 const api = new Hono<{ Bindings: ChimpbaseRouteEnv }>();
 
 api.post("/customers", async (c) => {
-  const body = await c.req.json();
+  const body = await c.req.json<{ email: string; name: string; plan: string }>();
   const customer = await c.env.action(createCustomer, body);
   return c.json(customer, 201);
 });

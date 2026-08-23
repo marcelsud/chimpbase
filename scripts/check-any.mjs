@@ -59,6 +59,11 @@ const isDeclarationName = (node) => {
     return true;
   }
 
+  if (parent && ts.isBindingElement(parent) && parent.propertyName === node) {
+    // `{ a: b }` in a binding pattern names the source property, not a value.
+    return true;
+  }
+
   return Boolean(parent && "name" in parent && parent.name === node);
 };
 

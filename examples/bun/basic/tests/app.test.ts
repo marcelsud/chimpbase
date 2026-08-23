@@ -46,6 +46,6 @@ describe("bun/basic example", () => {
   test("built-in health check responds", async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json() as { ok: boolean }).toEqual({ ok: true });
   });
 });

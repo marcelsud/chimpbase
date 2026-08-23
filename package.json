@@ -11,7 +11,8 @@
   ],
   "scripts": {
     "build:publish:packages": "node ./scripts/build-package.mjs runtime core tooling postgres host deno node rest-collections otel auth blobs webhooks pact mesh",
-    "ci:check": "bun run typecheck && bun run test && bun run publish:dry-run",
+    "ci:check": "bun run typecheck && bun run check:any && bun run test && bun run publish:dry-run",
+    "check:any": "node ./scripts/check-any.mjs",
     "dev:bun:basic": "bun run --filter @chimpbase/example-bun-basic dev",
     "dev:bun:intermediate": "bun run --filter @chimpbase/example-bun-intermediate dev",
     "dev:bun:advanced": "bun run --filter @chimpbase/example-bun-advanced dev",

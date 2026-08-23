@@ -70,6 +70,6 @@ describe("node/basic example", () => {
   test("built-in health check responds", async () => {
     const res = await fetch(`${baseUrl}/health`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true });
+    assert.deepEqual(await res.json() as { ok: boolean }, { ok: true });
   });
 });
