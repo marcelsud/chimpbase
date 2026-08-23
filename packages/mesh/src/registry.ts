@@ -1,3 +1,4 @@
+import { isArrayValue, isJsonObject, isStringArray, tryParseJson } from "@chimpbase/runtime";
 import type { ChimpbaseContext } from "@chimpbase/runtime";
 
 import type { NodeRecord, NodeServiceEntry } from "./types.ts";
@@ -145,18 +146,14 @@ function rowToNodeRecord(row: RegistryRow): NodeRecord {
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+  if (isJsonObject(value)) {
+    return value;
   }
 
   if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // ignore
+    const parsed = tryParseJson(value);
+    if (isJsonObject(parsed)) {
+      return parsed;
     }
   }
 
@@ -164,17 +161,17 @@ function parseJsonObject(value: unknown): Record<string, unknown> {
 }
 
 function parseServices(value: unknown): NodeServiceEntry[] {
-  const list = Array.isArray(value)
+  const list = isArrayValue(value)
     ? value
     : typeof value === "string"
       ? safeParseArray(value)
       : [];
 
   return list
-    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object" && !Array.isArray(entry))
+    .filter(isJsonObject)
     .map((entry) => ({
-      actions: Array.isArray(entry.actions) ? (entry.actions as string[]) : [],
-      events: Array.isArray(entry.events) ? (entry.events as string[]) : [],
+      actions: isStringArray(entry.actions) ? entry.actions : [],
+      events: isStringArray(entry.events) ? entry.events : [],
       name: String(entry.name ?? ""),
       version: Number(entry.version ?? 1),
     }))
@@ -182,10 +179,6 @@ function parseServices(value: unknown): NodeServiceEntry[] {
 }
 
 function safeParseArray(value: string): unknown[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const parsed = tryParseJson(value);
+  return isArrayValue(parsed) ? parsed : [];
 }

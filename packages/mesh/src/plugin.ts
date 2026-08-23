@@ -57,13 +57,15 @@ import {
   type RpcEnvelope,
 } from "./transport-http.ts";
 import type {
+  AnyServiceDefinition,
   CallOptions,
   ChimpbaseMeshClient,
   EmitOptions,
   LoadBalanceStrategy,
   MeshCallMiddleware,
   NodeServiceEntry,
-  ServiceDefinition,
+  ServiceActionDispatch,
+  ServiceEventDispatch,
   ServiceSelf,
 } from "./types.ts";
 
@@ -81,7 +83,7 @@ export interface ChimpbaseMeshOptions {
   name?: string;
   offlineAfterMs?: number;
   rpcPath?: string;
-  services: readonly ServiceDefinition<any, any>[];
+  services: readonly AnyServiceDefinition[];
   transport?: "local-only" | "http";
 }
 
@@ -227,7 +229,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   }
 
   entries.push(
-    onStart<any>("__chimpbase.mesh.bootstrap", async (ctx) => {
+    onStart("__chimpbase.mesh.bootstrap", async (ctx) => {
       await ensureRegistrySchema(ctx);
       const metadata = { ...metaBase };
       await upsertNode(ctx, {
@@ -253,7 +255,8 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
       for (const svc of services) {
         if (svc.started) {
-          await svc.started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
+          const started = svc.started as (ctx: ChimpbaseContext, self: ServiceSelf) => unknown;
+          await started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
         }
       }
 
@@ -309,7 +312,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
           }
 
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
-          await eventEntry.handler(
+          await (eventEntry.handler as ServiceEventDispatch)(
             ctx,
             envelope.payload,
             buildServiceSelf(svc, nodeId, meshClient),
@@ -371,7 +374,7 @@ function buildServiceRegistrations(
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
           const self = buildServiceSelf(svc, meshClient?.nodeId() ?? "", meshClient);
           const actionArgs = args.length <= 1 ? args[0] : args;
-          return await handler(ctx, actionArgs, self);
+          return await (handler as ServiceActionDispatch)(ctx, actionArgs, self);
         }),
       );
     }
@@ -385,7 +388,7 @@ function buildServiceRegistrations(
         subscription(eventName, async (ctx, payload) => {
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
           const self = buildServiceSelf(svc, meshClient?.nodeId() ?? "", meshClient);
-          await event.handler(ctx, payload, self);
+          await (event.handler as ServiceEventDispatch)(ctx, payload, self);
         }),
       );
     }
@@ -398,7 +401,7 @@ function buildServiceSelf(
   svc: ResolvedService,
   nodeId: string,
   meshClient: ChimpbaseMeshClient | undefined,
-): ServiceSelf<any, any> {
+): ServiceSelf {
   return {
     call: async <TResult = unknown>(actionName: string, args?: unknown, options?: CallOptions) => {
       if (!meshClient) {

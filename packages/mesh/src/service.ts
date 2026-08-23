@@ -1,13 +1,15 @@
 import type {
-  ServiceActionHandler,
+  AnyServiceActionHandler,
+  AnyServiceDefinition,
+  AnyServiceEventDefinition,
+  AnyServiceEventHandler,
   ServiceDefinition,
-  ServiceEventDefinition,
-  ServiceEventHandler,
+  ServiceMethods,
 } from "./types.ts";
 
 export function service<
   TSettings = unknown,
-  TMethods extends Record<string, (...args: any[]) => unknown> = Record<string, (...args: any[]) => unknown>,
+  TMethods extends ServiceMethods = ServiceMethods,
 >(
   def: ServiceDefinition<TSettings, TMethods>,
 ): ServiceDefinition<TSettings, TMethods> {
@@ -19,19 +21,19 @@ export function service<
 }
 
 export interface ResolvedService {
-  actions: Record<string, ServiceActionHandler<any, any, any, any>>;
-  events: Record<string, ServiceEventDefinition<any, any, any>>;
+  actions: Record<string, AnyServiceActionHandler>;
+  events: Record<string, AnyServiceEventDefinition>;
   methods: Record<string, unknown>;
   name: string;
   settings: Record<string, unknown>;
-  started?: ServiceDefinition["started"];
-  stopped?: ServiceDefinition["stopped"];
+  started?: AnyServiceDefinition["started"];
+  stopped?: AnyServiceDefinition["stopped"];
   version: number;
 }
 
 export function resolveService(
-  def: ServiceDefinition<any, any>,
-  seen: Set<ServiceDefinition<any, any>> = new Set(),
+  def: AnyServiceDefinition,
+  seen: Set<AnyServiceDefinition> = new Set(),
 ): ResolvedService {
   if (seen.has(def)) {
     throw new Error(`service "${def.name}" has a circular mixin reference`);
@@ -79,10 +81,8 @@ export function resolveService(
 }
 
 function normalizeEvent(
-  entry:
-    | ServiceEventHandler<any, any, any>
-    | ServiceEventDefinition<any, any, any>,
-): ServiceEventDefinition<any, any, any> {
+  entry: AnyServiceEventHandler | AnyServiceEventDefinition,
+): AnyServiceEventDefinition {
   if (typeof entry === "function") {
     return { balanced: false, handler: entry };
   }
