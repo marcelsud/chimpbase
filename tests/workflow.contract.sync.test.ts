@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { syncChimpbaseWorkflowContracts } from "../packages/bun/src/library.ts";
+import type { ChimpbaseWorkflowContract } from "../packages/runtime/index.ts";
 import { installLocalPackage } from "./support/local_package.ts";
 
 const runtimeRoot = resolve(import.meta.dir, "..");
@@ -44,12 +45,12 @@ describe("workflow contract sync", () => {
     ]);
 
     const contractPath = resolve(projectDir, "workflow-contracts", "customer.onboarding.v1.contract.json");
-    const stored = await Bun.file(contractPath).json();
+    const stored = await Bun.file(contractPath).json() as ChimpbaseWorkflowContract;
     expect(stored).toEqual(
       expect.objectContaining({
         name: "customer.onboarding",
         version: 1,
-      }),
+      }) as ChimpbaseWorkflowContract,
     );
 
     const second = await runContractSync(projectDir, { check: true });
@@ -111,12 +112,12 @@ describe("workflow contract sync", () => {
     ]);
 
     const contractPath = resolve(projectDir, "workflow-contracts", "customer.onboarding.v2.contract.json");
-    const stored = await Bun.file(contractPath).json();
+    const stored = await Bun.file(contractPath).json() as ChimpbaseWorkflowContract;
     expect(stored).toEqual(
       expect.objectContaining({
         name: "customer.onboarding",
         version: 2,
-      }),
+      }) as ChimpbaseWorkflowContract,
     );
   });
 

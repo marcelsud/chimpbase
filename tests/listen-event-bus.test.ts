@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 
 import type { ChimpbaseEventRecord } from "../packages/core/index.ts";
+import { parseJson } from "../packages/runtime/index.ts";
 import {
   PayloadTooLargeError,
   PostgresListenEventBus,
@@ -72,7 +73,7 @@ describe("PostgresListenEventBus", () => {
     expect(pool.queries[0].sql).toBe("SELECT pg_notify($1, $2)");
     const [channel, payload] = pool.queries[0].params;
     expect(channel).toBe("chimpbase_events");
-    expect(JSON.parse(payload as string)).toEqual({
+    expect(parseJson(payload as string)).toEqual({
       event: { id: 1, name: "order.created", payload: { orderId: "123" }, payloadJson: '{"orderId":"123"}' },
       origin: "origin-A",
     });

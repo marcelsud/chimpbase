@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { action, middleware, onStart, onStop, plugin, route } from "../packages/runtime/index.ts";
+import { readJsonResponse } from "./support/http.ts";
 
 const cleanupDirs: string[] = [];
 
@@ -49,7 +50,7 @@ describe("plugin system", () => {
 
       const outcome = await host.executeRoute(new Request("http://test.local/any"));
       expect(outcome.response?.status).toBe(200);
-      const body = await outcome.response?.json();
+      const body = await readJsonResponse<{ userId: number; userName: string }>(outcome.response);
       expect(body).toEqual({ userId: 42, userName: "Alice" });
     } finally {
       host.close();
@@ -74,8 +75,8 @@ describe("plugin system", () => {
       const r1 = await host.executeRoute(new Request("http://test.local/a"));
       const r2 = await host.executeRoute(new Request("http://test.local/b"));
 
-      expect(await r1.response?.json()).toEqual({ call: 1 });
-      expect(await r2.response?.json()).toEqual({ call: 2 });
+      expect(await readJsonResponse<{ call: number }>(r1.response)).toEqual({ call: 1 });
+      expect(await readJsonResponse<{ call: number }>(r2.response)).toEqual({ call: 2 });
     } finally {
       host.close();
     }
@@ -91,7 +92,7 @@ describe("plugin system", () => {
       });
 
       const outcome = await host.executeRoute(new Request("http://test.local/any"));
-      expect(await outcome.response?.json()).toEqual({ value: null });
+      expect(await readJsonResponse<{ value: unknown }>(outcome.response)).toEqual({ value: null });
     } finally {
       host.close();
     }
@@ -213,7 +214,7 @@ describe("plugin system", () => {
 
       // GET → passes through middleware to handler
       const r2 = await host.executeRoute(new Request("http://test.local/any"));
-      expect(await r2.response?.json()).toEqual({ ok: true });
+      expect(await readJsonResponse<{ ok: boolean }>(r2.response)).toEqual({ ok: true });
     } finally {
       host.close();
     }

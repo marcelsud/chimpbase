@@ -4,8 +4,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { chimpbaseWebhooks, headerToken } from "../packages/webhooks/src/index.ts";
+import {
+  chimpbaseWebhooks,
+  headerToken,
+  type WebhookRegistration,
+} from "../packages/webhooks/src/index.ts";
 import { action, subscription } from "../packages/runtime/index.ts";
+import { readJsonResponse } from "./support/http.ts";
+
+/** The webhook routes return the stored registration with `events` decoded back into a list. */
+interface WebhookResponse extends Omit<WebhookRegistration, "events"> {
+  events: string[];
+}
 
 const cleanupDirs: string[] = [];
 
@@ -75,7 +85,7 @@ describe("@chimpbase/webhooks", () => {
         }),
       );
       expect(outcome.response?.status).toBe(201);
-      const webhook = await outcome.response?.json();
+      const webhook = await readJsonResponse<WebhookResponse>(outcome.response);
       expect(webhook.url).toBe("https://example.com/hook");
       expect(webhook.events).toEqual(["order.created"]);
       expect(webhook.secret).toBeDefined();
@@ -101,7 +111,7 @@ describe("@chimpbase/webhooks", () => {
         new Request("http://test.local/_webhooks"),
       );
       expect(outcome.response?.status).toBe(200);
-      const webhooks = await outcome.response?.json();
+      const webhooks = await readJsonResponse<WebhookResponse[]>(outcome.response);
       expect(webhooks).toHaveLength(1);
       expect(webhooks[0].url).toBe("https://a.com/hook");
     } finally {
@@ -119,13 +129,13 @@ describe("@chimpbase/webhooks", () => {
           body: JSON.stringify({ url: "https://get.com/hook", events: ["order.created"] }),
         }),
       );
-      const created = await createOutcome.response?.json();
+      const created = await readJsonResponse<WebhookResponse>(createOutcome.response);
 
       const getOutcome = await host.executeRoute(
         new Request(`http://test.local/_webhooks/${created.id}`),
       );
       expect(getOutcome.response?.status).toBe(200);
-      const webhook = await getOutcome.response?.json();
+      const webhook = await readJsonResponse<WebhookResponse>(getOutcome.response);
       expect(webhook.secret).toBe(created.secret);
     } finally {
       host.close();
@@ -142,7 +152,7 @@ describe("@chimpbase/webhooks", () => {
           body: JSON.stringify({ url: "https://old.com/hook", events: ["order.created"] }),
         }),
       );
-      const created = await createOutcome.response?.json();
+      const created = await readJsonResponse<WebhookResponse>(createOutcome.response);
 
       const updateOutcome = await host.executeRoute(
         new Request(`http://test.local/_webhooks/${created.id}`, {
@@ -167,13 +177,13 @@ describe("@chimpbase/webhooks", () => {
           body: JSON.stringify({ url: "https://x.com/hook", events: ["order.created"] }),
         }),
       );
-      const created = await createOutcome.response?.json();
+      const created = await readJsonResponse<WebhookResponse>(createOutcome.response);
 
       const outcome = await host.executeRoute(
         new Request(`http://test.local/_webhooks/${created.id}/deliveries`),
       );
       expect(outcome.response?.status).toBe(200);
-      expect(await outcome.response?.json()).toEqual([]);
+      expect(await readJsonResponse<unknown[]>(outcome.response)).toEqual([]);
     } finally {
       host.close();
     }
@@ -189,7 +199,7 @@ describe("@chimpbase/webhooks", () => {
           body: JSON.stringify({ url: "https://del.com/hook", events: ["order.created"] }),
         }),
       );
-      const created = await createOutcome.response?.json();
+      const created = await readJsonResponse<WebhookResponse>(createOutcome.response);
 
       const deleteOutcome = await host.executeRoute(
         new Request(`http://test.local/_webhooks/${created.id}`, { method: "DELETE" }),
@@ -256,7 +266,7 @@ describe("@chimpbase/webhooks", () => {
         }),
       );
       expect(outcome.response?.status).toBe(200);
-      expect(await outcome.response?.json()).toEqual({ accepted: true });
+      expect(await readJsonResponse<{ accepted: boolean }>(outcome.response)).toEqual({ accepted: true });
     } finally {
       host.close();
     }
