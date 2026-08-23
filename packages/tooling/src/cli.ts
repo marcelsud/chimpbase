@@ -1,5 +1,7 @@
 import { resolve } from "node:path";
 
+import { parseJson } from "@chimpbase/runtime";
+
 import type { ChimpbaseSchemaSyncResult } from "./schema.ts";
 import type { WorkflowContractSyncResult } from "./workflow_contracts.ts";
 
@@ -109,7 +111,7 @@ export async function runChimpbaseCli(
   }
 
   if (typeof args.action === "string") {
-    const actionArgs = typeof args.args === "string" ? JSON.parse(args.args) : [];
+    const actionArgs = typeof args.args === "string" ? parseJson(args.args) : [];
 
     const { host, outcome } = await dependencies.runAction(args.action, actionArgs, {
       projectDir,

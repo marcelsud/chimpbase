@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { restCollections } from "../packages/rest-collections/src/index.ts";
+import { readJsonResponse } from "./support/http.ts";
 
 const cleanupDirs: string[] = [];
 
@@ -66,7 +67,7 @@ describe("@chimpbase/rest-collections", () => {
 
       expect(created).toEqual({
         body: "First note",
-        id: expect.any(String),
+        id: expect.any(String) as string,
         todoId: 42,
       });
 
@@ -74,13 +75,13 @@ describe("@chimpbase/rest-collections", () => {
         new Request("http://rest.test/api/todo-notes?todoId=42"),
       );
       expect(listOutcome.response?.status).toBe(200);
-      expect(await listOutcome.response?.json()).toEqual([created]);
+      expect(await readJsonResponse<Array<typeof created>>(listOutcome.response)).toEqual([created]);
 
       const getOutcome = await host.executeRoute(
         new Request(`http://rest.test/api/todo-notes/${created.id}`),
       );
       expect(getOutcome.response?.status).toBe(200);
-      expect(await getOutcome.response?.json()).toEqual(created);
+      expect(await readJsonResponse<typeof created>(getOutcome.response)).toEqual(created);
 
       const updateOutcome = await host.executeRoute(
         new Request(`http://rest.test/api/todo-notes/${created.id}`, {
@@ -94,7 +95,7 @@ describe("@chimpbase/rest-collections", () => {
         }),
       );
       expect(updateOutcome.response?.status).toBe(200);
-      expect(await updateOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<typeof created>(updateOutcome.response)).toEqual({
         ...created,
         body: "Updated note",
       });
@@ -110,7 +111,7 @@ describe("@chimpbase/rest-collections", () => {
         new Request(`http://rest.test/api/todo-notes/${created.id}`),
       );
       expect(missingOutcome.response?.status).toBe(404);
-      expect(await missingOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<{ error: string }>(missingOutcome.response)).toEqual({
         error: `document not found: ${created.id}`,
       });
     } finally {
@@ -158,7 +159,7 @@ describe("@chimpbase/rest-collections", () => {
         }),
       );
       expect(invalidWriteOutcome.response?.status).toBe(400);
-      expect(await invalidWriteOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<{ error: string }>(invalidWriteOutcome.response)).toEqual({
         error: 'field "extra" is not writable',
       });
 
@@ -166,7 +167,7 @@ describe("@chimpbase/rest-collections", () => {
         new Request("http://rest.test/api/todo-notes?todoId=abc"),
       );
       expect(invalidFilterOutcome.response?.status).toBe(400);
-      expect(await invalidFilterOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<{ error: string }>(invalidFilterOutcome.response)).toEqual({
         error: "invalid number value: abc",
       });
     } finally {
@@ -262,7 +263,7 @@ describe("@chimpbase/rest-collections", () => {
       };
       expect(created).toEqual({
         email: "ana@chimpbase.dev",
-        id: expect.any(String),
+        id: expect.any(String) as string,
         name: "Ana Silva",
         schemaVersion: 2,
       });
@@ -277,7 +278,7 @@ describe("@chimpbase/rest-collections", () => {
       expect(metadataAfterCreate.result).toEqual({
         collectionName: "users",
         documentId: created.id,
-        id: expect.any(String),
+        id: expect.any(String) as string,
         schemaVersion: 2,
       });
 
@@ -293,7 +294,7 @@ describe("@chimpbase/rest-collections", () => {
         }),
       );
       expect(updateOutcome.response?.status).toBe(200);
-      expect(await updateOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<typeof created>(updateOutcome.response)).toEqual({
         email: "ana@chimpbase.dev",
         id: created.id,
         name: "Ana Maria",
@@ -310,7 +311,7 @@ describe("@chimpbase/rest-collections", () => {
       expect(metadataAfterUpdate.result).toEqual({
         collectionName: "users",
         documentId: created.id,
-        id: expect.any(String),
+        id: expect.any(String) as string,
         schemaVersion: 2,
       });
 
@@ -319,7 +320,7 @@ describe("@chimpbase/rest-collections", () => {
         new Request(`http://rest.test/api/users/${legacyUserId}`),
       );
       expect(legacyOutcome.response?.status).toBe(200);
-      expect(await legacyOutcome.response?.json()).toEqual({
+      expect(await readJsonResponse<typeof created>(legacyOutcome.response)).toEqual({
         email: "legacy@chimpbase.dev",
         id: legacyUserId,
         name: "Legacy User",

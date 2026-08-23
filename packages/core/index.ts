@@ -2,6 +2,8 @@ import type {
   ChimpbaseActionHandler,
   ChimpbaseObjectActionHandler,
   ChimpbaseActionRegistration,
+  ChimpbaseContext,
+  ChimpbaseActionRegistrationLike,
   ChimpbaseContextExtensionRegistration,
   ChimpbaseTupleActionHandler,
   ChimpbaseValidator,
@@ -184,11 +186,11 @@ export interface ChimpbaseSubscriptionEntry {
 }
 
 export interface ChimpbaseRegistry {
-  actions: Map<string, ChimpbaseActionRegistration<any, any, any>>;
-  contextExtensions: ChimpbaseContextExtensionRegistration<any>[];
+  actions: Map<string, ChimpbaseActionRegistrationLike>;
+  contextExtensions: ChimpbaseContextExtensionRegistration[];
   crons: Map<string, ChimpbaseCronRegistration>;
   httpHandler: ChimpbaseRouteHandler | null;
-  onStartHooks: Array<{ handler: (ctx: any) => Promise<void> | void; name: string }>;
+  onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; name: string }>;
   onStopHooks: Array<{ handler: () => Promise<void> | void; name: string }>;
   routes: ChimpbaseRouteRegistration[];
   subscriptions: Map<string, ChimpbaseSubscriptionEntry[]>;

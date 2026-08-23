@@ -351,7 +351,7 @@ describe("telemetry stream persistence", () => {
     expect(events[1].event).toBe("trace.end");
     expect(events[1].payload).toMatchObject({
       status: "error",
-      attributes: expect.objectContaining({ error: "boom" }),
+      attributes: expect.objectContaining({ error: "boom" }) as unknown,
     });
   });
 });
@@ -367,5 +367,5 @@ async function readStream(host: ChimpbaseBunHost, streamName: string) {
     );
   }
   const result = await host.executeAction(readActionName);
-  return result.result as Array<{ event: string; payload: any; stream: string; id: number; createdAt: string }>;
+  return result.result as Array<{ event: string; payload: unknown; stream: string; id: number; createdAt: string }>;
 }

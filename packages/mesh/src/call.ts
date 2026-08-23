@@ -1,3 +1,4 @@
+import { isArrayValue } from "@chimpbase/runtime";
 import type { ChimpbaseContext } from "@chimpbase/runtime";
 
 import type { MeshPeerCache } from "./discovery.ts";
@@ -229,7 +230,7 @@ function toInvocationArgs(args: unknown): unknown[] {
   if (args === undefined) {
     return [];
   }
-  if (Array.isArray(args)) {
+  if (isArrayValue(args)) {
     return args;
   }
   return [args];

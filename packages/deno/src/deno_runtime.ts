@@ -44,8 +44,11 @@ export function requireDenoServe(): NonNullable<DenoRuntimeLike["serve"]> {
   return serve;
 }
 
+// `Reflect.get` is declared as returning `any`; the interop is typed once here.
+const reflectGet: (target: object, key: PropertyKey) => unknown = Reflect.get;
+
 function getOptionalDenoRuntime(): DenoRuntimeLike | null {
-  const runtime = Reflect.get(globalThis, "Deno");
+  const runtime = reflectGet(globalThis, "Deno");
   if (!runtime || typeof runtime !== "object") {
     return null;
   }

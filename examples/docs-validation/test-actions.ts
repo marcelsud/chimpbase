@@ -1,10 +1,11 @@
 import { createChimpbase } from "@chimpbase/bun";
 import { action, v, Action, registrationsFrom } from "@chimpbase/runtime";
+import type { ChimpbaseContext } from "@chimpbase/runtime";
 const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server: { port: 0 }, migrationsSql: [`CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT)`] });
 const createProject = action({ args: v.object({ name: v.string(), description: v.string().optional() }), async handler(ctx, input) { const [project] = await ctx.db.query<{ id: number }>("insert into projects (name, description) values (?1, ?2) returning id", [input.name, input.description ?? null]); return project; } });
 const setupWorkspace = action({ args: v.object({ name: v.string() }), async handler(ctx, input) { const project = await ctx.action("createProject", { name: input.name }); return project; } });
 const _validators = v.object({ str: v.string(), num: v.number(), bool: v.boolean(), obj: v.object({ x: v.number() }), arr: v.array(v.string()), enm: v.enum(["a", "b"]), lit: v.literal("active"), uni: v.union(v.string(), v.number()), nul: v.null(), unk: v.unknown(), any: v.any(), opt: v.string().optional(), nullable: v.string().nullable(), arrShort: v.string().array() });
-class ProjectModule { @Action("createProjectDeco") async createProjectDeco(ctx: any, input: any) { return { name: input.name }; } }
+class ProjectModule { @Action("createProjectDeco") async createProjectDeco(_ctx: ChimpbaseContext, input: { name: string }) { return { name: input.name }; } }
 const decoRegs = registrationsFrom(new ProjectModule());
 chimpbase.register({ createProject, setupWorkspace }); chimpbase.register(...decoRegs);
 await chimpbase.start();

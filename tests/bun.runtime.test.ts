@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { readJsonResponse } from "./support/http.ts";
 import {
   action,
   cron,
@@ -254,7 +255,7 @@ describe("bun runtime regression — inline fixtures", () => {
     try {
       const res = await fetch(`${baseUrl}/health`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true });
+      expect(await readJsonResponse<{ ok: boolean }>(res)).toEqual({ ok: true });
     } finally {
       await started.stop();
     }

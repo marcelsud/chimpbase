@@ -24,6 +24,7 @@ import type {
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
+import { parseJson, parseJsonObject, parseStringRecord } from "@chimpbase/runtime";
 
 import { createPostgresKysely } from "./kysely.ts";
 
@@ -321,7 +322,7 @@ export function createPostgresEngineAdapter(
   pool: Pool,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<any> | null = null;
+  let kysely: Kysely<Record<string, never>> | null = null;
   let transactionClient: PoolClient | null = null;
 
   const queryable = (): Queryable => transactionClient ?? pool;
@@ -495,7 +496,7 @@ export function createPostgresEngineAdapter(
       options?: ChimpbaseCollectionFindOptions,
     ): Promise<TDocument[]> {
       return (await findCollectionDocuments(queryable(), name, filter, options)).map((row) =>
-        JSON.parse(row.document_json) as TDocument
+        parseJson(row.document_json) as TDocument
       );
     },
     async collectionFindOne<TDocument = Record<string, unknown>>(
@@ -503,7 +504,7 @@ export function createPostgresEngineAdapter(
       filter: ChimpbaseCollectionFilter,
     ): Promise<TDocument | null> {
       const [row] = await findCollectionDocuments(queryable(), name, filter, { limit: 1 });
-      return row ? JSON.parse(row.document_json) as TDocument : null;
+      return row ? parseJson(row.document_json) as TDocument : null;
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -534,7 +535,7 @@ export function createPostgresEngineAdapter(
     async collectionUpdate(name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> {
       const matched = await findCollectionDocuments(queryable(), name, filter);
       for (const row of matched) {
-        const current = JSON.parse(row.document_json) as Record<string, unknown>;
+        const current = parseJsonObject(row.document_json, "collection document");
         await queryable().query(
           `
             UPDATE _chimpbase_collections
@@ -604,7 +605,7 @@ export function createPostgresEngineAdapter(
         [key],
       );
       const row = result.rows[0];
-      return row ? JSON.parse(row.value_json) as TValue : null;
+      return row ? parseJson(row.value_json) as TValue : null;
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
@@ -773,7 +774,7 @@ export function createPostgresEngineAdapter(
         createdAt: row.created_at,
         event: row.event_name,
         id: row.id,
-        payload: JSON.parse(row.payload_json) as TPayload,
+        payload: parseJson(row.payload_json) as TPayload,
         stream: row.stream_name,
       }));
     },
@@ -854,7 +855,7 @@ export function createPostgresEngineAdapter(
         size: Number(row.size),
         etag: row.etag,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata, "blob metadata"),
         driverRef: row.driver_ref,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -905,7 +906,7 @@ export function createPostgresEngineAdapter(
         size: Number(row.size),
         etag: row.etag,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata, "blob metadata"),
         driverRef: row.driver_ref,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -959,7 +960,7 @@ export function createPostgresEngineAdapter(
         bucket: row.bucket,
         key: row.key,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata, "blob metadata"),
         driverRef: row.driver_ref,
         createdAtMs: Number(row.created_at_ms),
         expiresAtMs: Number(row.expires_at_ms),
@@ -1093,7 +1094,7 @@ export function createPostgresEngineAdapter(
         bucket: row.bucket,
         key: row.key,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata, "blob metadata"),
         driverRef: row.driver_ref,
         createdAtMs: Number(row.created_at_ms),
         expiresAtMs: Number(row.expires_at_ms),
@@ -1154,7 +1155,7 @@ function sliceBlobList(
 }
 
 function normalizePostgresSql(sql: string): string {
-  return sql.replace(/\?(\d+)/g, (_match, index) => `$${index}`);
+  return sql.replace(/\?(\d+)/g, (_match: string, index: string) => `$${index}`);
 }
 
 async function persistEvents(queryable: Queryable, events: ChimpbaseEventRecord[]): Promise<void> {
@@ -1190,7 +1191,7 @@ async function findCollectionDocuments(
   );
 
   const matched = result.rows.filter((row) => {
-    const document = JSON.parse(row.document_json) as Record<string, unknown>;
+    const document = parseJsonObject(row.document_json, "collection document");
     return Object.entries(filter).every(([key, value]) => document[key] === value);
   });
 

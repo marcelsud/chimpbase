@@ -268,7 +268,7 @@ describe("opentelemetry integration", () => {
     const {
       InMemorySpanExporter: Exporter,
       SimpleSpanProcessor: SimpleSP,
-    } = await import("@opentelemetry/sdk-trace-base");
+    }: typeof import("@opentelemetry/sdk-trace-base") = await import("@opentelemetry/sdk-trace-base");
 
     const exporter = new Exporter();
 

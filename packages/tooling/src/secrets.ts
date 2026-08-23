@@ -1,7 +1,9 @@
+import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import type { ChimpbaseProjectConfig, ChimpbaseSecretsSource } from "@chimpbase/core";
+import { tryParseJson } from "@chimpbase/runtime";
 
 const DEFAULT_ENV_FILE = ".env";
 const DEFAULT_SECRETS_DIR = "/run/secrets";
@@ -89,7 +91,7 @@ async function preloadDotenvFile(path: string, values: Map<string, string>): Pro
 }
 
 async function preloadSecretDirectory(path: string, values: Map<string, string>): Promise<void> {
-  let entries;
+  let entries: Dirent[];
   try {
     entries = await readdir(path, { withFileTypes: true });
   } catch {
@@ -117,7 +119,8 @@ function parseDotenvValue(raw: string): string {
   const trimmed = raw.trim();
 
   if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return JSON.parse(trimmed) as string;
+    const decoded = tryParseJson(trimmed);
+    return typeof decoded === "string" ? decoded : trimmed.slice(1, -1);
   }
 
   if (trimmed.startsWith("'") && trimmed.endsWith("'")) {

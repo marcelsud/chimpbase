@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { ChimpbaseEventBus, ChimpbaseEventBusCallback, ChimpbaseEventRecord } from "@chimpbase/core";
+import { parseJson } from "@chimpbase/runtime";
 
 export interface PostgresPollingEventBusOptions {
   pollIntervalMs?: number;
@@ -80,7 +81,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
       const events: ChimpbaseEventRecord[] = result.rows.map((row) => ({
         id: row.id,
         name: row.event_name,
-        payload: JSON.parse(row.payload_json),
+        payload: parseJson(row.payload_json),
         payloadJson: row.payload_json,
       }));
 

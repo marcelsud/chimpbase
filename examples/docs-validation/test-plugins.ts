@@ -1,7 +1,7 @@
 import { createChimpbase } from "@chimpbase/bun";
 import { plugin, action, worker, subscription, v } from "@chimpbase/runtime";
 const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server: { port: 0 } });
-const todoPlugin = plugin({ name: "todos" }, action({ name: "createTodoPlugin", args: v.object({ title: v.string() }), async handler(ctx, input) { ctx.pubsub.publish("todo.created", { title: input.title }); return { id: 1, title: input.title }; } }), subscription("todo.created", async (ctx, event: any) => { await ctx.enqueue("todo.index", event); }, { idempotent: true, name: "indexTodoOnCreate" }), worker("todo.index", async () => {}));
+const todoPlugin = plugin({ name: "todos" }, action({ name: "createTodoPlugin", args: v.object({ title: v.string() }), async handler(ctx, input) { ctx.pubsub.publish("todo.created", { title: input.title }); return { id: 1, title: input.title }; } }), subscription("todo.created", async (ctx, event: { title: string }) => { await ctx.enqueue("todo.index", event); }, { idempotent: true, name: "indexTodoOnCreate" }), worker("todo.index", async () => {}));
 const corePlugin = plugin({ name: "core" }, action({ name: "coreAction", args: v.object({}), async handler() { return { core: true }; } }));
 const featurePlugin = plugin({ name: "feature", dependsOn: [corePlugin] }, action({ name: "featureAction", args: v.object({}), async handler() { return { feature: true }; } }));
 const anotherPlugin = plugin({ name: "another", dependsOn: ["core"] }, action({ name: "anotherAction", args: v.object({}), async handler() { return { another: true }; } }));

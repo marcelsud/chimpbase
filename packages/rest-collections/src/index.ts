@@ -1,6 +1,8 @@
 import {
   action,
+  isJsonObject,
   plugin,
+  readJsonBody,
   route,
   type ChimpbaseCollectionFilter,
   type ChimpbasePluginDependency,
@@ -406,13 +408,13 @@ function normalizeFilterParsers(
     return new Map();
   }
 
-  if (Array.isArray(fields)) {
-    return new Map(fields.map((field) => [field, parseStringValue]));
+  if (isJsonObject(fields)) {
+    return new Map(
+      Object.entries(fields).map(([field, parser]) => [field, createFilterParser(parser)]),
+    );
   }
 
-  return new Map(
-    Object.entries(fields).map(([field, parser]) => [field, createFilterParser(parser)]),
-  );
+  return new Map(fields.map((field) => [field, parseStringValue]));
 }
 
 function normalizeWritableFields(
@@ -618,7 +620,7 @@ function getAllowedDocumentMethods(
 async function parseJsonObject(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
-    body = await request.json();
+    body = await readJsonBody(request);
   } catch {
     throw badRequest("request body must be valid JSON");
   }

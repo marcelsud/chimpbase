@@ -17,6 +17,7 @@ import {
   startPostgresDocker,
   type PostgresDockerHandle,
 } from "../packages/tooling/src/postgres_docker.ts";
+import { readJsonResponse } from "./support/http.ts";
 import { installLocalPackage } from "./support/local_package.ts";
 
 interface FakeDenoRuntimeOptions {
@@ -33,7 +34,7 @@ interface FakeDenoRuntimeOptions {
 const repoRoot = resolve(import.meta.dir, "..");
 const dockerAvailable = await canUseDocker();
 const cleanupDirs: string[] = [];
-const originalDeno = Reflect.get(globalThis, "Deno");
+const originalDeno: unknown = Reflect.get(globalThis, "Deno");
 // SQLite for @chimpbase/deno is validated in a real Deno process because Bun is not the target runtime here.
 const bunSupportsBetterSqlite3 = false;
 
@@ -272,7 +273,7 @@ if (!dockerAvailable) {
           ),
         }),
         async handler(_ctx, input) {
-          const created = [];
+          const created: Array<Awaited<ReturnType<typeof createAccount>>> = [];
           for (const account of input.accounts) {
             created.push(await createAccount(account));
           }
@@ -672,7 +673,7 @@ if (!dockerAvailable) {
 
         const routeOutcome = await host.executeRoute(new Request("http://deno.test/audit"));
         expect(routeOutcome.response?.status).toBe(200);
-        expect(await routeOutcome.response?.json()).toEqual([{ value: "from-load" }]);
+        expect(await readJsonResponse<Array<{ value: string }>>(routeOutcome.response)).toEqual([{ value: "from-load" }]);
 
         const started = await host.start({ runWorker: false, serve: true });
         expect(started.server?.port).toBe(4821);
@@ -682,11 +683,11 @@ if (!dockerAvailable) {
 
         const healthResponse = await routeHandler(new Request("http://127.0.0.1:4821/health"));
         expect(healthResponse.status).toBe(200);
-        expect(await healthResponse.json()).toEqual({ ok: true });
+        expect(await readJsonResponse<{ ok: boolean }>(healthResponse)).toEqual({ ok: true });
 
         const auditResponse = await routeHandler(new Request("http://127.0.0.1:4821/audit"));
         expect(auditResponse.status).toBe(200);
-        expect(await auditResponse.json()).toEqual([{ value: "from-load" }]);
+        expect(await readJsonResponse<Array<{ value: string }>>(auditResponse)).toEqual([{ value: "from-load" }]);
 
         await started.stop();
         expect(shutdownCalled).toBe(true);

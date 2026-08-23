@@ -33,6 +33,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Unsafe any check
+        run: bun run check:any
+
       - name: Unit tests
         run: bun test
 

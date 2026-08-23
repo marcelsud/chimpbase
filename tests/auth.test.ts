@@ -4,7 +4,17 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { chimpbaseAuth, type AuthScope } from "../packages/auth/src/index.ts";
+import { chimpbaseAuth, type AuthApiKey, type AuthScope, type AuthUser } from "../packages/auth/src/index.ts";
+import { readJsonResponse } from "./support/http.ts";
+
+/** The API key route returns the raw key once, alongside the stored record's public fields. */
+interface CreatedApiKey extends Omit<AuthApiKey, "keyHash" | "revokedAt" | "scopes"> {
+  key: string;
+  scopes: string[];
+}
+
+/** Listing keys returns the public fields only: the raw key and its hash are never included. */
+type ListedApiKey = Omit<CreatedApiKey, "key"> & { key?: undefined; keyHash?: undefined };
 
 const cleanupDirs: string[] = [];
 
@@ -53,7 +63,7 @@ describe("@chimpbase/auth", () => {
     try {
       const outcome = await host.executeRoute(new Request("http://test.local/some-path"));
       expect(outcome.response?.status).toBe(401);
-      expect(await outcome.response?.json()).toEqual({ error: "missing API key" });
+      expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "missing API key" });
     } finally {
       host.close();
     }
@@ -110,9 +120,9 @@ describe("@chimpbase/auth", () => {
         }),
       );
       expect(outcome.response?.status).toBe(201);
-      const user = await outcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(outcome.response);
       expect(user).toEqual(
-        expect.objectContaining({ email: "admin@test.com", name: "Admin", role: "user" }),
+        expect.objectContaining({ email: "admin@test.com", name: "Admin", role: "user" }) as AuthUser,
       );
       expect(user.id).toBeDefined();
     } finally {
@@ -135,7 +145,7 @@ describe("@chimpbase/auth", () => {
         new Request("http://test.local/_auth/users", { headers: authHeaders() }),
       );
       expect(outcome.response?.status).toBe(200);
-      const users = await outcome.response?.json();
+      const users = await readJsonResponse<AuthUser[]>(outcome.response);
       expect(users).toHaveLength(1);
       expect(users[0].email).toBe("a@test.com");
     } finally {
@@ -153,7 +163,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ email: "del@test.com", name: "Del" }),
         }),
       );
-      const user = await createOutcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(createOutcome.response);
 
       const deleteOutcome = await host.executeRoute(
         new Request(`http://test.local/_auth/users/${user.id}`, {
@@ -166,7 +176,7 @@ describe("@chimpbase/auth", () => {
       const listOutcome = await host.executeRoute(
         new Request("http://test.local/_auth/users", { headers: authHeaders() }),
       );
-      const users = await listOutcome.response?.json();
+      const users = await readJsonResponse<AuthUser[]>(listOutcome.response);
       expect(users).toHaveLength(0);
     } finally {
       host.close();
@@ -185,7 +195,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ email: "key@test.com", name: "Key User" }),
         }),
       );
-      const user = await userOutcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(userOutcome.response);
 
       const keyOutcome = await host.executeRoute(
         new Request(`http://test.local/_auth/users/${user.id}/keys`, {
@@ -195,7 +205,7 @@ describe("@chimpbase/auth", () => {
         }),
       );
       expect(keyOutcome.response?.status).toBe(201);
-      const keyData = await keyOutcome.response?.json();
+      const keyData = await readJsonResponse<CreatedApiKey>(keyOutcome.response);
       expect(keyData.key).toBeDefined();
       expect(keyData.key.length).toBe(64);
       expect(keyData.keyPrefix).toBe(keyData.key.substring(0, 8));
@@ -215,7 +225,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ email: "auth@test.com", name: "Auth User" }),
         }),
       );
-      const user = await userOutcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(userOutcome.response);
 
       const keyOutcome = await host.executeRoute(
         new Request(`http://test.local/_auth/users/${user.id}/keys`, {
@@ -224,7 +234,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ label: "auth-key" }),
         }),
       );
-      const keyData = await keyOutcome.response?.json();
+      const keyData = await readJsonResponse<CreatedApiKey>(keyOutcome.response);
 
       // Use the generated key
       const authOutcome = await host.executeRoute(
@@ -247,7 +257,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ email: "list@test.com", name: "List" }),
         }),
       );
-      const user = await userOutcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(userOutcome.response);
 
       await host.executeRoute(
         new Request(`http://test.local/_auth/users/${user.id}/keys`, {
@@ -261,7 +271,7 @@ describe("@chimpbase/auth", () => {
         new Request(`http://test.local/_auth/users/${user.id}/keys`, { headers: authHeaders() }),
       );
       expect(listOutcome.response?.status).toBe(200);
-      const keys = await listOutcome.response?.json();
+      const keys = await readJsonResponse<ListedApiKey[]>(listOutcome.response);
       expect(keys).toHaveLength(1);
       expect(keys[0].keyPrefix).toBeDefined();
       expect(keys[0].key).toBeUndefined();
@@ -281,7 +291,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ email: "revoke@test.com", name: "Revoke" }),
         }),
       );
-      const user = await userOutcome.response?.json();
+      const user = await readJsonResponse<AuthUser>(userOutcome.response);
 
       const keyOutcome = await host.executeRoute(
         new Request(`http://test.local/_auth/users/${user.id}/keys`, {
@@ -290,7 +300,7 @@ describe("@chimpbase/auth", () => {
           body: JSON.stringify({ label: "revokable" }),
         }),
       );
-      const keyData = await keyOutcome.response?.json();
+      const keyData = await readJsonResponse<CreatedApiKey>(keyOutcome.response);
 
       // Revoke
       const revokeOutcome = await host.executeRoute(
@@ -539,7 +549,7 @@ describe("@chimpbase/auth", () => {
         }),
       );
       expect(outcome.response?.status).toBe(403);
-      expect(await outcome.response?.json()).toEqual({ error: "insufficient permissions" });
+      expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "insufficient permissions" });
     } finally {
       host.close();
     }

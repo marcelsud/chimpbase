@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
+import type { ChimpbaseRegistration } from "../packages/runtime/index.ts";
 import { loadProjectAppDefinition } from "../packages/tooling/src/app.ts";
 import { loadProjectConfig } from "../packages/tooling/src/config.ts";
 import {
@@ -291,7 +292,7 @@ describe("@chimpbase/tooling", () => {
       expect.objectContaining({
         kind: "action",
         name: "chimpbase.app.ts#health",
-      }),
+      }) as ChimpbaseRegistration,
     );
   });
 });

@@ -1,8 +1,9 @@
 import type { Kysely } from "kysely";
 
 import type {
-  ChimpbaseActionRegistration,
   ChimpbaseActionInvoker,
+  ChimpbaseActionRegistration,
+  ChimpbaseActionRegistrationLike,
   ChimpbaseBlobCopyOptions,
   ChimpbaseBlobCreateUploadOptions,
   ChimpbaseBlobDeleteManyResult,
@@ -180,7 +181,7 @@ interface SubscriptionQueuePayload {
   payloadJson: string;
 }
 
-type WorkflowRunDirective = ChimpbaseWorkflowRunResult<any, any>;
+type WorkflowRunDirective = ChimpbaseWorkflowRunResult<unknown, unknown>;
 
 const INTERNAL_CRON_QUEUE_NAME = "__chimpbase.cron.run";
 const INTERNAL_SUBSCRIPTION_QUEUE_NAME = "__chimpbase.subscription.run";
@@ -933,7 +934,7 @@ export class ChimpbaseEngine {
     const blobsClient = this.createBlobsClient();
     const env: ChimpbaseRouteEnv = {
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
-        nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+        nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
       ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
       blobs: blobsClient,
@@ -1174,7 +1175,7 @@ export class ChimpbaseEngine {
         }
       },
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
-        nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+        nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
       ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
     };
@@ -1611,7 +1612,7 @@ export class ChimpbaseEngine {
     return {
       ...params,
       action: async <TResult = unknown>(
-        nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+        nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: unknown[]
       ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
       complete: (state = params.state, options) => ({
@@ -2113,7 +2114,7 @@ export class ChimpbaseEngine {
   }
 
   private async invokeAction<TResult = unknown>(
-    nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+    nameOrReference: string | ChimpbaseActionRegistrationLike,
     args: unknown[],
   ): Promise<TResult> {
     if (typeof nameOrReference === "string") {
@@ -2212,7 +2213,7 @@ export class ChimpbaseEngine {
 
   private async runWithActionInvoker<TResult>(callback: () => TResult | Promise<TResult>): Promise<TResult> {
     const invoker: ChimpbaseActionInvoker = async <TResult = unknown>(
-      nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+      nameOrReference: string | ChimpbaseActionRegistrationLike,
       args: unknown[],
     ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args);
 
@@ -2656,7 +2657,7 @@ function normalizeActionArgs(args: unknown): unknown[] {
 }
 
 function normalizeActionReferenceArgs(
-  reference: ChimpbaseActionRegistration<any, any, any>,
+  reference: ChimpbaseActionRegistrationLike,
   args: unknown[],
 ): unknown[] {
   if (!reference.args) {
