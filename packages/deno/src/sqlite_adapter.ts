@@ -348,7 +348,7 @@ export function createSqliteEngineAdapter(
   db: SqliteDatabase,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<any> | null = null;
+  let kysely: Kysely<Record<string, never>> | null = null;
 
   return {
     async advanceCronSchedule(
@@ -1104,10 +1104,10 @@ function createSqliteDatabase(db: RawSqliteDatabase): SqliteDatabase {
       return {
         reader: statement.columns().length > 0 || statementProducesRows(sql),
         all(...params: SqliteBinding[]) {
-          return statement.all(...params as any[]);
+          return statement.all(...params);
         },
         run(...params: SqliteBinding[]) {
-          const result = statement.run(...params as any[]);
+          const result = statement.run(...params);
           return {
             changes: typeof result.changes === "bigint" ? Number(result.changes) : result.changes,
             lastInsertRowid: result.lastInsertRowid,

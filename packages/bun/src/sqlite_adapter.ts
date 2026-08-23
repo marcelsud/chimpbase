@@ -327,7 +327,7 @@ export function createSqliteEngineAdapter(
   db: Database,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<any> | null = null;
+  let kysely: Kysely<Record<string, never>> | null = null;
 
   return {
     async advanceCronSchedule(

@@ -2,6 +2,7 @@ import {
   action,
   contextExtension,
   cron,
+  isArrayValue,
   onStart,
   onStop,
   plugin,
@@ -219,7 +220,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
             throw new Error("invalid rpc envelope");
           }
 
-          const invocationArgs = Array.isArray(rawEnvelope.args) ? rawEnvelope.args : [rawEnvelope.args];
+          const invocationArgs = isArrayValue(rawEnvelope.args) ? rawEnvelope.args : [rawEnvelope.args];
           return await ctx.action<unknown[], unknown>(rawEnvelope.actionName, ...invocationArgs);
         },
       ),

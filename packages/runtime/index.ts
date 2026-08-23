@@ -2233,6 +2233,14 @@ export function isStringRecord(value: unknown): value is Record<string, string> 
   return isJsonObject(value) && Object.values(value).every((entry) => typeof entry === "string");
 }
 
+/**
+ * Read a request or response body as JSON. The platform declares `json()` as
+ * returning `any`; this hands callers `unknown` to narrow instead.
+ */
+export async function readJsonBody(source: { json(): Promise<unknown> }): Promise<unknown> {
+  return await source.json();
+}
+
 /** Parse JSON that must decode to an object, throwing when it does not. */
 export function parseJsonObject(text: string, label = "value"): Record<string, unknown> {
   const parsed = parseJson(text);

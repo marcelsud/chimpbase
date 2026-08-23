@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
+import type { Stats } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -69,7 +70,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       const tempTarget = `${target}.tmp-${Date.now()}`;
       const writeStream = createWriteStream(tempTarget);
       const reader = webToNode(body);
-      reader.on("data", (chunk) => {
+      reader.on("data", (chunk: unknown) => {
         const buf = toBuffer(chunk);
         hash.update(buf);
         size += buf.byteLength;
@@ -79,7 +80,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
-      let statResult;
+      let statResult: Stats;
       try {
         statResult = await stat(driverRef);
       } catch (error) {
@@ -112,7 +113,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       const writer = createWriteStream(target);
       const hash = createHash("sha256");
       let size = 0;
-      reader.on("data", (chunk) => {
+      reader.on("data", (chunk: unknown) => {
         const buf = toBuffer(chunk);
         hash.update(buf);
         size += buf.byteLength;
@@ -128,7 +129,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       let size = 0;
       const writer = createWriteStream(target);
       const reader = webToNode(body);
-      reader.on("data", (chunk) => {
+      reader.on("data", (chunk: unknown) => {
         const buf = toBuffer(chunk);
         hash.update(buf);
         size += buf.byteLength;
@@ -146,7 +147,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       try {
         for (const part of ordered) {
           const reader = createReadStream(part.driverRef);
-          reader.on("data", (chunk) => {
+          reader.on("data", (chunk: unknown) => {
             const buf = toBuffer(chunk);
             hash.update(buf);
             size += buf.byteLength;

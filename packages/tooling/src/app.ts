@@ -10,6 +10,7 @@ import {
 import {
   hasChimpbaseActionRegistrationName,
   isChimpbaseActionRegistration,
+  isJsonObject,
   setChimpbaseActionRegistrationName,
 } from "@chimpbase/runtime";
 
@@ -46,7 +47,11 @@ export async function loadChimpbaseAppDefinitionModule(
   await writeFile(tempModulePath, await readFile(modulePath, "utf8"));
 
   try {
-    const moduleExports = await import(pathToFileURL(tempModulePath).href);
+    const moduleExports: unknown = await import(pathToFileURL(tempModulePath).href);
+    if (!isJsonObject(moduleExports)) {
+      throw new Error(`project app module did not resolve to a module namespace: ${modulePath}`);
+    }
+
     return coerceChimpbaseAppDefinition(moduleExports, modulePath, projectDir);
   } finally {
     await rm(tempModulePath, { force: true });

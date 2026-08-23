@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 import type { CompiledQuery, Kysely, QueryResult } from "kysely";
 
@@ -346,7 +346,7 @@ export function createSqliteEngineAdapter(
   db: SqliteDatabase,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<any> | null = null;
+  let kysely: Kysely<Record<string, never>> | null = null;
 
   return {
     async advanceCronSchedule(
@@ -1087,10 +1087,10 @@ function createSqliteDatabase(db: DatabaseSync): SqliteDatabase {
       return {
         columnNames: statement.columns().map((column) => column.name),
         all(...params: SqliteBinding[]) {
-          return statement.all(...params as any[]);
+          return statement.all(...params as SQLInputValue[]);
         },
         run(...params: SqliteBinding[]) {
-          const result = statement.run(...params as any[]);
+          const result = statement.run(...params as SQLInputValue[]);
           return {
             changes: typeof result.changes === "bigint" ? Number(result.changes) : result.changes,
             lastInsertRowid: result.lastInsertRowid,

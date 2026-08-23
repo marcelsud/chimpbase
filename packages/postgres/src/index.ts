@@ -322,7 +322,7 @@ export function createPostgresEngineAdapter(
   pool: Pool,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<any> | null = null;
+  let kysely: Kysely<Record<string, never>> | null = null;
   let transactionClient: PoolClient | null = null;
 
   const queryable = (): Queryable => transactionClient ?? pool;
@@ -1155,7 +1155,7 @@ function sliceBlobList(
 }
 
 function normalizePostgresSql(sql: string): string {
-  return sql.replace(/\?(\d+)/g, (_match, index) => `$${index}`);
+  return sql.replace(/\?(\d+)/g, (_match: string, index: string) => `$${index}`);
 }
 
 async function persistEvents(queryable: Queryable, events: ChimpbaseEventRecord[]): Promise<void> {

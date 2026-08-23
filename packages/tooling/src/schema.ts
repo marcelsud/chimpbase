@@ -127,7 +127,7 @@ async function generateChimpbaseSchemaSnapshot(
     const pool = new Pool({
       connectionString: databaseUrl,
     });
-    const db = new Kysely<any>({
+    const db = new Kysely<Record<string, never>>({
       dialect: new PostgresDialect({ pool }),
     });
 

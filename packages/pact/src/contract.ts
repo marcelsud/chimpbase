@@ -58,8 +58,8 @@ export function pact(input: ChimpbasePactInput): ChimpbasePact {
 
 export const interaction = {
   action<
-    TArgsValidator extends ChimpbaseValidator<any> | undefined = undefined,
-    TResultValidator extends ChimpbaseValidator<any> | undefined = undefined,
+    TArgsValidator extends ChimpbaseValidator<unknown> | undefined = undefined,
+    TResultValidator extends ChimpbaseValidator<unknown> | undefined = undefined,
   >(
     name: string,
     options: {
@@ -82,7 +82,7 @@ export const interaction = {
     };
   },
 
-  event<TValidator extends ChimpbaseValidator<any> | undefined = undefined>(
+  event<TValidator extends ChimpbaseValidator<unknown> | undefined = undefined>(
     eventName: string,
     options: {
       states?: string[];
@@ -99,7 +99,7 @@ export const interaction = {
     };
   },
 
-  worker<TValidator extends ChimpbaseValidator<any> | undefined = undefined>(
+  worker<TValidator extends ChimpbaseValidator<unknown> | undefined = undefined>(
     queueName: string,
     options: {
       states?: string[];

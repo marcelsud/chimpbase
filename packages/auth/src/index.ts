@@ -2,6 +2,7 @@ import {
   action,
   isStringArray,
   plugin,
+  readJsonBody,
   route,
   tryParseJson,
   type ChimpbasePluginDependency,
@@ -216,7 +217,7 @@ function jsonError(status: number, error: string, headers?: Record<string, strin
 async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
-    body = await request.json();
+    body = await readJsonBody(request);
   } catch {
     throw new AuthRequestError(400, "request body must be valid JSON");
   }
@@ -683,8 +684,8 @@ function optionalStringArray(body: Record<string, unknown>, field: string): stri
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+  if (!isStringArray(value)) {
     throw new AuthRequestError(400, `"${field}" must be an array of strings`);
   }
-  return value as string[];
+  return value;
 }

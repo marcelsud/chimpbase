@@ -1,8 +1,11 @@
 import {
   action,
+  isStringArray,
   plugin,
+  readJsonBody,
   route,
   subscription,
+  tryParseJson,
   worker,
   type ChimpbasePluginDependency,
   type ChimpbasePluginRegistration,
@@ -328,12 +331,8 @@ function nowIso(): string {
 }
 
 function parseEvents(events: string): string[] {
-  try {
-    const parsed = JSON.parse(events);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const parsed = tryParseJson(events);
+  return isStringArray(parsed) ? parsed : [];
 }
 
 function normalizePath(path: string): string {
@@ -356,7 +355,7 @@ function jsonError(status: number, error: string): Response {
 async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
-    body = await request.json();
+    body = await readJsonBody(request);
   } catch {
     throw new WebhooksRequestError(400, "request body must be valid JSON");
   }
@@ -840,7 +839,7 @@ function requireString(body: Record<string, unknown>, field: string): string {
 
 function requireStringArray(body: Record<string, unknown>, field: string): string[] {
   const value = body[field];
-  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+  if (!isStringArray(value)) {
     throw new WebhooksRequestError(400, `"${field}" is required and must be an array of strings`);
   }
   if (value.length === 0) {
@@ -865,10 +864,10 @@ function optionalStringArray(body: Record<string, unknown>, field: string): stri
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+  if (!isStringArray(value)) {
     throw new WebhooksRequestError(400, `"${field}" must be an array of strings`);
   }
-  return value as string[];
+  return value;
 }
 
 function optionalBoolean(body: Record<string, unknown>, field: string): boolean | undefined {

@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 // Reports unsafe `any` in authored TypeScript: explicit `any` annotations plus
-// expressions whose inferred type is `any` (or `any[]`). `any` erases the type
-// evidence at package and runtime boundaries, so the repository gates on zero
-// findings instead of trusting review to catch them.
+// values that flow out of a platform boundary as `any` (or `any[]`). `any`
+// erases the type evidence at package and runtime boundaries, so the repository
+// gates on zero findings instead of trusting review to catch them.
+//
+// A value that is immediately given a declared type — `expr as T`,
+// `expr satisfies T`, the initializer of an annotated declaration, or the
+// `return` of a function with a declared return type — is not reported: the
+// `any` stops there instead of spreading, which is what localizing platform
+// interop behind a typed adapter looks like. Only the outermost expression of
+// an `any` chain is reported, so one leaked value counts once.
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -65,6 +72,46 @@ const isReadExpression = (node) =>
   || ts.isNonNullExpression(node)
   || ts.isAsExpression(node);
 
+const hasDeclaredType = (node) => Boolean(node && "type" in node && node.type);
+
+// The declared type an expression is immediately handed to, if any.
+const isAnnotatedBoundary = (node) => {
+  const parent = node.parent;
+  if (!parent) {
+    return false;
+  }
+
+  if (ts.isAsExpression(parent) || ts.isSatisfiesExpression(parent) || ts.isTypeAssertionExpression(parent)) {
+    return true;
+  }
+
+  if (
+    (ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent) || ts.isParameter(parent))
+    && parent.initializer === node
+  ) {
+    return hasDeclaredType(parent);
+  }
+
+  if (ts.isReturnStatement(parent)) {
+    const fn = ts.findAncestor(parent, (candidate) => ts.isFunctionLike(candidate));
+    return hasDeclaredType(fn);
+  }
+
+  return false;
+};
+
+// Inner nodes of an `any` chain are skipped so the leak is reported once, at
+// the point where it either stops or escapes.
+const isInsideAnyExpression = (node) => {
+  const parent = node.parent;
+  if (!parent || !ts.isExpressionNode(parent)) {
+    return false;
+  }
+
+  const parentType = checker.getTypeAtLocation(parent);
+  return isAnyType(parentType) || isAnyArrayType(parentType);
+};
+
 const findings = [];
 
 const report = (node, message) => {
@@ -93,10 +140,9 @@ for (const file of program.getSourceFiles()) {
       // nothing else in a type position reads a value
     } else if (isReadExpression(node) && !isDeclarationName(node)) {
       const type = checker.getTypeAtLocation(node);
-      if (isAnyType(type)) {
-        report(node, "expression is typed `any`");
-      } else if (isAnyArrayType(type)) {
-        report(node, "expression is typed `any[]`");
+      const isAny = isAnyType(type);
+      if ((isAny || isAnyArrayType(type)) && !isAnnotatedBoundary(node) && !isInsideAnyExpression(node)) {
+        report(node, isAny ? "expression is typed `any`" : "expression is typed `any[]`");
       }
     } else if (
       (ts.isParameter(node) || ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)

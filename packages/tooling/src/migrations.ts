@@ -9,6 +9,7 @@ import {
   type ChimpbaseMigrationsDefinition,
   type ChimpbaseProjectConfig,
 } from "@chimpbase/core";
+import { isArrayValue, isJsonObject } from "@chimpbase/runtime";
 import { loadProjectAppDefinition } from "./app.ts";
 
 export interface SqlMigration extends ChimpbaseMigration {}
@@ -125,7 +126,11 @@ export async function loadProjectMigrationsDefinition(
 
   const moduleUrl = pathToFileURL(modulePath);
   moduleUrl.searchParams.set("chimpbase_migrations", globalThis.crypto.randomUUID());
-  const moduleExports = await import(moduleUrl.href);
+  const moduleExports: unknown = await import(moduleUrl.href);
+  if (!isJsonObject(moduleExports)) {
+    throw new Error(`project migrations module did not resolve to a module namespace: ${modulePath}`);
+  }
+
   return coerceProjectMigrationsDefinition(moduleExports, modulePath);
 }
 
@@ -174,7 +179,7 @@ function coerceMigrationList(
     return undefined;
   }
 
-  if (!Array.isArray(value)) {
+  if (!isArrayValue(value)) {
     throw new Error(`project migrations for ${engine} must be an array: ${modulePath}`);
   }
 

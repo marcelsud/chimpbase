@@ -81,7 +81,7 @@ class ChimpbasePostgresDialect implements Dialect {
     return new ChimpbaseKyselyDriver(this.executor);
   }
 
-  createIntrospector(db: Kysely<any>): DatabaseIntrospector {
+  createIntrospector(db: Kysely<Record<string, never>>): DatabaseIntrospector {
     return new PostgresIntrospector(db);
   }
 
