@@ -47,6 +47,11 @@ const isAnyArrayType = (type) => {
 // would double-count the declaration's own annotation.
 const isDeclarationName = (node) => {
   const parent = node.parent;
+  if (parent && ts.isTypePredicateNode(parent) && parent.parameterName === node) {
+    // The subject of `x is T` names a parameter; it reads no value.
+    return true;
+  }
+
   return Boolean(parent && "name" in parent && parent.name === node);
 };
 
@@ -79,9 +84,13 @@ for (const file of program.getSourceFiles()) {
     continue;
   }
 
-  const visit = (node) => {
+  // Identifiers inside a type node name types, not values, so only the `any`
+  // keyword itself is reported once the walk enters one.
+  const visit = (node, inType = false) => {
     if (node.kind === ts.SyntaxKind.AnyKeyword) {
       report(node, "explicit `any` annotation");
+    } else if (inType) {
+      // nothing else in a type position reads a value
     } else if (isReadExpression(node) && !isDeclarationName(node)) {
       const type = checker.getTypeAtLocation(node);
       if (isAnyType(type)) {
@@ -90,16 +99,20 @@ for (const file of program.getSourceFiles()) {
         report(node, "expression is typed `any[]`");
       }
     } else if (
-      (ts.isParameter(node) || ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node))
-      && !node.type
+      (ts.isParameter(node) || ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)
+        || ts.isBindingElement(node))
+      && !("type" in node && node.type)
+      && ts.isIdentifier(node.name)
     ) {
-      const type = checker.getTypeAtLocation(node);
+      // Binding patterns are reported through their individual binding elements,
+      // so only named declarations are checked here.
+      const type = checker.getTypeAtLocation(node.name);
       if (isAnyType(type) || isAnyArrayType(type)) {
         report(node, "declaration is inferred as `any`");
       }
     }
 
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child, inType || ts.isTypeNode(node)));
   };
 
   visit(file);

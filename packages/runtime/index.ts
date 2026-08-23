@@ -1564,9 +1564,9 @@ function scanRegistrationSource(
   entryOrGroup: ChimpbaseRegistrationSource,
   state: ChimpbaseRegistrationResolutionState,
 ): void {
-  if (Array.isArray(entryOrGroup)) {
+  if (isArrayValue(entryOrGroup)) {
     for (const entry of entryOrGroup) {
-      scanRegistrationSource(entry, state);
+      scanRegistrationSource(entry as ChimpbaseRegistrationSource, state);
     }
     return;
   }
@@ -1577,9 +1577,9 @@ function scanRegistrationSource(
   }
 
   for (const [key, value] of Object.entries(entryOrGroup)) {
-    if (Array.isArray(value)) {
+    if (isArrayValue(value)) {
       for (const entry of value) {
-        scanRegistrationSource(entry, state);
+        scanRegistrationSource(entry as ChimpbaseRegistrationSource, state);
       }
       continue;
     }
@@ -1631,9 +1631,9 @@ function expandRegistrationSource(
   entryOrGroup: ChimpbaseRegistrationSource,
   state: ChimpbaseRegistrationResolutionState,
 ): void {
-  if (Array.isArray(entryOrGroup)) {
+  if (isArrayValue(entryOrGroup)) {
     for (const entry of entryOrGroup) {
-      expandRegistrationSource(entry, state);
+      expandRegistrationSource(entry as ChimpbaseRegistrationSource, state);
     }
     return;
   }
@@ -1644,9 +1644,9 @@ function expandRegistrationSource(
   }
 
   for (const [key, value] of Object.entries(entryOrGroup)) {
-    if (Array.isArray(value)) {
+    if (isArrayValue(value)) {
       for (const entry of value) {
-        expandRegistrationSource(entry, state);
+        expandRegistrationSource(entry as ChimpbaseRegistrationSource, state);
       }
       continue;
     }
@@ -1963,7 +1963,7 @@ function createValidator<TValue>(
     array() {
       return createValidator<TValue[]>({
         parser(value, path) {
-          if (!Array.isArray(value)) {
+          if (!isArrayValue(value)) {
             throw new Error(`${path} must be an array`);
           }
 
@@ -2210,14 +2210,22 @@ export function tryParseJson(text: string): unknown {
   }
 }
 
+/**
+ * Narrow an unknown value to an array. `Array.isArray` widens its argument to
+ * `any[]`, which erases the element type; this keeps the elements `unknown`.
+ */
+export function isArrayValue(value: unknown): value is unknown[] {
+  return Array.isArray(value);
+}
+
 /** Narrow an unknown value to a JSON object. */
 export function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !isArrayValue(value);
 }
 
 /** Narrow an unknown value to an array of strings. */
 export function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+  return isArrayValue(value) && value.every((entry) => typeof entry === "string");
 }
 
 /** Narrow an unknown value to an object whose values are all strings. */
@@ -2255,6 +2263,10 @@ export function isChimpbaseActionRegistration(value: unknown): value is Chimpbas
   );
 }
 
+function isDecoratorMethod(value: unknown): value is ChimpbaseDecoratorMethod {
+  return typeof value === "function";
+}
+
 function isChimpbasePluginRegistration(value: unknown): value is ChimpbasePluginRegistration {
   return Boolean(
     value
@@ -2285,12 +2297,12 @@ function isChimpbaseRegistration(value: unknown): value is ChimpbaseRegistration
 }
 
 function isChimpbasePluginOptions(value: unknown): value is ChimpbasePluginOptions {
-  if (!value || typeof value !== "object" || Array.isArray(value) || "kind" in (value as object)) {
+  if (!value || typeof value !== "object" || isArrayValue(value) || "kind" in (value as object)) {
     return false;
   }
 
   const candidate = value as { dependsOn?: unknown; name?: unknown };
-  const hasDependsOn = candidate.dependsOn === undefined || Array.isArray(candidate.dependsOn);
+  const hasDependsOn = candidate.dependsOn === undefined || isArrayValue(candidate.dependsOn);
   const hasName = candidate.name === undefined || typeof candidate.name === "string";
   return hasDependsOn && hasName && (candidate.dependsOn !== undefined || candidate.name !== undefined);
 }
@@ -2463,8 +2475,9 @@ function registerDecoratedMethod(
     entries.push({
       createEntry(owner) {
         const member = (owner as Record<PropertyKey, unknown>)[propertyKey];
-        const boundMethod =
-          typeof member === "function" ? member.bind(owner) : method.bind(owner);
+        const boundMethod = isDecoratorMethod(member)
+          ? member.bind(owner)
+          : method.bind(owner);
         return createEntry(boundMethod);
       },
     });
@@ -2658,9 +2671,9 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
       }
     }
 
-    if (Array.isArray(previous.enum) || Array.isArray(next.enum)) {
-      const previousEnum = Array.isArray(previous.enum) ? previous.enum : [];
-      const nextEnum = Array.isArray(next.enum) ? next.enum : [];
+    if (isArrayValue(previous.enum) || isArrayValue(next.enum)) {
+      const previousEnum = isArrayValue(previous.enum) ? previous.enum : [];
+      const nextEnum = isArrayValue(next.enum) ? next.enum : [];
       if (previousEnum.some((entry) => !nextEnum.some((candidate) => stableSerialize(candidate) === stableSerialize(entry)))) {
         return "breaking";
       }
@@ -2674,8 +2687,8 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
       && (next.type === "object" || next.properties || next.required)) {
       const previousProperties = isPlainObject(previous.properties) ? previous.properties : {};
       const nextProperties = isPlainObject(next.properties) ? next.properties : {};
-      const previousRequired = new Set(Array.isArray(previous.required) ? previous.required : []);
-      const nextRequired = new Set(Array.isArray(next.required) ? next.required : []);
+      const previousRequired = new Set(isArrayValue(previous.required) ? previous.required : []);
+      const nextRequired = new Set(isArrayValue(next.required) ? next.required : []);
 
       for (const key of Object.keys(previousProperties)) {
         if (!Object.prototype.hasOwnProperty.call(nextProperties, key)) {
@@ -2749,7 +2762,7 @@ function hashDeterministicString(input: string): string {
 }
 
 function sortSerializableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
+  if (isArrayValue(value)) {
     return value.map((entry) => sortSerializableValue(entry));
   }
 
@@ -2766,13 +2779,13 @@ function sortSerializableValue(value: unknown): unknown {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  return Boolean(value && typeof value === "object" && !isArrayValue(value));
 }
 
 function hasWorkflowSteps<TInput = unknown, TState = unknown>(
   definition: ChimpbaseWorkflowDraftDefinition<TInput, TState> | ChimpbaseWorkflowDefinition<TInput, TState>,
 ): definition is ChimpbaseWorkflowStepsDraftDefinition<TInput, TState> | (ChimpbaseWorkflowDefinition<TInput, TState> & ChimpbaseWorkflowStepsDraftDefinition<TInput, TState>) {
-  return Array.isArray((definition as { steps?: unknown }).steps);
+  return isArrayValue((definition as { steps?: unknown }).steps);
 }
 
 function getDecoratedConstructorEntries(source: ChimpbaseDecoratedOwner): ChimpbaseAnyRegistration[] {
@@ -2803,8 +2816,11 @@ function collectLegacyDecoratedEntries(
   return entries.map((entry) => entry.createEntry(owner));
 }
 
+// `Object.getPrototypeOf` is declared as returning `any`; the interop is typed once here.
+const getPrototype: (target: object) => object | null = Object.getPrototypeOf;
+
 function getPrototypeOwner(source: object): object | null {
-  return Object.getPrototypeOf(source);
+  return getPrototype(source);
 }
 
 function isStandardMethodDecoratorArgs(
