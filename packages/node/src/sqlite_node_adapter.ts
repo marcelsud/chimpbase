@@ -27,6 +27,7 @@ import type {
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
+import { parseJson, parseJsonObject, parseStringRecord } from "@chimpbase/runtime";
 
 import { createSqliteKysely } from "./kysely.ts";
 
@@ -501,7 +502,7 @@ export function createSqliteEngineAdapter(
       options?: ChimpbaseCollectionFindOptions,
     ): Promise<TDocument[]> {
       return findCollectionDocuments(db, name, filter, options).map((row) =>
-        JSON.parse(row.document_json) as TDocument
+        parseJson(row.document_json) as TDocument
       );
     },
     async collectionFindOne<TDocument = Record<string, unknown>>(
@@ -509,7 +510,7 @@ export function createSqliteEngineAdapter(
       filter: ChimpbaseCollectionFilter,
     ): Promise<TDocument | null> {
       const [row] = findCollectionDocuments(db, name, filter, { limit: 1 });
-      return row ? JSON.parse(row.document_json) as TDocument : null;
+      return row ? parseJson(row.document_json) as TDocument : null;
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -540,7 +541,7 @@ export function createSqliteEngineAdapter(
     async collectionUpdate(name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> {
       const matched = findCollectionDocuments(db, name, filter);
       for (const row of matched) {
-        const current = JSON.parse(row.document_json) as Record<string, unknown>;
+        const current = parseJsonObject(row.document_json, "collection document");
         const next = JSON.stringify({ ...current, ...patch });
         db.query(
           `
@@ -604,7 +605,7 @@ export function createSqliteEngineAdapter(
           LIMIT 1
         `,
       ).all(key) as Array<{ value_json: string }>;
-      return row ? JSON.parse(row.value_json) as TValue : null;
+      return row ? parseJson(row.value_json) as TValue : null;
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
@@ -769,7 +770,7 @@ export function createSqliteEngineAdapter(
         createdAt: row.created_at,
         event: row.event_name,
         id: row.id,
-        payload: JSON.parse(row.payload_json) as TPayload,
+        payload: parseJson(row.payload_json) as TPayload,
         stream: row.stream_name,
       }));
     },
@@ -838,7 +839,7 @@ export function createSqliteEngineAdapter(
         size: Number(row.size),
         etag: row.etag,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata_json) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata_json, "blob metadata"),
         driverRef: row.driver_ref,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -877,7 +878,7 @@ export function createSqliteEngineAdapter(
         size: Number(row.size),
         etag: row.etag,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata_json) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata_json, "blob metadata"),
         driverRef: row.driver_ref,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -921,7 +922,7 @@ export function createSqliteEngineAdapter(
         bucket: row.bucket,
         key: row.key,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata_json) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata_json, "blob metadata"),
         driverRef: row.driver_ref,
         createdAtMs: Number(row.created_at_ms),
         expiresAtMs: Number(row.expires_at_ms),
@@ -1017,7 +1018,7 @@ export function createSqliteEngineAdapter(
         bucket: row.bucket,
         key: row.key,
         contentType: row.content_type,
-        metadata: JSON.parse(row.metadata_json) as Record<string, string>,
+        metadata: parseStringRecord(row.metadata_json, "blob metadata"),
         driverRef: row.driver_ref,
         createdAtMs: Number(row.created_at_ms),
         expiresAtMs: Number(row.expires_at_ms),
@@ -1146,7 +1147,7 @@ function findCollectionDocuments(
   ).all(name) as PersistedCollectionDocument[];
 
   const matched = rows.filter((row) => {
-    const document = JSON.parse(row.document_json) as Record<string, unknown>;
+    const document = parseJsonObject(row.document_json, "collection document");
     return Object.entries(filter).every(([key, value]) => document[key] === value);
   });
 

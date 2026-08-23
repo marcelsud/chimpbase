@@ -18,16 +18,32 @@ export interface ChimpbaseValidator<TValue = unknown> {
   readonly schema: unknown;
   array(): ChimpbaseValidator<TValue[]>;
   nullable(): ChimpbaseValidator<TValue | null>;
-  optional(): ChimpbaseValidator<TValue | undefined>;
+  optional(): ChimpbaseOptionalValidator<TValue | undefined>;
   parse(value: unknown, path?: string): TValue;
 }
 
-export type Infer<TValidator extends ChimpbaseValidator<any>> =
+/**
+ * A validator whose value may be absent. `isOptional` is required here so that
+ * object shapes can tell optional keys from required ones at the type level.
+ */
+export interface ChimpbaseOptionalValidator<TValue = unknown> extends ChimpbaseValidator<TValue> {
+  readonly isOptional: true;
+}
+
+export type Infer<TValidator extends ChimpbaseValidator<unknown>> =
   TValidator extends ChimpbaseValidator<infer TValue> ? TValue : never;
 
-type ChimpbaseActionMap = Record<string, ChimpbaseActionDefinition<any, any>>;
+type ChimpbaseActionMap = Record<string, ChimpbaseActionDefinition<unknown, unknown>>;
 
 export interface ChimpbaseActionRegistry extends ChimpbaseActionMap {}
+
+// `any` in a wildcard position erases the contract for every consumer of the
+// type, so the widest `any`-free shapes are used instead: `never` parameters
+// accept every concrete implementation, and `unknown` results force callers to
+// narrow before use.
+
+/** The widest class type: every class is assignable to it. */
+type ChimpbaseAnyConstructor = abstract new (...args: never[]) => unknown;
 
 type ChimpbaseRegisteredActions<TActions extends ChimpbaseActionMap> = TActions;
 type ChimpbaseKnownActionName<TActions extends ChimpbaseActionMap> =
@@ -49,12 +65,12 @@ type ChimpbaseActionResult<
     : never;
 
 type ChimpbaseActionDefinitionFromMethod<TValue> =
-  TValue extends (ctx: ChimpbaseContext<any>, ...args: infer TArgs) => infer TResult
+  TValue extends (ctx: never, ...args: infer TArgs) => infer TResult
     ? ChimpbaseActionDefinition<TArgs, Awaited<TResult>>
     : never;
 
 type ChimpbaseActionDefinitionFromRegistration<TValue> =
-  TValue extends ChimpbaseActionRegistration<infer TArgs, infer TResult, any>
+  TValue extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions>
     ? ChimpbaseActionDefinition<TArgs, TResult>
     : never;
 
@@ -683,7 +699,7 @@ export type ChimpbaseActionHandler<
 
 type ChimpbaseActionMethod<TThis, TArgs extends unknown[] = unknown[], TResult = unknown> = (
   this: TThis,
-  ctx: ChimpbaseContext<any>,
+  ctx: ChimpbaseContext,
   ...args: TArgs
 ) => TResult | Promise<TResult>;
 
@@ -698,7 +714,7 @@ export type ChimpbaseSubscriptionHandler<
 
 type ChimpbaseSubscriptionMethod<TThis, TPayload = unknown, TResult = unknown> = (
   this: TThis,
-  ctx: ChimpbaseContext<any>,
+  ctx: ChimpbaseContext,
   payload: TPayload,
 ) => TResult | Promise<TResult>;
 
@@ -713,7 +729,7 @@ export type ChimpbaseWorkerHandler<
 
 type ChimpbaseWorkerMethod<TThis, TPayload = unknown, TResult = unknown> = (
   this: TThis,
-  ctx: ChimpbaseContext<any>,
+  ctx: ChimpbaseContext,
   payload: TPayload,
 ) => TResult | Promise<TResult>;
 
@@ -727,7 +743,7 @@ export type ChimpbaseCronHandler<
 
 type ChimpbaseCronMethod<TThis, TResult = unknown> = (
   this: TThis,
-  ctx: ChimpbaseContext<any>,
+  ctx: ChimpbaseContext,
   invocation: ChimpbaseCronInvocation,
 ) => TResult | Promise<TResult>;
 
@@ -764,9 +780,9 @@ export interface ChimpbaseRegistrationTarget {
     handler: ChimpbaseCronHandler<TResult>,
   ): ChimpbaseCronHandler<TResult>;
   registerRoute?(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler;
-  registerOnStart?(name: string, handler: (ctx: ChimpbaseContext<any>) => Promise<void> | void): void;
+  registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
   registerOnStop?(name: string, handler: () => Promise<void> | void): void;
-  registerContextExtension?(registration: ChimpbaseContextExtensionRegistration<any>): void;
+  registerContextExtension?(registration: ChimpbaseContextExtensionRegistration): void;
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
   ): ChimpbaseWorkflowDefinition<TInput, TState>;
@@ -802,10 +818,10 @@ export type ChimpbaseActionReference<
 > = ChimpbaseActionRegistration<TArgs, TResult, TActions>;
 
 export type ChimpbaseInferActionArgs<TAction> =
-  TAction extends ChimpbaseActionRegistration<infer TArgs, any, any> ? TArgs : never;
+  TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions> ? TArgs : never;
 
 export type ChimpbaseInferActionResult<TAction> =
-  TAction extends ChimpbaseActionRegistration<any, infer TResult, any> ? TResult : never;
+  TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions> ? TResult : never;
 
 export type ChimpbaseSubscriptionOptions =
   | { idempotent: true; name: string; telemetry?: ChimpbaseTelemetryPersistOption }
@@ -938,14 +954,14 @@ export type ChimpbaseRegistrationSource =
   | ChimpbaseRegistrationMap;
 
 type ChimpbaseDecoratedOwner = object;
-type ChimpbaseDecoratorMethod = (...args: any[]) => unknown;
+type ChimpbaseDecoratorMethod = (...args: never[]) => unknown;
 interface ChimpbaseLegacyDecoratedEntry {
   createEntry(owner: object): ChimpbaseAnyRegistration;
 }
 
 const decoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseAnyRegistration[]>();
 const legacyDecoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseLegacyDecoratedEntry[]>();
-const chimpbaseModuleMarker = new WeakSet<abstract new (...args: any[]) => any>();
+const chimpbaseModuleMarker = new WeakSet<ChimpbaseAnyConstructor>();
 const ACTION_INVOKER_STORAGE_KEY = Symbol.for("@chimpbase/runtime.action_invoker_storage");
 const ACTION_REFERENCE_INVOKERS_KEY = Symbol.for("@chimpbase/runtime.action_reference_invokers");
 const actionInvokerStorage = getActionInvokerStorage();
@@ -1021,12 +1037,12 @@ export function action<TArgs extends unknown[] = unknown[], TResult = unknown, T
   options?: ChimpbaseActionOptions,
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions>;
 export function action<
-  TValidator extends ChimpbaseValidator<any>,
+  TArgs,
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
 >(
-  input: ChimpbaseActionDefinitionInput<Infer<TValidator>, TResult, TActions>,
-): ChimpbaseActionRegistration<Infer<TValidator>, TResult, TActions>;
+  input: ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>,
+): ChimpbaseActionRegistration<TArgs, TResult, TActions>;
 export function action<
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
@@ -1794,12 +1810,12 @@ export function defineAction<TArgs = unknown[], TResult = unknown>(
   handler: ChimpbaseTupleActionHandler<any[], TResult>,
 ): ChimpbaseTupleActionHandler<any[], TResult>;
 export function defineAction<
-  TValidator extends ChimpbaseValidator<any>,
+  TArgs,
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
 >(
-  input: ChimpbaseActionDefinitionInput<Infer<TValidator>, TResult, TActions>,
-): ChimpbaseActionRegistration<Infer<TValidator>, TResult, TActions>;
+  input: ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>,
+): ChimpbaseActionRegistration<TArgs, TResult, TActions>;
 export function defineAction<
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
@@ -1874,7 +1890,7 @@ export function defineWorkflow<TInput = unknown, TState = unknown>(
   return definition;
 }
 
-type ChimpbaseValidatorShape = Record<string, ChimpbaseValidator<any>>;
+type ChimpbaseValidatorShape = Record<string, ChimpbaseValidator<unknown>>;
 type ChimpbaseOptionalValidatorKeys<TShape extends ChimpbaseValidatorShape> = Extract<{
   [TKey in keyof TShape]: TShape[TKey]["isOptional"] extends true ? TKey : never;
 }[keyof TShape], string>;
@@ -1929,8 +1945,7 @@ function createValidator<TValue>(
       });
     },
     optional() {
-      return createValidator<TValue | undefined>({
-        isOptional: true,
+      return createOptionalValidator<TValue | undefined>({
         parser(value, path) {
           if (value === undefined) {
             return undefined;
@@ -1947,6 +1962,15 @@ function createValidator<TValue>(
   };
 
   return validator;
+}
+
+function createOptionalValidator<TValue>(
+  options: Omit<ChimpbaseValidatorFactoryOptions<TValue>, "isOptional">,
+): ChimpbaseOptionalValidator<TValue> {
+  return {
+    ...createValidator<TValue>({ ...options, isOptional: true }),
+    isOptional: true,
+  };
 }
 
 function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
@@ -1992,7 +2016,7 @@ function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
   });
 }
 
-function createUnionValidator<TValidators extends readonly ChimpbaseValidator<any>[]>(
+function createUnionValidator<TValidators extends readonly ChimpbaseValidator<unknown>[]>(
   validators: TValidators,
 ): ChimpbaseValidator<Infer<TValidators[number]>> {
   return createValidator<Infer<TValidators[number]>>({
@@ -2090,7 +2114,7 @@ export const v = {
   ): ChimpbaseValidator<ChimpbaseObjectValidatorResult<TShape>> {
     return createObjectValidator(shape);
   },
-  optional<TValue>(validator: ChimpbaseValidator<TValue>): ChimpbaseValidator<TValue | undefined> {
+  optional<TValue>(validator: ChimpbaseValidator<TValue>): ChimpbaseOptionalValidator<TValue | undefined> {
     return validator.optional();
   },
   string(): ChimpbaseValidator<string> {
@@ -2105,7 +2129,7 @@ export const v = {
       schema: { type: "string" },
     });
   },
-  union<TValidators extends readonly [ChimpbaseValidator<any>, ...ChimpbaseValidator<any>[]]>(
+  union<TValidators extends readonly [ChimpbaseValidator<unknown>, ...ChimpbaseValidator<unknown>[]]>(
     ...validators: TValidators
   ): ChimpbaseValidator<Infer<TValidators[number]>> {
     return createUnionValidator(validators);
@@ -2119,6 +2143,62 @@ export const v = {
     });
   },
 };
+
+// ── JSON boundary helpers ─────────────────────────────────────────────────────
+
+// `JSON.parse` is declared as returning `any`, so every direct call leaks an
+// untyped value into authored code. The platform interop is localized to this
+// single typed adapter: callers receive `unknown` and narrow before use.
+const jsonParse: (text: string) => unknown = JSON.parse;
+
+/** Parse JSON from an untrusted boundary into `unknown`. */
+export function parseJson(text: string): unknown {
+  return jsonParse(text);
+}
+
+/** Parse JSON from an untrusted boundary, returning `undefined` when it is malformed. */
+export function tryParseJson(text: string): unknown {
+  try {
+    return jsonParse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Narrow an unknown value to a JSON object. */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Narrow an unknown value to an array of strings. */
+export function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/** Narrow an unknown value to an object whose values are all strings. */
+export function isStringRecord(value: unknown): value is Record<string, string> {
+  return isJsonObject(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+/** Parse JSON that must decode to an object, throwing when it does not. */
+export function parseJsonObject(text: string, label = "value"): Record<string, unknown> {
+  const parsed = parseJson(text);
+  if (!isJsonObject(parsed)) {
+    throw new TypeError(`${label} must decode to a JSON object`);
+  }
+
+  return parsed;
+}
+
+/** Parse JSON that must decode to an object of string values, throwing when it does not. */
+export function parseStringRecord(text: string, label = "value"): Record<string, string> {
+  const parsed = parseJson(text);
+  if (!isStringRecord(parsed)) {
+    throw new TypeError(`${label} must decode to a JSON object of string values`);
+  }
+
+  return parsed;
+}
 
 export function isChimpbaseActionRegistration(value: unknown): value is ChimpbaseActionRegistration<any, any, any> {
   return Boolean(
@@ -2352,7 +2432,7 @@ function registerDecoratedMethod(
 
 function collectDecoratedEntries(source: ChimpbaseDecoratedOwner): ChimpbaseAnyRegistration[] {
   if (typeof source === "function") {
-    if (chimpbaseModuleMarker.has(source as abstract new (...args: any[]) => any)) {
+    if (chimpbaseModuleMarker.has(source as ChimpbaseAnyConstructor)) {
       const instance = new (source as new () => object)();
       return collectDecoratedEntries(instance);
     }
@@ -2640,7 +2720,7 @@ function sortSerializableValue(value: unknown): unknown {
   );
 }
 
-function isPlainObject(value: unknown): value is Record<string, any> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
@@ -2710,7 +2790,7 @@ function isLegacyMethodDecoratorArgs(
 
 function isStandardClassDecoratorArgs(
   args: unknown[],
-): args is [abstract new (...args: any[]) => any, ClassDecoratorContext] {
+): args is [ChimpbaseAnyConstructor, ClassDecoratorContext] {
   return (
     args.length === 2 &&
     typeof args[0] === "function" &&
@@ -2723,6 +2803,6 @@ function isStandardClassDecoratorArgs(
 
 function isLegacyClassDecoratorArgs(
   args: unknown[],
-): args is [abstract new (...args: any[]) => any] {
+): args is [ChimpbaseAnyConstructor] {
   return args.length === 1 && typeof args[0] === "function";
 }

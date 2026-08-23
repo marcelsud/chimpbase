@@ -1,7 +1,9 @@
 import {
   action,
+  isStringArray,
   plugin,
   route,
+  tryParseJson,
   type ChimpbasePluginDependency,
   type ChimpbasePluginRegistration,
   type ChimpbaseRegistrationSource,
@@ -177,12 +179,9 @@ function parseScopes(raw: string | undefined | null): string[] {
   if (!raw) {
     return DEFAULT_SCOPES;
   }
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : DEFAULT_SCOPES;
-  } catch {
-    return DEFAULT_SCOPES;
-  }
+
+  const parsed = tryParseJson(raw);
+  return isStringArray(parsed) ? parsed : DEFAULT_SCOPES;
 }
 
 function validateScopes(scopes: string[]): void {
