@@ -45,6 +45,24 @@ export interface ChimpbaseActionRegistry extends ChimpbaseActionMap {}
 /** The widest class type: every class is assignable to it. */
 type ChimpbaseAnyConstructor = abstract new (...args: never[]) => unknown;
 
+/** The widest handler type: every runtime handler is assignable to it. */
+type ChimpbaseAnyHandler = (ctx: never, ...args: never[]) => unknown;
+
+/**
+ * The shape shared by every action registration, whatever its argument, result,
+ * and action-map type arguments. Code that only has to identify or reference a
+ * registration accepts this; `ChimpbaseInferActionArgs` and
+ * `ChimpbaseInferActionResult` recover the concrete types where they matter.
+ */
+export interface ChimpbaseActionRegistrationLike {
+  args?: ChimpbaseValidator<unknown>;
+  /** Widened because argument tuples are invariant; re-apply the concrete handler type to call it. */
+  handler: unknown;
+  kind: "action";
+  name: string;
+  telemetry?: ChimpbaseTelemetryPersistOption;
+}
+
 type ChimpbaseRegisteredActions<TActions extends ChimpbaseActionMap> = TActions;
 type ChimpbaseKnownActionName<TActions extends ChimpbaseActionMap> =
   Extract<keyof ChimpbaseRegisteredActions<TActions>, string>;
@@ -201,7 +219,7 @@ export interface ChimpbaseWorkflowActionStepDefinition<
   TArgs = unknown[],
   TResult = unknown,
 > {
-  action: string | ChimpbaseActionRegistration<TArgs, TResult, any>;
+  action: string | ChimpbaseActionRegistration<TArgs, TResult, ChimpbaseActionMap>;
   args?: (params: ChimpbaseWorkflowRuntimeState<TInput, TState>) => TArgs;
   id: string;
   kind: "workflow_action";
@@ -290,7 +308,7 @@ export type ChimpbaseWorkflowRunResult<TInput = unknown, TState = unknown> =
 
 export interface ChimpbaseWorkflowRunContext<TInput = unknown, TState = unknown>
   extends ChimpbaseWorkflowRuntimeState<TInput, TState> {
-  action<TAction extends ChimpbaseActionRegistration<any, any, any>>(
+  action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
@@ -340,6 +358,26 @@ export type ChimpbaseWorkflowDefinition<TInput = unknown, TState = unknown> =
 
 export interface ChimpbaseWorkflowRegistration<TInput = unknown, TState = unknown> {
   definition: ChimpbaseWorkflowDefinition<TInput, TState>;
+  kind: "workflow";
+}
+
+/**
+ * The metadata shared by every workflow definition, whatever its input and state
+ * types. Workflow inputs and states are invariant, so a registration group is
+ * typed with this shape and the runner re-applies the concrete definition type.
+ */
+export interface ChimpbaseWorkflowDefinitionLike {
+  initialState(input: never): unknown;
+  inputSchema?: unknown;
+  name: string;
+  signalSchemas?: Record<string, unknown>;
+  stateSchema?: unknown;
+  version: number;
+}
+
+/** The shape shared by every workflow registration. */
+export interface ChimpbaseWorkflowRegistrationLike {
+  definition: ChimpbaseWorkflowDefinitionLike;
   kind: "workflow";
 }
 
@@ -638,7 +676,7 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
     callback: (span: ChimpbaseTraceSpan) => TResult | Promise<TResult>,
     attributes?: ChimpbaseTelemetryAttributes,
   ): Promise<TResult>;
-  action<TAction extends ChimpbaseActionRegistration<any, any, any>>(
+  action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
@@ -653,7 +691,7 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
 }
 
 export interface ChimpbaseRouteEnv<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> {
-  action<TAction extends ChimpbaseActionRegistration<any, any, any>>(
+  action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
@@ -753,7 +791,7 @@ export type ChimpbaseRouteHandler<TActions extends ChimpbaseActionMap = Chimpbas
 ) => Response | null | Promise<Response | null>;
 
 export interface ChimpbaseRegistrationTarget {
-  bindActionInvoker?(reference: ChimpbaseActionRegistration<any, any, any>): void;
+  bindActionInvoker?(reference: ChimpbaseActionRegistrationLike): void;
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
     name: string,
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
@@ -794,7 +832,7 @@ export type ChimpbaseTelemetryPersistOption =
   | { log?: boolean; metric?: boolean; trace?: boolean };
 
 export type ChimpbaseActionInvoker = <TResult = unknown>(
-  nameOrReference: string | ChimpbaseActionRegistration<any, any, any>,
+  nameOrReference: string | ChimpbaseActionRegistrationLike,
   args: unknown[],
 ) => Promise<TResult>;
 
@@ -933,16 +971,16 @@ export interface ChimpbaseContextExtensionRegistration<TActions extends Chimpbas
 }
 
 export type ChimpbaseRegistration =
-  | ChimpbaseActionRegistration<any, any>
-  | ChimpbaseContextExtensionRegistration<any>
-  | ChimpbaseCronRegistration<any>
-  | ChimpbaseOnStartRegistration<any>
+  | ChimpbaseActionRegistrationLike
+  | ChimpbaseContextExtensionRegistration
+  | ChimpbaseCronRegistration<unknown>
+  | ChimpbaseOnStartRegistration
   | ChimpbaseOnStopRegistration
   | ChimpbasePluginRegistration
-  | ChimpbaseRouteRegistration<any>
-  | ChimpbaseSubscriptionRegistration<any, any>
-  | ChimpbaseWorkerRegistration<any, any>
-  | ChimpbaseWorkflowRegistration<any, any>;
+  | ChimpbaseRouteRegistration
+  | ChimpbaseSubscriptionRegistration<never, unknown>
+  | ChimpbaseWorkerRegistration<never, unknown>
+  | ChimpbaseWorkflowRegistrationLike;
 
 type ChimpbaseResolvedRegistration = Exclude<ChimpbaseRegistration, ChimpbasePluginRegistration>;
 type ChimpbaseAnyRegistration = ChimpbaseResolvedRegistration;
@@ -1007,7 +1045,7 @@ export function runWithActionInvoker<TResult>(
 }
 
 export function bindActionInvoker(
-  reference: ChimpbaseActionRegistration<any, any, any>,
+  reference: ChimpbaseActionRegistrationLike,
   invoker: ChimpbaseActionInvoker,
 ): void {
   getBoundActionInvokers().set(reference, invoker);
@@ -1050,8 +1088,8 @@ export function action<
   input: ChimpbaseActionWithoutArgsInput<TResult, TActions>,
 ): ChimpbaseActionRegistration<[], TResult, TActions>;
 export function action<TArgs = unknown[], TResult = unknown, TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
-  inputOrName: string | ChimpbaseActionDefinitionInput<any, TResult, TActions> | ChimpbaseActionWithoutArgsInput<TResult, TActions>,
-  handler?: ChimpbaseTupleActionHandler<any[], TResult, TActions>,
+  inputOrName: string | ChimpbaseActionDefinitionInput<TArgs, TResult, TActions> | ChimpbaseActionWithoutArgsInput<TResult, TActions>,
+  handler?: ChimpbaseTupleActionHandler<never[], TResult, TActions>,
   options?: ChimpbaseActionOptions,
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions> {
   if (inputOrName === undefined || inputOrName === null) {
@@ -1071,7 +1109,7 @@ export function action<TArgs = unknown[], TResult = unknown, TActions extends Ch
 
   if (isChimpbaseActionRegistration(handler)) {
     return createActionRegistration({
-      args: handler.args,
+      args: handler.args as ChimpbaseValidator<TArgs> | undefined,
       handler: handler.handler as ChimpbaseActionHandler<TArgs, TResult, TActions>,
       kind: "action",
       name: inputOrName,
@@ -1236,7 +1274,7 @@ export function workflowActionStep<TInput = unknown, TState = unknown, TResult =
 export function workflowActionStep<
   TInput = unknown,
   TState = unknown,
-  TAction extends ChimpbaseActionRegistration<any, any, any> = ChimpbaseActionRegistration<any, any, any>,
+  TAction extends ChimpbaseActionRegistrationLike = ChimpbaseActionRegistrationLike,
 >(
   id: string,
   actionReference: TAction,
@@ -1257,7 +1295,7 @@ export function workflowActionStep<
 >;
 export function workflowActionStep<TInput = unknown, TState = unknown, TArgs = unknown[], TResult = unknown>(
   id: string,
-  actionNameOrReference: string | ChimpbaseActionRegistration<TArgs, TResult, any>,
+  actionNameOrReference: string | ChimpbaseActionRegistration<TArgs, TResult, ChimpbaseActionMap>,
   options: Omit<ChimpbaseWorkflowActionStepDefinition<TInput, TState, TArgs, TResult>, "action" | "id" | "kind"> = {},
 ): ChimpbaseWorkflowActionStepDefinition<TInput, TState, TArgs, TResult> {
   return {
@@ -1445,10 +1483,13 @@ export function register(
       case "action": {
         const actionName = resolveActionRegistrationName(entry);
         target.bindActionInvoker?.(entry);
+        const actionHandler = entry.handler as ChimpbaseTupleActionHandler<unknown[], unknown>;
         if (entry.args) {
-          target.registerAction(actionName, entry.handler, { args: entry.args });
+          target.registerAction(actionName, entry.handler as ChimpbaseObjectActionHandler<unknown, unknown>, {
+            args: entry.args,
+          });
         } else {
-          target.registerAction(actionName, entry.handler);
+          target.registerAction(actionName, actionHandler);
         }
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`action:${actionName}`, entry.telemetry);
@@ -1460,7 +1501,7 @@ export function register(
           throw new Error(`registration target does not support cron entries: ${entry.name}`);
         }
 
-        target.registerCron(entry.name, entry.schedule, entry.handler);
+        target.registerCron(entry.name, entry.schedule, entry.handler as ChimpbaseCronHandler);
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`cron:${entry.name}`, entry.telemetry);
         }
@@ -1475,7 +1516,7 @@ export function register(
       case "subscription":
         target.registerSubscription(
           entry.eventName,
-          entry.handler,
+          entry.handler as ChimpbaseSubscriptionHandler,
           entry.idempotent
             ? { idempotent: true, name: entry.name }
             : { idempotent: entry.idempotent, name: entry.name },
@@ -1485,13 +1526,13 @@ export function register(
         }
         break;
       case "worker":
-        target.registerWorker(entry.name, entry.handler, entry.definition);
+        target.registerWorker(entry.name, entry.handler as ChimpbaseWorkerHandler, entry.definition);
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`queue:${entry.name}`, entry.telemetry);
         }
         break;
       case "workflow":
-        target.registerWorkflow(entry.definition);
+        target.registerWorkflow(entry.definition as ChimpbaseWorkflowDefinition);
         break;
       case "onStart":
         target.registerOnStart?.(entry.name, entry.handler);
@@ -1752,7 +1793,7 @@ export function Action(name: string) {
     registerDecoratedMethod(
       "Action",
       args,
-      (boundValue) => action(name, boundValue as ChimpbaseActionHandler<any[], any>),
+      (boundValue) => action(name, boundValue as ChimpbaseActionHandler<unknown[], unknown>),
     );
   };
 }
@@ -1762,7 +1803,7 @@ export function Subscription(eventName: string) {
     registerDecoratedMethod(
       "Subscription",
       args,
-      (boundValue) => subscription(eventName, boundValue as ChimpbaseSubscriptionHandler<any, any>),
+      (boundValue) => subscription(eventName, boundValue as ChimpbaseSubscriptionHandler<unknown, unknown>),
     );
   };
 }
@@ -1772,7 +1813,7 @@ export function Worker(name: string, definition?: ChimpbaseWorkerDefinition) {
     registerDecoratedMethod(
       "Worker",
       args,
-      (boundValue) => worker(name, boundValue as ChimpbaseWorkerHandler<any, any>, definition),
+      (boundValue) => worker(name, boundValue as ChimpbaseWorkerHandler<unknown, unknown>, definition),
     );
   };
 }
@@ -1782,7 +1823,7 @@ export function Cron(name: string, schedule: string) {
     registerDecoratedMethod(
       "Cron",
       args,
-      (boundValue) => cron(name, schedule, boundValue as ChimpbaseCronHandler<any>),
+      (boundValue) => cron(name, schedule, boundValue as ChimpbaseCronHandler<unknown>),
     );
   };
 }
@@ -1807,8 +1848,8 @@ export function ChimpbaseModule(
 
 export function defineAction<TArgs = unknown[], TResult = unknown>(
   name: string,
-  handler: ChimpbaseTupleActionHandler<any[], TResult>,
-): ChimpbaseTupleActionHandler<any[], TResult>;
+  handler: ChimpbaseTupleActionHandler<never[], TResult>,
+): ChimpbaseTupleActionHandler<never[], TResult>;
 export function defineAction<
   TArgs,
   TResult = unknown,
@@ -1822,23 +1863,27 @@ export function defineAction<
 >(
   input: ChimpbaseActionWithoutArgsInput<TResult, TActions>,
 ): ChimpbaseActionRegistration<[], TResult, TActions>;
-export function defineAction<TArgs = unknown[], TResult = unknown>(
+export function defineAction<
+  TArgs = unknown[],
+  TResult = unknown,
+  TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+>(
   inputOrName:
     | string
-    | ChimpbaseActionDefinitionInput<any, TResult, any>
-    | ChimpbaseActionWithoutArgsInput<TResult, any>,
-  handler?: ChimpbaseTupleActionHandler<any[], TResult>,
-): ChimpbaseTupleActionHandler<any[], TResult> | ChimpbaseActionRegistration<any, TResult, any> {
+    | ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>
+    | ChimpbaseActionWithoutArgsInput<TResult, TActions>,
+  handler?: ChimpbaseTupleActionHandler<never[], TResult>,
+): ChimpbaseTupleActionHandler<never[], TResult> | ChimpbaseActionRegistrationLike {
   if (typeof inputOrName !== "string") {
-    return action(inputOrName as ChimpbaseActionDefinitionInput<any, TResult, any>);
+    return action(inputOrName as ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>);
   }
 
   const runtimeDefineAction = (globalThis as RuntimeGlobals).defineAction;
   if (typeof runtimeDefineAction === "function") {
-    return runtimeDefineAction(inputOrName, handler as ChimpbaseTupleActionHandler<any[], TResult>);
+    return runtimeDefineAction(inputOrName, handler as ChimpbaseTupleActionHandler<never[], TResult>);
   }
 
-  return handler as ChimpbaseTupleActionHandler<any[], TResult>;
+  return handler as ChimpbaseTupleActionHandler<never[], TResult>;
 }
 
 export function defineSubscription<TPayload = unknown, TResult = unknown>(
@@ -2200,7 +2245,7 @@ export function parseStringRecord(text: string, label = "value"): Record<string,
   return parsed;
 }
 
-export function isChimpbaseActionRegistration(value: unknown): value is ChimpbaseActionRegistration<any, any, any> {
+export function isChimpbaseActionRegistration(value: unknown): value is ChimpbaseActionRegistrationLike {
   return Boolean(
     value
       && (typeof value === "object" || typeof value === "function")
@@ -2251,13 +2296,13 @@ function isChimpbasePluginOptions(value: unknown): value is ChimpbasePluginOptio
 }
 
 export function hasChimpbaseActionRegistrationName(
-  value: ChimpbaseActionRegistration<any, any, any>,
+  value: ChimpbaseActionRegistrationLike,
 ): boolean {
   return value.name.length > 0;
 }
 
 export function setChimpbaseActionRegistrationName(
-  value: ChimpbaseActionRegistration<any, any, any>,
+  value: ChimpbaseActionRegistrationLike,
   name: string,
 ): void {
   if (!name) {
@@ -2285,7 +2330,7 @@ function setChimpbasePluginRegistrationName(
 }
 
 export function resolveChimpbaseActionRegistrationName(
-  value: ChimpbaseActionRegistration<any, any, any>,
+  value: ChimpbaseActionRegistrationLike,
 ): string {
   return resolveActionRegistrationName(value);
 }
@@ -2302,9 +2347,9 @@ function getActionInvokerStorage(): AsyncLocalStorage<ChimpbaseActionInvoker> {
   return runtimeGlobals[ACTION_INVOKER_STORAGE_KEY];
 }
 
-function getBoundActionInvokers(): WeakMap<ChimpbaseActionRegistration<any, any, any>, ChimpbaseActionInvoker> {
+function getBoundActionInvokers(): WeakMap<ChimpbaseActionRegistrationLike, ChimpbaseActionInvoker> {
   const runtimeGlobals = globalThis as typeof globalThis & {
-    [ACTION_REFERENCE_INVOKERS_KEY]?: WeakMap<ChimpbaseActionRegistration<any, any, any>, ChimpbaseActionInvoker>;
+    [ACTION_REFERENCE_INVOKERS_KEY]?: WeakMap<ChimpbaseActionRegistrationLike, ChimpbaseActionInvoker>;
   };
 
   if (!runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY]) {
@@ -2355,7 +2400,7 @@ function createActionRegistration<
 }
 
 function resolveActionRegistrationName(
-  registration: ChimpbaseActionRegistration<any, any, any>,
+  registration: ChimpbaseActionRegistrationLike,
 ): string {
   if (registration.name.length > 0) {
     return registration.name;
@@ -2374,7 +2419,7 @@ function formatPluginRegistrationName(registration: ChimpbasePluginRegistration)
   return registration.name.length > 0 ? registration.name : "<unnamed plugin>";
 }
 
-function defineRegistrationProperty<TTarget extends object, TKey extends keyof any>(
+function defineRegistrationProperty<TTarget extends object, TKey extends PropertyKey>(
   target: TTarget,
   key: TKey,
   value: unknown,

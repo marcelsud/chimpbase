@@ -39,8 +39,9 @@ import {
   subscription as createSubscriptionEntry,
   workflow as createWorkflowEntry,
   worker as createWorkerEntry,
-  type ChimpbaseActionReference,
   type ChimpbaseActionHandler,
+  type ChimpbaseActionRegistrationLike,
+  type ChimpbaseContext,
   type ChimpbaseContextExtensionRegistration,
   type ChimpbaseObjectActionHandler,
   type ChimpbaseCronHandler,
@@ -208,15 +209,20 @@ export class ChimpbaseHost<TServer> {
     this.supportsConcurrentWorkers = options.supportsConcurrentWorkers;
   }
 
-  async executeAction<TAction extends ChimpbaseActionReference<any, any, any>>(
+  async executeAction<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseInferActionArgs<TAction> extends readonly unknown[]
       ? ChimpbaseInferActionArgs<TAction>
       : [ChimpbaseInferActionArgs<TAction>]
   ): Promise<{ emittedEvents: unknown[]; result: ChimpbaseInferActionResult<TAction> }>;
   async executeAction(name: string, args?: unknown[] | unknown): Promise<ActionExecutionResult>;
+  /** Invoke a registration whose argument types are no longer known, such as one relayed by a bound invoker. */
   async executeAction(
-    nameOrReference: string | ChimpbaseActionReference<any, any, any>,
+    reference: ChimpbaseActionRegistrationLike,
+    ...args: unknown[]
+  ): Promise<ActionExecutionResult>;
+  async executeAction(
+    nameOrReference: string | ChimpbaseActionRegistrationLike,
     ...args: unknown[]
   ): Promise<ActionExecutionResult> {
     const actionName = typeof nameOrReference === "string"
@@ -319,15 +325,15 @@ export class ChimpbaseHost<TServer> {
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
     options?: { telemetry?: ChimpbaseTelemetryPersistOption },
   ): this;
-  action<TAction extends ChimpbaseActionReference<any, any, any>>(entry: TAction): this;
+  action<TAction extends ChimpbaseActionRegistrationLike>(entry: TAction): this;
   action(
-    nameOrEntry: string | ChimpbaseActionReference<any, any, any>,
-    handler?: ChimpbaseTupleActionHandler<any[], any>,
+    nameOrEntry: string | ChimpbaseActionRegistrationLike,
+    handler?: ChimpbaseTupleActionHandler<unknown[], unknown>,
     options?: { telemetry?: ChimpbaseTelemetryPersistOption },
   ): this {
     return this.register(
       typeof nameOrEntry === "string"
-        ? createActionEntry(nameOrEntry, handler as ChimpbaseTupleActionHandler<any[], any>, options)
+        ? createActionEntry(nameOrEntry, handler as ChimpbaseTupleActionHandler<unknown[], unknown>, options)
         : nameOrEntry,
     );
   }
@@ -383,24 +389,24 @@ export class ChimpbaseHost<TServer> {
   ): ChimpbaseObjectActionHandler<TArgs, TResult>;
   registerAction(
     name: string,
-    handler: ChimpbaseActionHandler<any, any>,
-    definition?: { args?: ChimpbaseValidator<any> },
-  ): ChimpbaseActionHandler<any, any> {
+    handler: ChimpbaseActionHandler<unknown, unknown>,
+    definition?: { args?: ChimpbaseValidator<unknown> },
+  ): ChimpbaseActionHandler<unknown, unknown> {
     const entry = definition?.args
       ? createActionEntry({
           args: definition.args,
-          handler: handler as ChimpbaseObjectActionHandler<any, any>,
+          handler: handler as ChimpbaseObjectActionHandler<unknown, unknown>,
           name,
         })
-      : createActionEntry(name, handler as ChimpbaseTupleActionHandler<any[], any>);
+      : createActionEntry(name, handler as ChimpbaseTupleActionHandler<unknown[], unknown>);
 
     this.registry.actions.set(name, entry);
     return handler;
   }
 
-  bindActionInvoker(reference: ChimpbaseActionReference<any, any, any>): void {
+  bindActionInvoker(reference: ChimpbaseActionRegistrationLike): void {
     bindActionReferenceInvoker(reference, async <TResult = unknown>(
-      nameOrReference: string | ChimpbaseActionReference<any, any, any>,
+      nameOrReference: string | ChimpbaseActionRegistrationLike,
       args: unknown[],
     ): Promise<TResult> => {
       if (typeof nameOrReference === "string") {
@@ -472,7 +478,7 @@ export class ChimpbaseHost<TServer> {
 
   registerOnStart(
     name: string,
-    handler: (ctx: any) => Promise<void> | void,
+    handler: (ctx: ChimpbaseContext) => Promise<void> | void,
   ): void {
     this.registry.onStartHooks.push({ handler, name });
   }
@@ -493,7 +499,7 @@ export class ChimpbaseHost<TServer> {
     return definition;
   }
 
-  registerContextExtension(registration: ChimpbaseContextExtensionRegistration<any>): void {
+  registerContextExtension(registration: ChimpbaseContextExtensionRegistration): void {
     const existing = this.registry.contextExtensions.findIndex((entry) => entry.key === registration.key);
     if (existing >= 0) {
       this.registry.contextExtensions[existing] = registration;
@@ -1109,7 +1115,7 @@ function formatError(error: unknown): string {
 }
 
 function normalizeReferenceInvocationArgs(
-  reference: ChimpbaseActionReference<any, any, any>,
+  reference: ChimpbaseActionRegistrationLike,
   args: unknown[],
 ): unknown[] {
   if (reference.args) {

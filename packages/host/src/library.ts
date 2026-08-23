@@ -27,6 +27,7 @@ import {
   type ActionExecutionResult,
   type ChimpbaseRuntimeShim,
   type CreateHostOptions,
+  type RuntimeHostInstanceOptions,
   type StartedHost,
 } from "./runtime.ts";
 
@@ -137,7 +138,7 @@ export function createChimpbaseRuntimeLibrary<
   TServer,
   THost extends ChimpbaseHost<TServer>,
 >(
-  HostClass: new (...args: any[]) => THost,
+  HostClass: new (options: RuntimeHostInstanceOptions<TServer>) => THost,
   runtime: ChimpbaseRuntimeShim<TServer>,
 ): ChimpbaseRuntimeLibrary<THost, TServer> {
   async function loadChimpbaseProject(projectDir = "."): Promise<THost> {
