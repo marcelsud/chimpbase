@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/pact",
   "version": "0.7.0",
+  "private": true,
   "description": "Contract testing for Chimpbase using consumer-driven pacts.",
   "license": "Apache-2.0",
   "type": "module",

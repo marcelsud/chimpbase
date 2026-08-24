@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/otel",
   "version": "0.7.0",
+  "private": true,
   "description": "OpenTelemetry integration for Chimpbase.",
   "license": "Apache-2.0",
   "type": "module",

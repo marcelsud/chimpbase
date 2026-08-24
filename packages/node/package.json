@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/node",
   "version": "0.7.0",
+  "private": true,
   "description": "Node.js host for building action-driven backends on Postgres or SQLite with minimal boilerplate.",
   "license": "Apache-2.0",
   "type": "module",
