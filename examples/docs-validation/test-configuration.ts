@@ -28,4 +28,4 @@ const r = await chimpbase.executeAction("testConfig", {}); console.log("configur
 const started = await chimpbase.start({ serve: false, runWorker: false });
 await started.stop();
 
-console.log("configuration: OK"); chimpbase.close(); process.exit(0);
+console.log("configuration: OK"); await chimpbase.close(); process.exit(0);

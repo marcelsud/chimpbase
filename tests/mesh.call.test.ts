@@ -62,7 +62,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         await started.stop();
       }
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -104,7 +104,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         await started.stop();
       }
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -141,7 +141,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         await started.stop();
       }
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });

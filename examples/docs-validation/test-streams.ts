@@ -25,4 +25,4 @@ const testStreams = action({ name: "testStreams", args: v.object({}), async hand
 } });
 chimpbase.register({ testStreams }); await chimpbase.start();
 const r = await chimpbase.executeAction("testStreams", {}); console.log("streams:", JSON.stringify(r.result));
-console.log("streams: OK"); chimpbase.close(); process.exit(0);
+console.log("streams: OK"); await chimpbase.close(); process.exit(0);

@@ -188,7 +188,7 @@ describe("@chimpbase/pact", () => {
         expect(result.total).toBe(1);
         expect(result.results[0].status).toBe("passed");
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -233,7 +233,7 @@ describe("@chimpbase/pact", () => {
           expect(result.results[0].failure.kind).toBe("result_mismatch");
         }
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -272,7 +272,7 @@ describe("@chimpbase/pact", () => {
           expect(result.results[0].failure.kind).toBe("action_threw");
         }
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -325,7 +325,7 @@ describe("@chimpbase/pact", () => {
         expect(result.passed).toBe(1);
         expect(result.failed).toBe(0);
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -373,7 +373,7 @@ describe("@chimpbase/pact", () => {
           expect(result.results[0].failure.kind).toBe("event_not_emitted");
         }
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -412,7 +412,7 @@ describe("@chimpbase/pact", () => {
           expect(result.results[0].failure.kind).toBe("missing_state");
         }
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -483,7 +483,7 @@ describe("@chimpbase/pact", () => {
         expect(result.failed).toBe(0);
         expect(result.total).toBe(3);
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -528,7 +528,7 @@ describe("@chimpbase/pact", () => {
         expect(started).toEqual(["action"]);
         expect(passed).toEqual(["action"]);
       } finally {
-        host.close();
+        await host.close();
       }
     });
   });

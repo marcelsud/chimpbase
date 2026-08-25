@@ -69,7 +69,7 @@ export const bunRuntimeShim: ChimpbaseRuntimeShim<Bun.Server<unknown>> = {
       });
     },
     async stop(server) {
-      server.stop(true);
+      await server.stop(true);
     },
   },
   storage: {

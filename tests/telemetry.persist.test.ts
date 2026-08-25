@@ -13,7 +13,7 @@ const cleanupDirs: string[] = [];
 
 afterEach(async () => {
   while (cleanupHosts.length > 0) {
-    cleanupHosts.pop()?.close();
+    await cleanupHosts.pop()?.close();
   }
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();

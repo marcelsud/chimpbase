@@ -128,7 +128,7 @@ if (!bunSupportsBetterSqlite3) {
         });
         expect(processed).toEqual(["job-1", "job-2"]);
       } finally {
-        host.close();
+        await host.close();
       }
     });
   });
@@ -224,7 +224,7 @@ if (!dockerAvailable) {
         });
         expect(processed).toEqual(["job-1", "job-2"]);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -327,7 +327,7 @@ if (!dockerAvailable) {
           } as never),
         ).rejects.toThrow("args.email must be a string");
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -444,8 +444,8 @@ if (!dockerAvailable) {
         expect(audit.result).toEqual([{ value: "from-publisher" }]);
       } finally {
         await startedSubscriber.stop();
-        publisher.close();
-        subscriber.close();
+        await publisher.close();
+        await subscriber.close();
       }
     }, 30000);
 
@@ -506,7 +506,7 @@ if (!dockerAvailable) {
         const audit = await host.executeAction("listAudit");
         expect(audit.result).toEqual([{ value: "typed-migration" }]);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -576,7 +576,7 @@ if (!dockerAvailable) {
         const audit = await host.executeAction("listAudit");
         expect(audit.result).toEqual([{ value: "from-app" }]);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -627,7 +627,7 @@ if (!dockerAvailable) {
           expect.objectContaining({ value: "from-helper" }),
         ]);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -692,7 +692,7 @@ if (!dockerAvailable) {
         await started.stop();
         expect(shutdownCalled).toBe(true);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
 
@@ -753,7 +753,7 @@ if (!dockerAvailable) {
         const audit = await host.executeAction("listAudit");
         expect(audit.result).toEqual([{ value: "from-app-module" }]);
       } finally {
-        host.close();
+        await host.close();
       }
     }, 30000);
   });
@@ -805,7 +805,7 @@ describe("chimpbase-deno runtime guards", () => {
         });
         expect(processed).toEqual(["memory"]);
       } finally {
-        host.close();
+        await host.close();
       }
     });
 
@@ -842,7 +842,7 @@ describe("chimpbase-deno runtime guards", () => {
         const outcome = await host.executeAction("health");
         expect(outcome.result).toEqual({ ok: true });
       } finally {
-        host.close();
+        await host.close();
       }
     });
   }

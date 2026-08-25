@@ -101,5 +101,5 @@ if (!welcomeSent) throw new Error("welcome worker should have executed");
 console.log("getting-started (worker executed): true");
 
 console.log("getting-started-full: OK");
-chimpbase.close();
+await chimpbase.close();
 process.exit(0);

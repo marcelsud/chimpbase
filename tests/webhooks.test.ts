@@ -92,7 +92,7 @@ describe("@chimpbase/webhooks", () => {
       expect(webhook.secret.length).toBe(64);
       expect(webhook.active).toBe(true);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -115,7 +115,7 @@ describe("@chimpbase/webhooks", () => {
       expect(webhooks).toHaveLength(1);
       expect(webhooks[0].url).toBe("https://a.com/hook");
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -138,7 +138,7 @@ describe("@chimpbase/webhooks", () => {
       const webhook = await readJsonResponse<WebhookResponse>(getOutcome.response);
       expect(webhook.secret).toBe(created.secret);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -163,7 +163,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(updateOutcome.response?.status).toBe(200);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -185,7 +185,7 @@ describe("@chimpbase/webhooks", () => {
       expect(outcome.response?.status).toBe(200);
       expect(await readJsonResponse<unknown[]>(outcome.response)).toEqual([]);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -206,7 +206,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(deleteOutcome.response?.status).toBe(204);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -218,7 +218,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(outcome.response?.status).toBe(404);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -230,7 +230,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(outcome.response?.status).toBe(404);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -246,7 +246,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(outcome.response?.status).toBe(400);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -268,7 +268,7 @@ describe("@chimpbase/webhooks", () => {
       expect(outcome.response?.status).toBe(200);
       expect(await readJsonResponse<{ accepted: boolean }>(outcome.response)).toEqual({ accepted: true });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -284,7 +284,7 @@ describe("@chimpbase/webhooks", () => {
       );
       expect(outcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -321,7 +321,7 @@ describe("@chimpbase/webhooks", () => {
       // Only one event should have been published
       expect(publishCount).toBe(1);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -336,7 +336,7 @@ describe("@chimpbase/webhooks", () => {
       // GET request to inbound path — route returns null (not matched)
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });

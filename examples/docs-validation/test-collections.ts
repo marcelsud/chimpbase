@@ -34,4 +34,4 @@ const testCollections = action({ name: "testCollections", args: v.object({}), as
 } });
 chimpbase.register({ testCollections }); await chimpbase.start();
 const r = await chimpbase.executeAction("testCollections", {}); console.log("collections:", JSON.stringify(r.result));
-console.log("collections: OK"); chimpbase.close(); process.exit(0);
+console.log("collections: OK"); await chimpbase.close(); process.exit(0);

@@ -12,4 +12,4 @@ await chimpbase.start();
 const r1 = await chimpbase.executeAction("createProject", { name: "Test" }); console.log("actions (create):", JSON.stringify(r1.result));
 const r2 = await chimpbase.executeAction("setupWorkspace", { name: "Workspace" }); console.log("actions (cross-call):", JSON.stringify(r2.result));
 const r3 = await chimpbase.executeAction("createProjectDeco", { name: "Deco" }); console.log("actions (decorator):", JSON.stringify(r3.result));
-console.log("actions: OK"); chimpbase.close(); process.exit(0);
+console.log("actions: OK"); await chimpbase.close(); process.exit(0);

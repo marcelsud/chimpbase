@@ -726,11 +726,13 @@ export class ChimpbaseHost<TServer> {
     return this.engine.drainTelemetryRecords();
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.engine.stopEventBus();
-    void this.engine.shutdownSinks();
+    await Promise.all([
+      this.storage.close(),
+      this.engine.shutdownSinks(),
+    ]);
     this.debug("runtime closed");
-    void this.storage.close();
   }
 
   private async runEngineOperation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {

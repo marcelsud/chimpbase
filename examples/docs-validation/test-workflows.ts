@@ -22,4 +22,4 @@ const r1 = await chimpbase.executeAction("startOnboarding", { email: "test@examp
 await new Promise((r) => setTimeout(r, 500));
 const r2 = await chimpbase.executeAction("queryWorkflow", { customerId: "123" }); console.log("workflows (query):", r2.result != null ? "found" : "not found");
 const r3 = await chimpbase.executeAction("signalWorkflow", { customerId: "123" }); console.log("workflows (signal):", JSON.stringify(r3.result));
-await new Promise((r) => setTimeout(r, 1000)); console.log("workflows: OK"); chimpbase.close(); process.exit(0);
+await new Promise((r) => setTimeout(r, 1000)); console.log("workflows: OK"); await chimpbase.close(); process.exit(0);

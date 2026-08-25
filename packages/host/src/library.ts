@@ -191,7 +191,7 @@ export function createChimpbaseRuntimeLibrary<
       const outcome = await host.executeAction(actionName, args);
       return { host, outcome };
     } catch (error) {
-      host.close();
+      await host.close();
       throw error;
     }
   }
@@ -212,7 +212,7 @@ export function createChimpbaseRuntimeLibrary<
       const result = await host.syncWorkflowContracts(options);
       return { host, result };
     } catch (error) {
-      host.close();
+      await host.close();
       throw error;
     }
   }
@@ -242,7 +242,7 @@ export function createChimpbaseRuntimeLibrary<
       const outcome = await host.executeAction(actionName, args);
       return { host, outcome };
     } catch (error) {
-      host.close();
+      await host.close();
       throw error;
     }
   }
@@ -377,7 +377,7 @@ async function startLoadedHost<TServer, THost extends ChimpbaseHost<TServer>>(
     server: started.server,
     async stop() {
       await started.stop();
-      host.close();
+      await host.close();
     },
   };
 }

@@ -9,4 +9,4 @@ await chimpbase.start();
 const result = await chimpbase.executeAction("createCustomer", { email: "test@test.com", name: "Test", plan: "pro" });
 console.log("getting-started: OK", JSON.stringify(result.result));
 await new Promise((r) => setTimeout(r, 1000));
-chimpbase.close(); process.exit(0);
+await chimpbase.close(); process.exit(0);

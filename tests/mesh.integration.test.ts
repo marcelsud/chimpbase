@@ -101,8 +101,8 @@ describeIfPg("@chimpbase/mesh (integration — requires CHIMPBASE_TEST_PG_URL)",
     } finally {
       await startedA.stop();
       await startedB.stop();
-      hostA.close();
-      hostB.close();
+      await hostA.close();
+      await hostB.close();
     }
   });
 });

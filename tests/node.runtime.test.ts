@@ -104,7 +104,7 @@ describe("chimpbase-node runtime", () => {
         "  secondDrain,",
         "  storage: host.config.storage,",
         "}));",
-        "host.close();",
+        "await host.close();",
       ].join("\n"),
     );
 

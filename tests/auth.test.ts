@@ -65,7 +65,7 @@ describe("@chimpbase/auth", () => {
       expect(outcome.response?.status).toBe(401);
       expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "missing API key" });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -78,7 +78,7 @@ describe("@chimpbase/auth", () => {
       // No matching route → null response (guard passed through)
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -92,7 +92,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -103,7 +103,7 @@ describe("@chimpbase/auth", () => {
       // No 401 — guard skipped, no matching route → null
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -126,7 +126,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(user.id).toBeDefined();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -149,7 +149,7 @@ describe("@chimpbase/auth", () => {
       expect(users).toHaveLength(1);
       expect(users[0].email).toBe("a@test.com");
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -179,7 +179,7 @@ describe("@chimpbase/auth", () => {
       const users = await readJsonResponse<AuthUser[]>(listOutcome.response);
       expect(users).toHaveLength(0);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -211,7 +211,7 @@ describe("@chimpbase/auth", () => {
       expect(keyData.keyPrefix).toBe(keyData.key.substring(0, 8));
       expect(keyData.label).toBe("test-key");
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -243,7 +243,7 @@ describe("@chimpbase/auth", () => {
       // Guard passes → null (no matching route)
       expect(authOutcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -277,7 +277,7 @@ describe("@chimpbase/auth", () => {
       expect(keys[0].key).toBeUndefined();
       expect(keys[0].keyHash).toBeUndefined();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -317,7 +317,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(authOutcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -342,7 +342,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(authOutcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -360,7 +360,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(400);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -376,7 +376,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(400);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -391,7 +391,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(404);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -406,7 +406,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(404);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -430,7 +430,7 @@ describe("@chimpbase/auth", () => {
       expect(blocked.response?.status).toBe(429);
       expect(blocked.response?.headers.get("retry-after")).toBe("5");
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -472,7 +472,7 @@ describe("@chimpbase/auth", () => {
         expect(outcome.response?.status).toBe(401);
       }
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -499,7 +499,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcomeB.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -524,7 +524,7 @@ describe("@chimpbase/auth", () => {
       // Guard passes → null (no matching route)
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -551,7 +551,7 @@ describe("@chimpbase/auth", () => {
       expect(outcome.response?.status).toBe(403);
       expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "insufficient permissions" });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -582,7 +582,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(postOutcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -604,7 +604,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(200);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -626,7 +626,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(403);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -648,7 +648,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(200);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -670,7 +670,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(403);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -692,7 +692,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(postOutcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -710,7 +710,7 @@ describe("@chimpbase/auth", () => {
         }]),
       ).rejects.toThrow("invalid scope");
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -728,7 +728,7 @@ describe("@chimpbase/auth", () => {
       const keyData = keyResult.result as { scopes: string[] };
       expect(keyData.scopes).toEqual(["read", "write"]);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -771,7 +771,7 @@ describe("@chimpbase/auth", () => {
       expect(capturedScopes).toEqual(["read", "write"]);
       expect(capturedBootstrap).toBe(false);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -794,7 +794,7 @@ describe("@chimpbase/auth", () => {
 
       expect(capturedBootstrap).toBe(true);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -808,7 +808,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -822,7 +822,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -835,7 +835,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -847,7 +847,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response?.status).toBe(401);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -859,7 +859,7 @@ describe("@chimpbase/auth", () => {
       );
       expect(outcome.response).toBeNull();
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });
