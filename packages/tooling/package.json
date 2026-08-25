@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/tooling",
   "version": "0.7.0",
+  "private": true,
   "description": "Local tooling, config loading and CLI helpers for Chimpbase.",
   "license": "Apache-2.0",
   "type": "module",

@@ -33,8 +33,8 @@ That means fewer moving parts, fewer integration boundaries and less accidental 
 ## 30-Second Example
 
 ```ts
-import { createChimpbase } from "@chimpbase/bun";
-import { action, subscription, v, worker } from "@chimpbase/runtime";
+import { createChimpbase } from "chimpbase/runtime/bun";
+import { action, subscription, v, worker } from "chimpbase/runtime";
 
 const chimpbase = await createChimpbase({
   storage: { engine: "postgres", url: process.env.DATABASE_URL! },
@@ -137,21 +137,28 @@ If later you need more infrastructure, add it because the workload demands it, n
 
 ## Quick Start
 
-Install the Bun host:
+Install the single public package:
 
 ```bash
-bun add @chimpbase/bun
+npm install chimpbase
 ```
 
-Start with PostgreSQL:
+Import the portable runtime DSL from `chimpbase/runtime`, then import the adapter for the host that runs the process:
 
 ```ts
-import { createChimpbase } from "@chimpbase/bun";
+import { action, cron, subscription, v, worker, workflow } from "chimpbase/runtime";
+import { createChimpbase } from "chimpbase/runtime/bun";
 
 const chimpbase = await createChimpbase({
   storage: { engine: "postgres", url: process.env.DATABASE_URL! },
 });
 ```
+
+The root `chimpbase` export and `chimpbase/runtime` contain only the portable runtime DSL. They do not auto-detect a host or re-export any adapter. Each process must explicitly select exactly one adapter:
+
+- Bun: `chimpbase/runtime/bun`
+- Node: `chimpbase/runtime/node`
+- Deno: `chimpbase/runtime/deno`
 
 Register actions, workers, subscriptions and cron jobs explicitly:
 
@@ -196,11 +203,11 @@ Use `workflow(...)` when a business process has to survive time, restarts and re
 
 ### `ctx.blobs`
 
-Use `ctx.blobs` (from `@chimpbase/blobs`) for binary object storage with S3-like semantics: buckets, keys, metadata, multipart uploads, signed URLs, copy, listing. The default driver writes files under a configurable root so plain `rsync` can mirror them for backup.
+Use `ctx.blobs` (from `chimpbase/blobs`) for binary object storage with S3-like semantics: buckets, keys, metadata, multipart uploads, signed URLs, copy, listing. The default driver writes files under a configurable root so plain `rsync` can mirror them for backup.
 
 ### `service` + `ctx.mesh`
 
-Use `service()` and `chimpbaseMesh()` (from `@chimpbase/mesh`) to group actions into versioned services and discover peers across nodes automatically. Each node advertises into a Postgres registry table and reaches remote actions via `ctx.mesh.call(...)` — no extra broker.
+Use `service()` and `chimpbaseMesh()` (from `chimpbase/mesh`) to group actions into versioned services and discover peers across nodes automatically. Each node advertises into a Postgres registry table and reaches remote actions via `ctx.mesh.call(...)` — no extra broker.
 
 ### `ctx.db`
 
@@ -212,7 +219,7 @@ The `examples/` ladder under [`examples/bun`](examples/bun), [`examples/node`](e
 
 - `basic` — actions + `route()` over SQLite. The smallest runnable app.
 - `intermediate` — adds subscriptions, workers, cron, and Postgres.
-- `advanced` — adds `workflow`, collections, KV, streams, plugins (`@chimpbase/auth`, `@chimpbase/webhooks`, `@chimpbase/rest-collections`, `@chimpbase/otel`), and multi-replica Docker Compose.
+- `advanced` — adds `workflow`, collections, KV, streams, plugins (`chimpbase/auth`, `chimpbase/webhooks`, `chimpbase/rest-collections`, `chimpbase/otel`), and multi-replica Docker Compose.
 
 ## When Chimpbase Is A Good Fit
 
@@ -224,24 +231,3 @@ Chimpbase is a good fit when you want:
 - durable workflows without introducing a separate workflow platform
 - a small operational footprint while the product is still evolving
 
-## Install
-
-You do not need to install any extension.
-
-For Bun:
-
-```bash
-bun add @chimpbase/bun
-```
-
-For Deno:
-
-```bash
-deno add npm:@chimpbase/deno
-```
-
-For Node:
-
-```bash
-npm install @chimpbase/node
-```

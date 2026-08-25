@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/runtime",
   "version": "0.7.0",
+  "private": true,
   "description": "Runtime DSL and public primitives for Chimpbase applications.",
   "license": "Apache-2.0",
   "type": "module",

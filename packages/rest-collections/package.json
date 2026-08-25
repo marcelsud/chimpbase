@@ -1,6 +1,7 @@
 {
   "name": "@chimpbase/rest-collections",
   "version": "0.7.0",
+  "private": true,
   "description": "Fetch-first REST plugin for exposing Chimpbase collections without hardcoding routes in the runtime.",
   "license": "Apache-2.0",
   "type": "module",
