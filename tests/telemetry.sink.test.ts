@@ -504,14 +504,27 @@ describe("runtime shutdown", () => {
     expect(closed).toBe(true);
   });
 
-  test("reports sink cleanup rejection", async () => {
+  test("reports sink cleanup rejection after storage settles", async () => {
+    let releaseStorage!: () => void;
+    const storageCleanup = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
     const host = await createHostWithCleanup({
       shutdown() {
         return Promise.reject(new Error("sink cleanup failed"));
       },
-    }, () => undefined);
+    }, () => storageCleanup);
 
-    await expect(host.close()).rejects.toThrow("sink cleanup failed");
+    let rejected = false;
+    const closing = host.close().catch((error: unknown) => {
+      rejected = true;
+      throw error;
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(rejected).toBe(false);
+
+    releaseStorage();
+    await expect(closing).rejects.toThrow("sink cleanup failed");
   });
 
   test("reports storage cleanup rejection", async () => {

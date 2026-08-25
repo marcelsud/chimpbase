@@ -728,10 +728,20 @@ export class ChimpbaseHost<TServer> {
 
   async close(): Promise<void> {
     this.engine.stopEventBus();
-    await Promise.all([
-      this.storage.close(),
-      this.engine.shutdownSinks(),
+    const [sinkResult, storageResult] = await Promise.allSettled([
+      Promise.resolve().then(() => this.engine.shutdownSinks()),
+      Promise.resolve().then(() => this.storage.close()),
     ]);
+
+    if (sinkResult.status === "rejected" && storageResult.status === "rejected") {
+      throw new AggregateError([sinkResult.reason, storageResult.reason], "runtime cleanup failed");
+    }
+    if (sinkResult.status === "rejected") {
+      throw sinkResult.reason;
+    }
+    if (storageResult.status === "rejected") {
+      throw storageResult.reason;
+    }
     this.debug("runtime closed");
   }
 
