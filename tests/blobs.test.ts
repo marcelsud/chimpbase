@@ -306,6 +306,7 @@ describe("chimpbase blobs primitive (memory driver)", () => {
 
       const tampered = `${token}x`;
       expect(plugin.signer.verify(tampered)).toBeNull();
+      expect(plugin.signer.verify("missing-signature")).toBeNull();
     } finally {
       await started.stop();
     }

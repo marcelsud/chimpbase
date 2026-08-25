@@ -171,7 +171,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<AnnouncePayload>(INFO_EVENT_ANNOUNCE, async (_ctx, payload) => {
-      if (!(payload?.nodeId.length > 0) || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 
@@ -188,7 +188,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<LeavePayload>(INFO_EVENT_LEAVE, async (_ctx, payload) => {
-      if (!(payload?.nodeId.length > 0) || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 
@@ -198,7 +198,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<HeartbeatPayload>(INFO_EVENT_HEARTBEAT, async (_ctx, payload) => {
-      if (!(payload?.nodeId.length > 0) || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 

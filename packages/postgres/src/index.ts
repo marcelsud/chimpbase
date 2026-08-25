@@ -954,7 +954,7 @@ export function createPostgresEngineAdapter(
         [uploadId],
       );
       const row = result.rows[0];
-      if (!(row !== null)) return null;
+      if (row === undefined) return null;
       return {
         uploadId: row.upload_id,
         bucket: row.bucket,

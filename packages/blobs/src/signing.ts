@@ -70,7 +70,7 @@ export function createBlobSigner(options: CreateBlobSignerOptions): ChimpbaseBlo
 
   const verify = (token: string): SignedTokenPayload | null => {
     const [encoded, signature] = token.split(".");
-    if (!(encoded.length > 0) || !(signature.length > 0)) return null;
+    if (encoded.length === 0 || signature === undefined || signature.length === 0) return null;
     const expected = createHmac("sha256", secret).update(encoded).digest();
     const received = base64UrlDecode(signature);
     if (expected.length !== received.length) return null;

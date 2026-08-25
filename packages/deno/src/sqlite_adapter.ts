@@ -933,7 +933,7 @@ export function createSqliteEngineAdapter(
         content_type: string | null; metadata_json: string;
         driver_ref: string; created_at_ms: number; expires_at_ms: number;
       }>;
-      if (!(row !== null)) return null;
+      if (row === undefined) return null;
       return {
         uploadId: row.upload_id,
         bucket: row.bucket,

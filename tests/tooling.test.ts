@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 
 import type { ChimpbaseRegistration } from "../packages/runtime/index.ts";
 import { loadProjectAppDefinition } from "../packages/tooling/src/app.ts";
+import {
+  runChimpbaseCli,
+  type RunChimpbaseCliDependencies,
+} from "../packages/tooling/src/cli.ts";
 import { loadProjectConfig } from "../packages/tooling/src/config.ts";
 import {
   loadProjectMigrations,
@@ -295,6 +299,34 @@ describe("@chimpbase/tooling", () => {
       }) as ChimpbaseRegistration,
     );
   });
+  test("CLI preserves default and trailing boolean options", async () => {
+    const starts: Array<{ runWorker?: boolean; serve?: boolean }> = [];
+    const dependencies: RunChimpbaseCliDependencies = {
+      async runAction() {
+        throw new Error("unexpected action");
+      },
+      async startProject(options) {
+        starts.push(options ?? {});
+        return { server: { port: 3000 }, async stop() {} };
+      },
+      async syncSchema() {
+        throw new Error("unexpected schema sync");
+      },
+      async syncWorkflowContracts() {
+        throw new Error("unexpected contract sync");
+      },
+      writeLine() {},
+    };
+
+    await runChimpbaseCli([], dependencies);
+    await runChimpbaseCli(["dev", "--worker"], dependencies);
+
+    expect(starts.map(({ runWorker, serve }) => ({ runWorker, serve }))).toEqual([
+      { runWorker: undefined, serve: undefined },
+      { runWorker: true, serve: undefined },
+    ]);
+  });
+
 });
 
 async function createTempDir(label: string): Promise<string> {
