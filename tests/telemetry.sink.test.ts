@@ -476,12 +476,12 @@ describe("runtime shutdown", () => {
     const storageCleanup = new Promise<void>((resolve) => {
       releaseStorage = resolve;
     });
-    const host = await createHostWithCleanup({
-      shutdown() {
-        sinkStarted = true;
-        return sinkCleanup;
-      },
-    }, () => {
+    const sink = createMockSink().sink;
+    sink.shutdown = () => {
+      sinkStarted = true;
+      return sinkCleanup;
+    };
+    const host = await createHostWithCleanup(sink, () => {
       storageStarted = true;
       return storageCleanup;
     });
@@ -509,11 +509,9 @@ describe("runtime shutdown", () => {
     const storageCleanup = new Promise<void>((resolve) => {
       releaseStorage = resolve;
     });
-    const host = await createHostWithCleanup({
-      shutdown() {
-        return Promise.reject(new Error("sink cleanup failed"));
-      },
-    }, () => storageCleanup);
+    const sink = createMockSink().sink;
+    sink.shutdown = () => Promise.reject(new Error("sink cleanup failed"));
+    const host = await createHostWithCleanup(sink, () => storageCleanup);
 
     let rejected = false;
     const closing = host.close().catch((error: unknown) => {
@@ -528,7 +526,7 @@ describe("runtime shutdown", () => {
   });
 
   test("reports storage cleanup rejection", async () => {
-    const host = await createHostWithCleanup({}, () => {
+    const host = await createHostWithCleanup(createMockSink().sink, () => {
       return Promise.reject(new Error("storage cleanup failed"));
     });
 

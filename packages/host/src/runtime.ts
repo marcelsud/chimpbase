@@ -734,13 +734,13 @@ export class ChimpbaseHost<TServer> {
     ]);
 
     if (sinkResult.status === "rejected" && storageResult.status === "rejected") {
-      throw new AggregateError([sinkResult.reason, storageResult.reason], "runtime cleanup failed");
+      throw new AggregateError([sinkResult.reason as unknown, storageResult.reason as unknown], "runtime cleanup failed");
     }
     if (sinkResult.status === "rejected") {
-      throw sinkResult.reason;
+      throw sinkResult.reason as unknown;
     }
     if (storageResult.status === "rejected") {
-      throw storageResult.reason;
+      throw storageResult.reason as unknown;
     }
     this.debug("runtime closed");
   }
