@@ -41,9 +41,10 @@ const createCustomer = action({
     name: v.string(),
   }),
   async handler(ctx, input) {
-    const [customer] = await ctx.db.query<{ id: number }>(
+    const [customer] = await ctx.db.query(
       "INSERT INTO customers (email, name) VALUES (?1, ?2) RETURNING id",
       [input.email, input.name],
+      v.object({ id: v.number() }),
     );
 
     ctx.pubsub.publish("customer.created", {

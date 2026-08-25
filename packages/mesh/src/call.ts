@@ -1,5 +1,5 @@
 import { isArrayValue } from "@chimpbase/runtime";
-import type { ChimpbaseContext } from "@chimpbase/runtime";
+import type { ChimpbaseContext, ChimpbaseValidator } from "@chimpbase/runtime";
 
 import type { MeshPeerCache } from "./discovery.ts";
 import type {
@@ -26,21 +26,21 @@ export interface CallResolverOptions {
   remoteDispatcher: RemoteDispatcher | null;
 }
 
-export type RemoteDispatcher = <TResult = unknown>(params: {
+export type RemoteDispatcher = (params: {
   actionName: string;
   args: unknown;
-  ctx: ChimpbaseContext;
   deadlineMs: number;
   peer: NodeRecord;
-}) => Promise<TResult>;
+}) => Promise<unknown>;
 
 const roundRobinCounters = new Map<string, number>();
 
 export function createCallDispatcher(options: CallResolverOptions) {
-  const core = async <TResult = unknown>(
+  const core = async <TResult>(
     ctx: ChimpbaseContext,
     actionName: string,
     args: unknown,
+    resultValidator: ChimpbaseValidator<TResult>,
     callOpts: CallOptions,
   ): Promise<TResult> => {
     const strategy = callOpts.strategy ?? options.defaultStrategy;
@@ -62,36 +62,38 @@ export function createCallDispatcher(options: CallResolverOptions) {
         throw new MeshNoAvailableNodeError(actionName);
       }
 
+      let result: unknown;
       if (target.kind === "local") {
-        return await withTimeout<TResult>(
-          invokeLocal<TResult>(ctx, actionName, args),
+        result = await withTimeout(
+          invokeLocal(ctx, actionName, args),
           timeoutMs,
           actionName,
           options.localNodeId,
         );
-      }
+      } else {
+        if (!(options.remoteDispatcher !== null)) {
+          throw new MeshCallError(
+            actionName,
+            target.peer.nodeId,
+            `remote dispatch is disabled for action: ${actionName}`,
+          );
+        }
 
-      if (!(options.remoteDispatcher !== null)) {
-        throw new MeshCallError(
+        const deadlineMs = Date.now() + timeoutMs;
+        result = await withTimeout(
+          options.remoteDispatcher({
+            actionName,
+            args,
+            deadlineMs,
+            peer: target.peer,
+          }),
+          timeoutMs,
           actionName,
           target.peer.nodeId,
-          `remote dispatch is disabled for action: ${actionName}`,
         );
       }
 
-      const deadlineMs = Date.now() + timeoutMs;
-      return await withTimeout<TResult>(
-        options.remoteDispatcher<TResult>({
-          actionName,
-          args,
-          ctx,
-          deadlineMs,
-          peer: target.peer,
-        }),
-        timeoutMs,
-        actionName,
-        target.peer.nodeId,
-      );
+      return resultValidator.parse(result, `mesh action ${actionName} result`);
     };
 
     let lastError: Error | null = null;
@@ -107,13 +109,15 @@ export function createCallDispatcher(options: CallResolverOptions) {
     }
 
     if ((callOpts.fallback !== undefined)) {
-      return (await callOpts.fallback(lastError ?? new Error("mesh call failed"))) as TResult;
+      const fallbackResult = await callOpts.fallback(lastError ?? new Error("mesh call failed"));
+      return resultValidator.parse(fallbackResult, `mesh action ${actionName} fallback result`);
     }
 
     throw lastError ?? new MeshCallError(actionName, null, "mesh call failed");
   };
 
-  let wrapped: MeshCallFn = (actionName, args, opts) => core(currentCtx(), actionName, args, opts);
+  let wrapped: MeshCallFn = (actionName, args, result, opts) =>
+    core(currentCtx(), actionName, args, result, opts);
   for (let i = options.middleware.length - 1; i >= 0; i--) {
     wrapped = options.middleware[i](wrapped);
   }
@@ -126,16 +130,17 @@ export function createCallDispatcher(options: CallResolverOptions) {
     return ctxSlot;
   };
 
-  return async <TResult = unknown>(
+  return async <TResult>(
     ctx: ChimpbaseContext,
     actionName: string,
     args: unknown,
+    result: ChimpbaseValidator<TResult>,
     callOpts: CallOptions,
   ): Promise<TResult> => {
     const previous = ctxSlot;
     ctxSlot = ctx;
     try {
-      return (await wrapped(actionName, args, callOpts)) as TResult;
+      return await wrapped(actionName, args, result, callOpts);
     } finally {
       ctxSlot = previous;
     }
@@ -221,9 +226,9 @@ function loadOf(result: PickResult): number {
   return typeof cpu === "number" ? cpu : 0.5;
 }
 
-function invokeLocal<TResult>(ctx: ChimpbaseContext, actionName: string, args: unknown): Promise<TResult> {
+function invokeLocal(ctx: ChimpbaseContext, actionName: string, args: unknown): Promise<unknown> {
   const invocationArgs = toInvocationArgs(args);
-  return ctx.action<unknown[], TResult>(actionName, ...invocationArgs);
+  return ctx.action(actionName, ...invocationArgs);
 }
 
 function toInvocationArgs(args: unknown): unknown[] {

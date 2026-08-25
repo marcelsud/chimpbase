@@ -11,8 +11,8 @@ const chimpbase = await createChimpbase({
 
 const testConfig = action({ name: "testConfig", args: v.object({}), async handler(ctx) {
   // Verify db is accessible (storage engine works)
-  const result = await ctx.db.query("SELECT 1 AS ok");
-  if ((result[0] as { ok: number }).ok !== 1) throw new Error("db query should work");
+  const result = await ctx.db.query("SELECT 1 AS ok", undefined, v.object({ ok: v.number() }));
+  if (result[0]?.ok !== 1) throw new Error("db query should work");
 
   // Verify secrets accessor works
   const missing = ctx.secret("NONEXISTENT");

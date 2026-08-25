@@ -18,13 +18,14 @@ import type {
   ChimpbaseBlobUploadListOptions,
   ChimpbaseCollectionFilter,
   ChimpbaseCollectionFindOptions,
+  ChimpbaseValidator,
   ChimpbaseCollectionPatch,
   ChimpbaseKvListOptions,
   ChimpbaseQueueEnqueueOptions,
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
-import { parseJson, parseJsonObject, parseStringRecord } from "@chimpbase/runtime";
+import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord, v } from "@chimpbase/runtime";
 
 import { createPostgresKysely } from "./kysely.ts";
 
@@ -45,6 +46,17 @@ interface PersistedCronScheduleRow {
   next_fire_at_ms: number;
   schedule_name: string;
 }
+function isKyselyRows<TResult>(rows: unknown): rows is TResult[] {
+  return isArrayValue(rows) && rows.every((row) => isJsonObject(row));
+}
+
+function parseKyselyRows<TResult>(rows: unknown): TResult[] {
+  if (!isKyselyRows<TResult>(rows)) {
+    throw new Error("Kysely query rows must be database records");
+  }
+  return rows;
+}
+
 
 type Queryable = Pool | PoolClient;
 
@@ -322,7 +334,6 @@ export function createPostgresEngineAdapter(
   pool: Pool,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<Record<string, never>> | null = null;
   let transactionClient: PoolClient | null = null;
 
   const queryable = (): Queryable => transactionClient ?? pool;
@@ -490,21 +501,25 @@ export function createPostgresEngineAdapter(
       }
       return matched.length;
     },
-    async collectionFind<TDocument = Record<string, unknown>>(
-      name: string,
-      filter: ChimpbaseCollectionFilter = {},
-      options?: ChimpbaseCollectionFindOptions,
-    ): Promise<TDocument[]> {
-      return (await findCollectionDocuments(queryable(), name, filter, options)).map((row) =>
-        parseJson(row.document_json) as TDocument
-      );
-    },
-    async collectionFindOne<TDocument = Record<string, unknown>>(
+    async collectionFind<TDocument>(
       name: string,
       filter: ChimpbaseCollectionFilter,
+      options: ChimpbaseCollectionFindOptions | undefined,
+      validator: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument[]> {
+      return (await findCollectionDocuments(queryable(), name, filter, options)).map((row) =>
+        validator.parse(parseJson(row.document_json, `collection ${name} document ${row.document_id}`), `collection ${name} document ${row.document_id}`)
+      );
+    },
+    async collectionFindOne<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter,
+      validator: ChimpbaseValidator<TDocument>,
     ): Promise<TDocument | null> {
       const [row] = await findCollectionDocuments(queryable(), name, filter, { limit: 1 });
-      return (row !== null && row !== undefined) ? parseJson(row.document_json) as TDocument : null;
+      return row === undefined
+        ? null
+        : validator.parse(parseJson(row.document_json, `collection ${name} document ${row.document_id}`), `collection ${name} document ${row.document_id}`);
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -599,13 +614,18 @@ export function createPostgresEngineAdapter(
     async kvDelete(key: string) {
       await queryable().query("DELETE FROM _chimpbase_kv WHERE key = $1", [key]);
     },
-    async kvGet<TValue = unknown>(key: string): Promise<TValue | null> {
+    async kvGet<TValue>(
+      key: string,
+      validator: ChimpbaseValidator<TValue>,
+    ): Promise<TValue | null> {
       const result = await queryable().query<{ value_json: string }>(
         "SELECT value_json::text AS value_json FROM _chimpbase_kv WHERE key = $1 AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
         [key],
       );
       const row = result.rows[0];
-      return (row !== null && row !== undefined) ? parseJson(row.value_json) as TValue : null;
+      return row === undefined
+        ? null
+        : validator.parse(parseJson(row.value_json, `key-value entry ${key}`), `key-value entry ${key}`);
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
@@ -669,24 +689,27 @@ export function createPostgresEngineAdapter(
       );
     },
     createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      if (!(kysely !== null)) {
-        kysely = createPostgresKysely({
-          async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
-            const result = await queryable().query(compiledQuery.sql, [...compiledQuery.parameters]);
+      return createPostgresKysely<TDatabase>({
+        async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+          const result = await queryable().query<Record<string, unknown>>(
+            compiledQuery.sql,
+            [...compiledQuery.parameters],
+          );
 
-            return {
-              numAffectedRows: result.rowCount == null ? undefined : BigInt(result.rowCount),
-              rows: result.rows as R[],
-            };
-          },
-        });
-      }
-
-      return kysely as Kysely<TDatabase>;
+          return {
+            numAffectedRows: result.rowCount == null ? undefined : BigInt(result.rowCount),
+            rows: parseKyselyRows<R>(result.rows),
+          };
+        },
+      });
     },
-    async query<T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []): Promise<T[]> {
-      const result = await queryable().query(normalizePostgresSql(sql), [...params]);
-      return result.rows as T[];
+    async query<T>(
+      sql: string,
+      params: readonly unknown[],
+      validator: ChimpbaseValidator<T>,
+    ): Promise<T[]> {
+      const result = await queryable().query<Record<string, unknown>>(normalizePostgresSql(sql), [...params]);
+      return validator.array().parse(result.rows, "database query rows");
     },
     async queueEnqueue<TPayload = unknown>(name: string, payload: TPayload, options?: ChimpbaseQueueEnqueueOptions) {
       const availableAtMs = platform.now() + Math.max(0, options?.delayMs ?? 0);
@@ -742,9 +765,10 @@ export function createPostgresEngineAdapter(
       );
       return result.rows[0]?.id ?? 0;
     },
-    async streamRead<TPayload = unknown>(
+    async streamRead<TPayload>(
       stream: string,
-      options?: ChimpbaseStreamReadOptions,
+      options: ChimpbaseStreamReadOptions | undefined,
+      validator: ChimpbaseValidator<TPayload>,
     ): Promise<ChimpbaseStreamEvent<TPayload>[]> {
       const sinceId = options?.sinceId ?? 0;
       const limit = options?.limit ?? 100;
@@ -774,7 +798,7 @@ export function createPostgresEngineAdapter(
         createdAt: row.created_at,
         event: row.event_name,
         id: row.id,
-        payload: parseJson(row.payload_json) as TPayload,
+        payload: validator.parse(parseJson(row.payload_json, `stream ${stream} event ${row.id}`), `stream ${stream} event ${row.id}`),
         stream: row.stream_name,
       }));
     },
@@ -1165,10 +1189,11 @@ async function persistEvents(queryable: Queryable, events: ChimpbaseEventRecord[
 
   for (const event of events) {
     const result = await queryable.query<{ id: number }>(
-      "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, $2::jsonb) RETURNING id",
+      "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, $2::jsonb) RETURNING CAST(id AS DOUBLE PRECISION) AS id",
       [event.name, event.payloadJson],
     );
-    event.id = result.rows[0]?.id;
+    const row = v.object({ id: v.integer() }).parse(result.rows[0], "persisted event row");
+    event.id = row.id;
   }
 }
 

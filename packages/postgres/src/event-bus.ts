@@ -1,11 +1,13 @@
 import type { Pool } from "pg";
 import type { ChimpbaseEventBus, ChimpbaseEventBusCallback, ChimpbaseEventRecord } from "@chimpbase/core";
-import { parseJson } from "@chimpbase/runtime";
+import { parseJson, v } from "@chimpbase/runtime";
 
 export interface PostgresPollingEventBusOptions {
   pollIntervalMs?: number;
   pool: Pool;
 }
+
+const eventIdValidator = v.integer();
 
 export class PostgresPollingEventBus implements ChimpbaseEventBus {
   private readonly pollIntervalMs: number;
@@ -52,7 +54,8 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
         "SELECT MAX(id) AS max_id FROM _chimpbase_events",
       );
       const maxId = result.rows[0]?.max_id;
-      this.lastSeenId = (maxId !== null && maxId.length > 0) ? Number(maxId) : 0;
+      const parsedMaxId = (maxId !== null && maxId.length > 0) ? Number(maxId) : 0;
+      this.lastSeenId = eventIdValidator.parse(parsedMaxId, "event high-water mark");
     } catch (error) {
       console.error("[@chimpbase/postgres][event-bus] failed to initialize high-water mark", error);
     }
@@ -68,7 +71,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
         id: number;
         payload_json: string;
       }>(
-        `SELECT id, event_name, payload_json::text AS payload_json
+        `SELECT CAST(id AS DOUBLE PRECISION) AS id, event_name, payload_json::text AS payload_json
          FROM _chimpbase_events
          WHERE id > $1
          ORDER BY id ASC
@@ -79,13 +82,13 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
       if (result.rows.length === 0) return;
 
       const events: ChimpbaseEventRecord[] = result.rows.map((row) => ({
-        id: row.id,
+        id: eventIdValidator.parse(row.id, "polled event id"),
         name: row.event_name,
-        payload: parseJson(row.payload_json),
+        payload: parseJson(row.payload_json, `event ${row.id} payload`),
         payloadJson: row.payload_json,
       }));
 
-      this.lastSeenId = result.rows[result.rows.length - 1].id;
+      this.lastSeenId = events[events.length - 1].id ?? this.lastSeenId;
       await callback(events);
     } catch (error) {
       console.error("[@chimpbase/postgres][event-bus] poll error", error);

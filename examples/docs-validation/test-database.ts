@@ -7,7 +7,7 @@ const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server:
 // Raw SQL
 const rawInsert = action({ name: "rawInsert", args: v.object({}), async handler(ctx) {
   await ctx.db.query("INSERT INTO users (email, name) VALUES (?1, ?2)", ["alice@example.com", "Alice"]);
-  const users = await ctx.db.query<{ id: number; email: string }>("SELECT id, email FROM users WHERE email = ?1", ["alice@example.com"]);
+  const users = await ctx.db.query("SELECT id, email FROM users WHERE email = ?1", ["alice@example.com"], v.object({ id: v.number(), email: v.string() }));
   if (users.length !== 1) throw new Error("should find 1 user");
   return users[0];
 } });

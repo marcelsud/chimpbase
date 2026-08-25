@@ -1,17 +1,30 @@
-import type { Pool, PoolClient } from "pg";
 import type {
   ChimpbaseEventBus,
   ChimpbaseEventBusCallback,
   ChimpbaseEventRecord,
 } from "@chimpbase/core";
+import { parseJson, v } from "@chimpbase/runtime";
+
 
 const NOTIFY_PAYLOAD_LIMIT = 7800;
 const CHANNEL_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
 
+interface PostgresListenClient {
+  on(event: "notification", listener: (message: { channel: string; payload?: string }) => void): this;
+  query(sql: string, params?: unknown[]): Promise<unknown>;
+  release(): void;
+  removeListener(event: "notification", listener: (message: { channel: string; payload?: string }) => void): this;
+}
+
+export interface PostgresListenPool {
+  connect(): Promise<PostgresListenClient>;
+  query(sql: string, params?: unknown[]): Promise<unknown>;
+}
+
 export interface PostgresListenEventBusOptions {
   channel?: string;
   originId?: string;
-  pool: Pool;
+  pool: PostgresListenPool;
 }
 
 export class PayloadTooLargeError extends Error {
@@ -32,12 +45,22 @@ interface NotifyEnvelope {
   event: ChimpbaseEventRecord;
   origin: string;
 }
+const notifyEnvelopeValidator = v.object({
+  event: v.object({
+    id: v.integer().optional(),
+    name: v.string(),
+    payload: v.unknown().optional(),
+    payloadJson: v.string(),
+  }),
+  origin: v.string(),
+});
+
 
 export class PostgresListenEventBus implements ChimpbaseEventBus {
   private readonly channel: string;
   private readonly originId: string;
-  private readonly pool: Pool;
-  private client: PoolClient | null = null;
+  private readonly pool: PostgresListenPool;
+  private client: PostgresListenClient | null = null;
   private callback: ChimpbaseEventBusCallback | null = null;
   private notificationHandler: ((msg: { channel: string; payload?: string }) => void) | null = null;
 
@@ -116,7 +139,14 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
 
     let envelope: NotifyEnvelope;
     try {
-      envelope = JSON.parse(payload) as NotifyEnvelope;
+      const parsed = notifyEnvelopeValidator.parse(
+        parseJson(payload, "Postgres notification"),
+        "Postgres notification",
+      );
+      envelope = {
+        event: { ...parsed.event, payload: parsed.event.payload },
+        origin: parsed.origin,
+      };
     } catch (error) {
       console.error("[@chimpbase/postgres][listen-event-bus] invalid payload", error);
       return;

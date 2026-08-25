@@ -21,12 +21,13 @@ import type {
   ChimpbaseCollectionFilter,
   ChimpbaseCollectionFindOptions,
   ChimpbaseCollectionPatch,
+  ChimpbaseValidator,
   ChimpbaseKvListOptions,
   ChimpbaseQueueEnqueueOptions,
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
-import { parseJson, parseJsonObject, parseStringRecord } from "@chimpbase/runtime";
+import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord, v } from "@chimpbase/runtime";
 
 import { createSqliteKysely } from "./kysely.ts";
 
@@ -74,6 +75,83 @@ interface PersistedCronScheduleRow {
   next_fire_at_ms: number;
   schedule_name: string;
 }
+const blobMetadataRowValidator = v.object({
+  bucket: v.string(),
+  content_type: v.string(),
+  created_at: v.string(),
+  driver_ref: v.string(),
+  etag: v.string(),
+  key: v.string(),
+  metadata_json: v.string(),
+  size: v.number(),
+  updated_at: v.string(),
+});
+const blobPartRowValidator = v.object({
+  created_at: v.string(),
+  driver_ref: v.string(),
+  etag: v.string(),
+  part_number: v.number(),
+  size: v.number(),
+  upload_id: v.string(),
+});
+const blobUploadRowValidator = v.object({
+  bucket: v.string(),
+  content_type: v.string().nullable(),
+  created_at_ms: v.number(),
+  driver_ref: v.string(),
+  expires_at_ms: v.number(),
+  key: v.string(),
+  metadata_json: v.string(),
+  upload_id: v.string(),
+});
+const collectionDocumentRowValidator = v.object({
+  document_id: v.string(),
+  document_json: v.string(),
+});
+const collectionNameRowValidator = v.object({ collection_name: v.string() });
+const cronScheduleRowValidator = v.object({
+  cron_expression: v.string(),
+  next_fire_at_ms: v.number(),
+  schedule_name: v.string(),
+});
+const idRowValidator = v.object({ id: v.number() });
+const keyRowValidator = v.object({ key: v.string() });
+const payloadJsonRowValidator = v.object({ payload_json: v.string() });
+const queueJobRowValidator = v.object({
+  attempt_count: v.number(),
+  id: v.number(),
+  payload_json: v.string(),
+  queue_name: v.string(),
+});
+const streamEventRowValidator = v.object({
+  created_at: v.string(),
+  event_name: v.string(),
+  id: v.number(),
+  payload_json: v.string(),
+  stream_name: v.string(),
+});
+const uploadIdRowValidator = v.object({ upload_id: v.string() });
+const valueJsonRowValidator = v.object({ value_json: v.string() });
+
+function parseRows<TValue>(
+  rows: unknown,
+  validator: ChimpbaseValidator<TValue>,
+  label: string,
+): TValue[] {
+  return validator.array().parse(rows, label);
+}
+
+function isKyselyRows<TResult>(rows: unknown): rows is TResult[] {
+  return isArrayValue(rows) && rows.every((row) => isJsonObject(row));
+}
+
+function parseKyselyRows<TResult>(rows: unknown): TResult[] {
+  if (!isKyselyRows<TResult>(rows)) {
+    throw new Error("Kysely query rows must be database records");
+  }
+  return rows;
+}
+
 
 function buildSqliteQueueNameFilter(
   queueNames: readonly string[],
@@ -348,7 +426,6 @@ export function createSqliteEngineAdapter(
   db: SqliteDatabase,
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
-  let kysely: Kysely<Record<string, never>> | null = null;
 
   return {
     async advanceCronSchedule(
@@ -385,7 +462,7 @@ export function createSqliteEngineAdapter(
 
       db.exec("BEGIN IMMEDIATE");
       try {
-        const [schedule] = db.query(
+        const [schedule] = parseRows(db.query(
           `
             SELECT
               schedule_name,
@@ -401,7 +478,7 @@ export function createSqliteEngineAdapter(
             ORDER BY next_fire_at_ms ASC, schedule_name ASC
             LIMIT 1
           `,
-        ).all(now) as PersistedCronScheduleRow[];
+        ).all(now), cronScheduleRowValidator, "claimed cron schedule rows");
 
         if (!(schedule !== null && schedule !== undefined)) {
           db.exec("COMMIT");
@@ -454,7 +531,7 @@ export function createSqliteEngineAdapter(
 
       db.exec("BEGIN IMMEDIATE");
       try {
-        const [job] = db.query(
+        const [job] = parseRows(db.query(
           `
             SELECT
               id,
@@ -471,7 +548,7 @@ export function createSqliteEngineAdapter(
             ORDER BY id ASC
             LIMIT 1
           `,
-        ).all(now, ...queueFilter.params) as ChimpbaseQueueJobRecord[];
+        ).all(now, ...queueFilter.params), queueJobRowValidator, "claimed queue job rows");
 
         if (!(job !== null && job !== undefined)) {
           db.exec("COMMIT");
@@ -513,21 +590,25 @@ export function createSqliteEngineAdapter(
       }
       return matched.length;
     },
-    async collectionFind<TDocument = Record<string, unknown>>(
-      name: string,
-      filter: ChimpbaseCollectionFilter = {},
-      options?: ChimpbaseCollectionFindOptions,
-    ): Promise<TDocument[]> {
-      return findCollectionDocuments(db, name, filter, options).map((row) =>
-        parseJson(row.document_json) as TDocument
-      );
-    },
-    async collectionFindOne<TDocument = Record<string, unknown>>(
+    async collectionFind<TDocument>(
       name: string,
       filter: ChimpbaseCollectionFilter,
+      options: ChimpbaseCollectionFindOptions | undefined,
+      validator: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument[]> {
+      return findCollectionDocuments(db, name, filter, options).map((row) =>
+        validator.parse(parseJson(row.document_json, `collection ${name} document ${row.document_id}`), `collection ${name} document ${row.document_id}`)
+      );
+    },
+    async collectionFindOne<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter,
+      validator: ChimpbaseValidator<TDocument>,
     ): Promise<TDocument | null> {
       const [row] = findCollectionDocuments(db, name, filter, { limit: 1 });
-      return (row !== null && row !== undefined) ? parseJson(row.document_json) as TDocument : null;
+      return row === undefined
+        ? null
+        : validator.parse(parseJson(row.document_json, `collection ${name} document ${row.document_id}`), `collection ${name} document ${row.document_id}`);
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -546,13 +627,13 @@ export function createSqliteEngineAdapter(
       return documentId;
     },
     async collectionList(): Promise<string[]> {
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT DISTINCT collection_name
           FROM _chimpbase_collections
           ORDER BY collection_name ASC
         `,
-      ).all() as Array<{ collection_name: string }>;
+      ).all(), collectionNameRowValidator, "collection name rows");
       return rows.map((row) => row.collection_name);
     },
     async collectionUpdate(name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> {
@@ -593,9 +674,9 @@ export function createSqliteEngineAdapter(
       ).run(scheduleName);
     },
     async getQueueJobPayload(jobId: number): Promise<string | null> {
-      const [job] = db.query(
+      const [job] = parseRows(db.query(
         "SELECT payload_json FROM _chimpbase_queue_jobs WHERE id = ?1 LIMIT 1",
-      ).all(jobId) as Array<{ payload_json: string }>;
+      ).all(jobId), payloadJsonRowValidator, "queue payload rows");
       return job?.payload_json ?? null;
     },
     async insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean> {
@@ -613,27 +694,32 @@ export function createSqliteEngineAdapter(
     async kvDelete(key: string) {
       db.query("DELETE FROM _chimpbase_kv WHERE key = ?1").run(key);
     },
-    async kvGet<TValue = unknown>(key: string): Promise<TValue | null> {
-      const [row] = db.query(
+    async kvGet<TValue>(
+      key: string,
+      validator: ChimpbaseValidator<TValue>,
+    ): Promise<TValue | null> {
+      const [row] = parseRows(db.query(
         `
           SELECT value_json
           FROM _chimpbase_kv
           WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))
           LIMIT 1
         `,
-      ).all(key) as Array<{ value_json: string }>;
-      return (row !== null && row !== undefined) ? parseJson(row.value_json) as TValue : null;
+      ).all(key), valueJsonRowValidator, "key-value rows");
+      return row === undefined
+        ? null
+        : validator.parse(parseJson(row.value_json, `key-value entry ${key}`), `key-value entry ${key}`);
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT key
           FROM _chimpbase_kv
           WHERE key LIKE ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))
           ORDER BY key ASC
         `,
-      ).all(`${prefix}%`) as Array<{ key: string }>;
+      ).all(`${prefix}%`), keyRowValidator, "key list rows");
       return rows.map((row) => row.key);
     },
     async kvSet<TValue = unknown>(key: string, value: TValue, ttlMs?: number) {
@@ -650,7 +736,7 @@ export function createSqliteEngineAdapter(
       ).run(key, JSON.stringify(value ?? null), expiresAt);
     },
     async listCronSchedules(): Promise<PersistedCronScheduleRow[]> {
-      return db.query(
+      return parseRows(db.query(
         `
           SELECT
             schedule_name,
@@ -659,7 +745,7 @@ export function createSqliteEngineAdapter(
           FROM _chimpbase_cron_schedules
           ORDER BY schedule_name ASC
         `,
-      ).all() as PersistedCronScheduleRow[];
+      ).all(), cronScheduleRowValidator, "cron schedule rows");
     },
     async markQueueJobFailure(
       jobId: number,
@@ -681,32 +767,32 @@ export function createSqliteEngineAdapter(
       ).run(status, nextAvailableAtMs, errorMessage, jobId);
     },
     createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      if (!(kysely !== null)) {
-        kysely = createSqliteKysely({
-          executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
-            const statement = db.query(compiledQuery.sql);
+      return createSqliteKysely<TDatabase>({
+        executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+          const statement = db.query(compiledQuery.sql);
 
-            if (statement.reader) {
-              return Promise.resolve({
-                rows: statement.all(...toSqlBindings(compiledQuery.parameters)) as R[],
-              });
-            }
-
-            const result = statement.run(...toSqlBindings(compiledQuery.parameters));
-
+          if (statement.reader) {
             return Promise.resolve({
-              insertId: result.lastInsertRowid === undefined ? undefined : BigInt(result.lastInsertRowid),
-              numAffectedRows: BigInt(result.changes),
-              rows: [],
+              rows: parseKyselyRows<R>(statement.all(...toSqlBindings(compiledQuery.parameters))),
             });
-          },
-        });
-      }
+          }
 
-      return kysely as Kysely<TDatabase>;
+          const result = statement.run(...toSqlBindings(compiledQuery.parameters));
+
+          return Promise.resolve({
+            insertId: result.lastInsertRowid === undefined ? undefined : BigInt(result.lastInsertRowid),
+            numAffectedRows: BigInt(result.changes),
+            rows: [],
+          });
+        },
+      });
     },
-    async query<T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []): Promise<T[]> {
-      return runQuery<T>(db, sql, toSqlBindings(params));
+    async query<T>(
+      sql: string,
+      params: readonly unknown[],
+      validator: ChimpbaseValidator<T>,
+    ): Promise<T[]> {
+      return runQuery(db, sql, toSqlBindings(params), validator);
     },
     async queueEnqueue<TPayload = unknown>(name: string, payload: TPayload, options?: ChimpbaseQueueEnqueueOptions) {
       const availableAtMs = platform.now() + Math.max(0, options?.delayMs ?? 0);
@@ -751,18 +837,19 @@ export function createSqliteEngineAdapter(
         `,
       ).run(stream, event, JSON.stringify(payload ?? null));
 
-      const [row] = db.query(
+      const [row] = parseRows(db.query(
         "SELECT last_insert_rowid() AS id",
-      ).all() as Array<{ id: number }>;
+      ).all(), idRowValidator, "insert id rows");
       return row?.id ?? 0;
     },
-    async streamRead<TPayload = unknown>(
+    async streamRead<TPayload>(
       stream: string,
-      options?: ChimpbaseStreamReadOptions,
+      options: ChimpbaseStreamReadOptions | undefined,
+      validator: ChimpbaseValidator<TPayload>,
     ): Promise<ChimpbaseStreamEvent<TPayload>[]> {
       const sinceId = options?.sinceId ?? 0;
       const limit = options?.limit ?? 100;
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT
             id,
@@ -775,19 +862,13 @@ export function createSqliteEngineAdapter(
           ORDER BY id ASC
           LIMIT ?3
         `,
-      ).all(stream, sinceId, limit) as Array<{
-        created_at: string;
-        event_name: string;
-        id: number;
-        payload_json: string;
-        stream_name: string;
-      }>;
+      ).all(stream, sinceId, limit), streamEventRowValidator, "stream event rows");
 
       return rows.map((row) => ({
         createdAt: row.created_at,
         event: row.event_name,
         id: row.id,
-        payload: parseJson(row.payload_json) as TPayload,
+        payload: validator.parse(parseJson(row.payload_json, `stream ${stream} event ${row.id}`), `stream ${stream} event ${row.id}`),
         stream: row.stream_name,
       }));
     },
@@ -837,18 +918,14 @@ export function createSqliteEngineAdapter(
       );
     },
     async blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null> {
-      const [row] = db.query(
+      const [row] = parseRows(db.query(
         `
           SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
           FROM _chimpbase_blobs
           WHERE bucket = ?1 AND key = ?2
           LIMIT 1
         `,
-      ).all(bucket, key) as Array<{
-        bucket: string; key: string; size: number; etag: string;
-        content_type: string; metadata_json: string; driver_ref: string;
-        created_at: string; updated_at: string;
-      }>;
+      ).all(bucket, key), blobMetadataRowValidator, "blob metadata rows");
       if (!(row !== null && row !== undefined)) return null;
       return {
         bucket: row.bucket,
@@ -876,7 +953,7 @@ export function createSqliteEngineAdapter(
       const delimiter = options.delimiter ?? null;
       const cursor = options.cursor ?? "";
       const limit = Math.min(Math.max(options.limit ?? 1000, 1), 1000);
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
           FROM _chimpbase_blobs
@@ -884,11 +961,7 @@ export function createSqliteEngineAdapter(
           ORDER BY key ASC
           LIMIT ?4
         `,
-      ).all(bucket, `${prefix}%`, cursor, limit + 1) as Array<{
-        bucket: string; key: string; size: number; etag: string;
-        content_type: string; metadata_json: string; driver_ref: string;
-        created_at: string; updated_at: string;
-      }>;
+      ).all(bucket, `${prefix}%`, cursor, limit + 1), blobMetadataRowValidator, "blob metadata rows");
       const mapped: ChimpbaseBlobMetaRow[] = rows.map((row) => ({
         bucket: row.bucket,
         key: row.key,
@@ -921,18 +994,14 @@ export function createSqliteEngineAdapter(
       );
     },
     async blobGetUpload(uploadId: string): Promise<ChimpbaseBlobUploadRow | null> {
-      const [row] = db.query(
+      const [row] = parseRows(db.query(
         `
           SELECT upload_id, bucket, key, content_type, metadata_json, driver_ref, created_at_ms, expires_at_ms
           FROM _chimpbase_blob_uploads
           WHERE upload_id = ?1
           LIMIT 1
         `,
-      ).all(uploadId) as Array<{
-        upload_id: string; bucket: string; key: string;
-        content_type: string | null; metadata_json: string;
-        driver_ref: string; created_at_ms: number; expires_at_ms: number;
-      }>;
+      ).all(uploadId), blobUploadRowValidator, "blob upload rows");
       if (row === undefined) return null;
       return {
         uploadId: row.upload_id,
@@ -960,17 +1029,14 @@ export function createSqliteEngineAdapter(
       ).run(row.uploadId, row.partNumber, row.size, row.etag, row.driverRef, row.createdAt);
     },
     async blobListParts(uploadId: string): Promise<ChimpbaseBlobPartRow[]> {
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT upload_id, part_number, size, etag, driver_ref, created_at
           FROM _chimpbase_blob_upload_parts
           WHERE upload_id = ?1
           ORDER BY part_number ASC
         `,
-      ).all(uploadId) as Array<{
-        upload_id: string; part_number: number; size: number;
-        etag: string; driver_ref: string; created_at: string;
-      }>;
+      ).all(uploadId), blobPartRowValidator, "blob part rows");
       return rows.map((row) => ({
         uploadId: row.upload_id,
         partNumber: row.part_number,
@@ -1017,7 +1083,7 @@ export function createSqliteEngineAdapter(
       const prefix = options.prefix ?? "";
       const cursor = options.cursor ?? "";
       const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
-      const rows = db.query(
+      const rows = parseRows(db.query(
         `
           SELECT upload_id, bucket, key, content_type, metadata_json, driver_ref, created_at_ms, expires_at_ms
           FROM _chimpbase_blob_uploads
@@ -1025,11 +1091,7 @@ export function createSqliteEngineAdapter(
           ORDER BY upload_id ASC
           LIMIT ?4
         `,
-      ).all(bucket, `${prefix}%`, cursor, limit + 1) as Array<{
-        upload_id: string; bucket: string; key: string;
-        content_type: string | null; metadata_json: string;
-        driver_ref: string; created_at_ms: number; expires_at_ms: number;
-      }>;
+      ).all(bucket, `${prefix}%`, cursor, limit + 1), blobUploadRowValidator, "blob upload rows");
       const mapped: ChimpbaseBlobUploadRow[] = rows.map((row) => ({
         uploadId: row.upload_id,
         bucket: row.bucket,
@@ -1048,9 +1110,9 @@ export function createSqliteEngineAdapter(
       };
     },
     async blobGcExpiredUploads(nowMs: number): Promise<string[]> {
-      const rows = db.query(
+      const rows = parseRows(db.query(
         "SELECT upload_id FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1",
-      ).all(nowMs) as Array<{ upload_id: string }>;
+      ).all(nowMs), uploadIdRowValidator, "expired upload rows");
       db.query("DELETE FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1").run(nowMs);
       return rows.map((row) => row.upload_id);
     },
@@ -1134,14 +1196,19 @@ function statementProducesRows(sql: string): boolean {
     || normalized.includes(" returning ");
 }
 
-function runQuery<T>(db: SqliteDatabase, sql: string, params: SqliteBinding[]): T[] {
+function runQuery<T>(
+  db: SqliteDatabase,
+  sql: string,
+  params: SqliteBinding[],
+  validator: ChimpbaseValidator<T>,
+): T[] {
   const statement = db.query(sql);
   if (!statement.reader) {
     statement.run(...params);
     return [];
   }
 
-  return statement.all(...params) as T[];
+  return parseRows(statement.all(...params), validator, "database query rows");
 }
 
 function toSqlBindings(params: readonly unknown[]): SqliteBinding[] {
@@ -1168,7 +1235,7 @@ function findCollectionDocuments(
   filter: ChimpbaseCollectionFilter = {},
   options?: ChimpbaseCollectionFindOptions,
 ): PersistedCollectionDocument[] {
-  const rows = db.query(
+  const rows = parseRows(db.query(
     `
       SELECT
         document_id,
@@ -1177,7 +1244,7 @@ function findCollectionDocuments(
       WHERE collection_name = ?1
       ORDER BY document_id ASC
     `,
-  ).all(name) as PersistedCollectionDocument[];
+  ).all(name), collectionDocumentRowValidator, "collection document rows");
 
   const matched = rows.filter((row) => {
     const document = parseJsonObject(row.document_json, "collection document");

@@ -9,6 +9,13 @@ type OrderRow = {
   amount: number;
   created_at: string;
 };
+const orderRowValidator = v.object({
+  amount: v.number(),
+  created_at: v.string(),
+  customer: v.string(),
+  id: v.number(),
+});
+
 
 const createOrder = action({
   name: "createOrder",
@@ -17,9 +24,10 @@ const createOrder = action({
     amount: v.number(),
   }),
   async handler(ctx, input) {
-    const [row] = await ctx.db.query<OrderRow>(
+    const [row] = await ctx.db.query(
       "INSERT INTO orders (customer, amount) VALUES (?1, ?2) RETURNING id, customer, amount, created_at",
       [input.customer, input.amount],
+      orderRowValidator,
     );
     return row;
   },
@@ -28,8 +36,10 @@ const createOrder = action({
 const listOrders = action({
   name: "listOrders",
   async handler(ctx) {
-    return await ctx.db.query<OrderRow>(
+    return await ctx.db.query(
       "SELECT id, customer, amount, created_at FROM orders ORDER BY id",
+      undefined,
+      orderRowValidator,
     );
   },
 });

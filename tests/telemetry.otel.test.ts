@@ -9,6 +9,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
+  type ReadableSpan,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 
@@ -25,6 +26,13 @@ import type {
 const cleanupHosts: ChimpbaseBunHost[] = [];
 const cleanupDirs: string[] = [];
 let tracerProvider: BasicTracerProvider | null = null;
+function requireSpan(span: ReadableSpan | undefined, label: string): ReadableSpan {
+  if (span === undefined) {
+    throw new Error(`${label} was not exported`);
+  }
+  return span;
+}
+
 
 afterEach(async () => {
   while (cleanupHosts.length > 0) {
@@ -173,9 +181,9 @@ describe("opentelemetry integration", () => {
     const spans = exporter.getFinishedSpans();
     const handlerSpan = spans.find((s) => s.name === "action:myAction");
     expect(handlerSpan).toBeDefined();
-    expect(handlerSpan!.attributes["chimpbase.scope.kind"]).toBe("action");
-    expect(handlerSpan!.attributes["chimpbase.scope.name"]).toBe("myAction");
-    expect(handlerSpan!.status.code).toBe(SpanStatusCode.OK);
+    expect(requireSpan(handlerSpan, "handlerSpan").attributes["chimpbase.scope.kind"]).toBe("action");
+    expect(requireSpan(handlerSpan, "handlerSpan").attributes["chimpbase.scope.name"]).toBe("myAction");
+    expect(requireSpan(handlerSpan, "handlerSpan").status.code).toBe(SpanStatusCode.OK);
   });
 
   test("ctx.trace spans are children of handler span", async () => {
@@ -198,8 +206,8 @@ describe("opentelemetry integration", () => {
     expect(childSpan).toBeDefined();
 
     // In OTel SDK v2, parentSpanContext carries the parent relationship
-    expect(childSpan!.parentSpanContext?.spanId).toBe(
-      handlerSpan!.spanContext().spanId,
+    expect(requireSpan(childSpan, "childSpan").parentSpanContext?.spanId).toBe(
+      requireSpan(handlerSpan, "handlerSpan").spanContext().spanId,
     );
   });
 
@@ -222,8 +230,8 @@ describe("opentelemetry integration", () => {
     const spans = exporter.getFinishedSpans();
     const handlerSpan = spans.find((s) => s.name === "action:failingAction");
     expect(handlerSpan).toBeDefined();
-    expect(handlerSpan!.status.code).toBe(SpanStatusCode.ERROR);
-    expect(handlerSpan!.status.message).toBe("otel error");
+    expect(requireSpan(handlerSpan, "handlerSpan").status.code).toBe(SpanStatusCode.ERROR);
+    expect(requireSpan(handlerSpan, "handlerSpan").status.message).toBe("otel error");
   });
 
   test("nested ctx.trace spans form proper hierarchy", async () => {
@@ -250,12 +258,12 @@ describe("opentelemetry integration", () => {
     expect(innerSpan).toBeDefined();
 
     // outer is child of handler
-    expect(outerSpan!.parentSpanContext?.spanId).toBe(
-      handlerSpan!.spanContext().spanId,
+    expect(requireSpan(outerSpan, "outerSpan").parentSpanContext?.spanId).toBe(
+      requireSpan(handlerSpan, "handlerSpan").spanContext().spanId,
     );
     // inner is child of outer
-    expect(innerSpan!.parentSpanContext?.spanId).toBe(
-      outerSpan!.spanContext().spanId,
+    expect(requireSpan(innerSpan, "innerSpan").parentSpanContext?.spanId).toBe(
+      requireSpan(outerSpan, "outerSpan").spanContext().spanId,
     );
   });
 
@@ -312,8 +320,8 @@ describe("opentelemetry integration", () => {
 
     expect(handlerSpan).toBeDefined();
     expect(childSpan).toBeDefined();
-    expect(childSpan!.parentSpanContext?.spanId).toBe(
-      handlerSpan!.spanContext().spanId,
+    expect(requireSpan(childSpan, "childSpan").parentSpanContext?.spanId).toBe(
+      requireSpan(handlerSpan, "handlerSpan").spanContext().spanId,
     );
 
     await sink.shutdown?.();

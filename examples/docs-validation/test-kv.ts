@@ -4,12 +4,12 @@ const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server:
 const testKv = action({ name: "testKv", args: v.object({}), async handler(ctx) {
   // Set and get
   await ctx.kv.set("workspace.theme", "dark");
-  const theme = await ctx.kv.get<string>("workspace.theme");
+  const theme = await ctx.kv.get("workspace.theme", v.string());
   if (theme !== "dark") throw new Error("get should return dark");
 
   // Set with TTL
   await ctx.kv.set("session:abc", { userId: 42 }, { ttlMs: 3_600_000 });
-  const session = await ctx.kv.get<{ userId: number }>("session:abc");
+  const session = await ctx.kv.get("session:abc", v.object({ userId: v.number() }));
   if (!(session !== null) || session.userId !== 42) throw new Error("TTL key should be readable");
 
   // List with prefix

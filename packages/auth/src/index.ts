@@ -1,10 +1,12 @@
 import {
   action,
+  isJsonObject,
   isStringArray,
   plugin,
   readJsonBody,
   route,
   tryParseJson,
+  v,
   type ChimpbasePluginDependency,
   type ChimpbasePluginRegistration,
   type ChimpbaseRegistrationSource,
@@ -73,6 +75,34 @@ export interface AuthApiKey {
 
 const USERS_COLLECTION = "__chimpbase.auth.users";
 const API_KEYS_COLLECTION = "__chimpbase.auth.api_keys";
+const apiKeyValidator = v.object({
+  createdAt: v.string(),
+  expiresAt: v.string().nullable(),
+  id: v.string(),
+  keyHash: v.string(),
+  keyPrefix: v.string(),
+  label: v.string(),
+  revokedAt: v.string().nullable(),
+  scopes: v.string(),
+  userId: v.string(),
+});
+const authUserValidator = v.object({
+  createdAt: v.string(),
+  email: v.string(),
+  id: v.string(),
+  name: v.string(),
+  role: v.string(),
+  updatedAt: v.string(),
+});
+const blockedResultValidator = v.object({ blocked: v.boolean() });
+const rateLimitCountValidator = v.object({ count: v.number() });
+const validatedApiKeyResultValidator = v.object({
+  bootstrap: v.boolean().optional(),
+  scopes: v.string().array().optional(),
+  userId: v.string().nullable().optional(),
+  valid: v.boolean(),
+});
+
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -222,12 +252,11 @@ async function parseJsonBody(request: Request): Promise<Record<string, unknown>>
   } catch {
     throw new AuthRequestError(400, "request body must be valid JSON");
   }
-
-  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
+  if (!isJsonObject(body)) {
     throw new AuthRequestError(400, "request body must be a JSON object");
   }
 
-  return body as Record<string, unknown>;
+  return body;
 }
 
 class AuthRequestError extends Error {
@@ -270,7 +299,7 @@ export function chimpbaseAuth(
       }
 
       const keyHash = await hashKey(rawKey);
-      const record = await ctx.collection.findOne<AuthApiKey>(API_KEYS_COLLECTION, { keyHash });
+      const record = await ctx.collection.findOne(API_KEYS_COLLECTION, { keyHash }, apiKeyValidator);
       if (!(record !== null)) {
         return { valid: false };
       }
@@ -301,7 +330,7 @@ export function chimpbaseAuth(
         const countKey = `__chimpbase.auth.ratelimit:count:${input.keyPrefix}`;
 
         if (input.outcome === "check") {
-          const blocked = await ctx.kv.get<boolean>(blockKey);
+          const blocked = await ctx.kv.get(blockKey, v.boolean());
           return { blocked: !!(blocked === true) };
         }
 
@@ -311,12 +340,12 @@ export function chimpbaseAuth(
         }
 
         // outcome === "fail"
-        const blocked = await ctx.kv.get<boolean>(blockKey);
+        const blocked = await ctx.kv.get(blockKey, v.boolean());
         if ((blocked === true)) {
           return { blocked: true };
         }
 
-        const existing = await ctx.kv.get<{ count: number }>(countKey);
+        const existing = await ctx.kv.get(countKey, rateLimitCountValidator);
         const count = (existing?.count ?? 0) + 1;
 
         if (count >= rlMaxAttempts) {
@@ -354,10 +383,10 @@ export function chimpbaseAuth(
 
       // Rate limit: check if blocked
       if ((rateLimitConfig !== null)) {
-        const rlCheck = await env.action("__chimpbase.auth.rateLimit", {
+        const rlCheck = blockedResultValidator.parse(await env.action("__chimpbase.auth.rateLimit", {
           keyPrefix,
           outcome: "check",
-        }) as { blocked: boolean };
+        }), "rate limit result");
         if (rlCheck.blocked) {
           return jsonError(429, "too many failed authentication attempts", {
             "retry-after": String(Math.ceil(rlBlockDurationMs / 1000)),
@@ -365,20 +394,18 @@ export function chimpbaseAuth(
         }
       }
 
-      const result = await env.action("__chimpbase.auth.validateApiKey", rawKey) as {
-        valid: boolean;
-        userId?: string | null;
-        bootstrap?: boolean;
-        scopes?: string[];
-      };
+      const result = validatedApiKeyResultValidator.parse(
+        await env.action("__chimpbase.auth.validateApiKey", rawKey),
+        "API key validation result",
+      );
 
       if (!result.valid) {
         // Rate limit: record failure
         if ((rateLimitConfig !== null)) {
-          const rlFail = await env.action("__chimpbase.auth.rateLimit", {
+          const rlFail = blockedResultValidator.parse(await env.action("__chimpbase.auth.rateLimit", {
             keyPrefix,
             outcome: "fail",
-          }) as { blocked: boolean };
+          }), "rate limit result");
           if (rlFail.blocked) {
             return jsonError(429, "too many failed authentication attempts", {
               "retry-after": String(Math.ceil(rlBlockDurationMs / 1000)),
@@ -428,26 +455,26 @@ export function chimpbaseAuth(
         updatedAt: now,
       });
 
-      return await ctx.collection.findOne<AuthUser>(USERS_COLLECTION, { id });
+      return await ctx.collection.findOne(USERS_COLLECTION, { id }, authUserValidator);
     }),
   );
 
   entries.push(
     action("__chimpbase.auth.listUsers", async (ctx) => {
-      return await ctx.collection.find<AuthUser>(USERS_COLLECTION, {});
+      return await ctx.collection.find(USERS_COLLECTION, {}, undefined, authUserValidator);
     }),
   );
 
   entries.push(
     action("__chimpbase.auth.getUser", async (ctx, id: string) => {
-      return await ctx.collection.findOne<AuthUser>(USERS_COLLECTION, { id });
+      return await ctx.collection.findOne(USERS_COLLECTION, { id }, authUserValidator);
     }),
   );
 
   entries.push(
     action("__chimpbase.auth.deleteUser", async (ctx, id: string) => {
       // Revoke all API keys for this user
-      const keys = await ctx.collection.find<AuthApiKey>(API_KEYS_COLLECTION, { userId: id });
+      const keys = await ctx.collection.find(API_KEYS_COLLECTION, { userId: id }, undefined, apiKeyValidator);
       for (const key of keys) {
         if (!(key.revokedAt !== null && key.revokedAt.length > 0)) {
           await ctx.collection.update(API_KEYS_COLLECTION, { id: key.id }, { revokedAt: nowIso() });
@@ -463,7 +490,7 @@ export function chimpbaseAuth(
   entries.push(
     action("__chimpbase.auth.createApiKey", async (ctx, input: { userId: string; label?: string; expiresAt?: string; scopes?: string[] }) => {
       // Verify user exists
-      const user = await ctx.collection.findOne<AuthUser>(USERS_COLLECTION, { id: input.userId });
+      const user = await ctx.collection.findOne(USERS_COLLECTION, { id: input.userId }, authUserValidator);
       if (!(user !== null)) {
         throw new AuthRequestError(404, "user not found");
       }
@@ -502,7 +529,7 @@ export function chimpbaseAuth(
 
   entries.push(
     action("__chimpbase.auth.listApiKeys", async (ctx, userId: string) => {
-      const keys = await ctx.collection.find<AuthApiKey>(API_KEYS_COLLECTION, { userId });
+      const keys = await ctx.collection.find(API_KEYS_COLLECTION, { userId }, undefined, apiKeyValidator);
       return keys.map((key) => ({
         id: key.id,
         userId: key.userId,
@@ -518,7 +545,7 @@ export function chimpbaseAuth(
 
   entries.push(
     action("__chimpbase.auth.revokeApiKey", async (ctx, keyId: string) => {
-      const key = await ctx.collection.findOne<AuthApiKey>(API_KEYS_COLLECTION, { id: keyId });
+      const key = await ctx.collection.findOne(API_KEYS_COLLECTION, { id: keyId }, apiKeyValidator);
       if (!(key !== null)) {
         return 0;
       }

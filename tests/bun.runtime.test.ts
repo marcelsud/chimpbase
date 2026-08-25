@@ -18,6 +18,22 @@ import {
 import { defineChimpbaseMigrations } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
+const countRowValidator = v.object({ count: v.number() });
+const detailRowValidator = v.object({ detail: v.string() });
+const itemRowValidator = v.object({
+  amount: v.number(),
+  id: v.number(),
+  label: v.string(),
+});
+const rowIdValidator = v.object({ id: v.number() });
+function isBunServer(value: unknown): value is Bun.Server<unknown> {
+  return typeof value === "object"
+    && value !== null
+    && "stop" in value
+    && typeof value.stop === "function";
+}
+
+
 
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
@@ -38,9 +54,10 @@ async function bootInlineApp(overrides?: {
     name: "createItem",
     args: v.object({ label: v.string(), amount: v.number() }),
     async handler(ctx, input) {
-      const [row] = await ctx.db.query<{ id: number }>(
+      const [row] = await ctx.db.query(
         "INSERT INTO items (label, amount) VALUES (?1, ?2) RETURNING id",
         [input.label, input.amount],
+        rowIdValidator,
       );
       ctx.pubsub.publish("item.created", { id: row.id, label: input.label, amount: input.amount });
       return row;
@@ -50,8 +67,10 @@ async function bootInlineApp(overrides?: {
   const listItems = action({
     name: "listItems",
     async handler(ctx) {
-      return await ctx.db.query<{ id: number; label: string; amount: number }>(
+      return await ctx.db.query(
         "SELECT id, label, amount FROM items ORDER BY id",
+        undefined,
+        itemRowValidator,
       );
     },
   });
@@ -59,8 +78,10 @@ async function bootInlineApp(overrides?: {
   const listNotifications = action({
     name: "listNotifications",
     async handler(ctx) {
-      return await ctx.db.query<{ detail: string }>(
+      return await ctx.db.query(
         "SELECT detail FROM notifications ORDER BY id",
+        undefined,
+        detailRowValidator,
       );
     },
   });
@@ -99,7 +120,7 @@ async function bootInlineApp(overrides?: {
   };
 
   const snapshotCounts = async (ctx: Parameters<typeof createItem.handler>[0]) => {
-    const [row] = await ctx.db.query<{ count: number }>("SELECT COUNT(*) AS count FROM items");
+    const [row] = await ctx.db.query("SELECT COUNT(*) AS count FROM items", undefined, countRowValidator);
     await ctx.db.query(
       "INSERT INTO snapshots (total_count) VALUES (?1)",
       [Number(row?.count ?? 0)],
@@ -203,9 +224,10 @@ describe("bun runtime regression — inline fixtures", () => {
       const auditRows = await host.executeAction("listItems", {});
       expect(auditRows.result).toHaveLength(1);
 
-      const notificationRows = (await host.executeAction("listNotifications", {})).result as Array<{
-        detail: string;
-      }>;
+      const notificationRows = v.object({ detail: v.string() }).array().parse(
+        (await host.executeAction("listNotifications", {})).result,
+        "notification rows",
+      );
       expect(notificationRows.some((r) => r.detail === "notified widget")).toBe(true);
     } finally {
       await started.stop();
@@ -220,6 +242,46 @@ describe("bun runtime regression — inline fixtures", () => {
       await host.drain({ maxDurationMs: 5_000 });
       const list = await host.executeAction("listItems", {});
       expect(list.result).toHaveLength(1);
+    } finally {
+      await started.stop();
+    }
+  });
+
+  test("raw SQL validators reject schema drift at the query boundary", async () => {
+    const { host, started } = await bootInlineApp();
+    host.register(
+      action("readInvalidRow", async (ctx) =>
+        await ctx.db.query(
+          "SELECT 'not-a-number' AS id",
+          undefined,
+          v.object({ id: v.number() }),
+        )
+      ),
+    );
+    try {
+      await expect(host.executeAction("readInvalidRow")).rejects.toThrow(
+        "database query rows[0].id must be a finite number",
+      );
+    } finally {
+      await started.stop();
+    }
+  });
+
+  test("persisted JSON fails with its boundary label", async () => {
+    const { host, started } = await bootInlineApp();
+    host.register(
+      action("readInvalidJson", async (ctx) => {
+        await ctx.db.query(
+          "INSERT OR REPLACE INTO _chimpbase_kv (key, value_json, updated_at, expires_at) VALUES (?1, ?2, CURRENT_TIMESTAMP, NULL)",
+          ["invalid-json", "not-json"],
+        );
+        return await ctx.kv.get("invalid-json", v.object({ value: v.string() }));
+      }),
+    );
+    try {
+      await expect(host.executeAction("readInvalidJson")).rejects.toThrow(
+        "key-value entry invalid-json must be valid JSON",
+      );
     } finally {
       await started.stop();
     }
@@ -241,9 +303,10 @@ describe("bun runtime regression — inline fixtures", () => {
     {
       const { host, started } = await bootInlineApp({ storage: "sqlite", projectDir });
       try {
-        const list = (await host.executeAction("listItems", {})).result as Array<{
-          label: string;
-        }>;
+        const list = v.object({ label: v.string() }).array().parse(
+          (await host.executeAction("listItems", {})).result,
+          "item rows",
+        );
         expect(list.map((r) => r.label)).toContain("persisted");
       } finally {
         await started.stop();
@@ -268,12 +331,13 @@ describe("bun runtime regression — inline fixtures", () => {
     const cleanup = new Promise<void>((resolve) => {
       releaseCleanup = resolve;
     });
-    const server = {
+    const server: unknown = {
       stop(force?: boolean) {
         stopForce = force;
         return cleanup;
       },
-    } as unknown as Bun.Server<unknown>;
+    };
+    if (!isBunServer(server)) throw new Error("invalid Bun server fixture");
 
     let stopped = false;
     const stopping = bunRuntimeShim.server.stop(server).then(() => {
@@ -287,11 +351,12 @@ describe("bun runtime regression — inline fixtures", () => {
     await stopping;
     expect(stopped).toBe(true);
 
-    const rejectingServer = {
+    const rejectingServer: unknown = {
       stop() {
         return Promise.reject(new Error("server cleanup failed"));
       },
-    } as unknown as Bun.Server<unknown>;
+    };
+    if (!isBunServer(rejectingServer)) throw new Error("invalid Bun server fixture");
     await expect(bunRuntimeShim.server.stop(rejectingServer)).rejects.toThrow("server cleanup failed");
   });
 });

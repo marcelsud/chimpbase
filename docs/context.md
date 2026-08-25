@@ -25,13 +25,14 @@ Every handler in Chimpbase — actions, subscriptions, workers, cron jobs, and w
 Every primitive handler receives the context as the first argument:
 
 ```ts
-import { action } from "@chimpbase/runtime";
+import { action, v } from "@chimpbase/runtime";
 
 const createOrder = action("createOrder", async (ctx, input) => {
   // Database
-  const [order] = await ctx.db.query<{ id: number }>(
+  const [order] = await ctx.db.query(
     "insert into orders (total) values (?1) returning id",
     [input.total],
+    v.object({ id: v.number() }),
   );
 
   // Pub/Sub

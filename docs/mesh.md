@@ -88,13 +88,15 @@ Every handler context receives a `mesh` client:
 ```ts
 actions: {
   confirm: async (ctx, args: { orderId: string }) => {
-    const summary = await ctx.mesh!.call<Summary>(
+    if (ctx.mesh === undefined) throw new Error("mesh unavailable");
+    const summary = await ctx.mesh.call(
       "v1.billing.summarize",
       { orderId: args.orderId },
+      summaryValidator,
       { timeoutMs: 2000, retry: { attempts: 2, delayMs: 100 } },
     );
 
-    await ctx.mesh!.emit("order.confirmed", { orderId: args.orderId });
+    await ctx.mesh.emit("order.confirmed", { orderId: args.orderId });
     return summary;
   },
 }
@@ -102,7 +104,7 @@ actions: {
 
 Methods:
 
-- `call(name, args?, options?)` — resolve action, prefer local, then peers by strategy.
+- `call(name, args, resultValidator, options?)` — validate the local or remote result, then return it. Resolution prefers local actions before peers.
 - `emit(event, payload, { balanced })` — balanced routes through a queue worker (exactly-once). Default broadcasts via pubsub.
 - `nodeId()` — this node's UUID (regenerated each boot).
 - `peers()` — current live peers from the local cache.

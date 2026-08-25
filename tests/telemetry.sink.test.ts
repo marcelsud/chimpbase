@@ -5,18 +5,30 @@ import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { defineChimpbaseApp, normalizeProjectConfig } from "../packages/core/index.ts";
-import { action, cron, worker } from "../packages/runtime/index.ts";
+import { action, cron, v, worker } from "../packages/runtime/index.ts";
 import { ChimpbaseBunHost, bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createRuntimeHost } from "../packages/host/src/runtime.ts";
 import type {
   ChimpbaseSinkSpan,
   ChimpbaseTelemetrySink,
+  ChimpbaseValidator,
 } from "../packages/runtime/index.ts";
 
 interface SinkCall {
   args: unknown[];
   method: string;
 }
+const scopeValidator = v.object({ kind: v.string(), name: v.string() });
+
+function parseCallArg<T>(
+  call: SinkCall,
+  index: number,
+  validator: ChimpbaseValidator<T>,
+  label: string,
+): T {
+  return validator.parse(call.args[index], label);
+}
+
 
 function createMockSink() {
   const calls: SinkCall[] = [];
@@ -44,18 +56,21 @@ function createMockSink() {
     },
     startHandlerSpan(scope): ChimpbaseSinkSpan {
       calls.push({ method: "startHandlerSpan", args: [scope] });
-      return {
-        setAttribute(key, value) {
+      const handlerSpan = {
+        active: true,
+        setAttribute(key: string, value: string | number | boolean) {
           calls.push({ method: "handlerSpan.setAttribute", args: [key, value] });
         },
-        end(status, errorMessage) {
+        end(status: "error" | "ok", errorMessage?: string) {
           handlerSpanEnds.push({ status, errorMessage });
         },
         runInContext<T>(fn: () => T | Promise<T>): T | Promise<T> {
+          if (!this.active) throw new Error("handler span receiver missing");
           runInContextCalled = true;
           return fn();
         },
       };
+      return handlerSpan;
     },
   };
 
@@ -150,12 +165,10 @@ describe("telemetry sink interface", () => {
 
     const logCalls = mock.calls.filter((c) => c.method === "onLog");
     expect(logCalls.length).toBe(1);
-    const [scope, level, message, attributes] = logCalls[0].args as [
-      { kind: string; name: string },
-      string,
-      string,
-      Record<string, unknown>,
-    ];
+    const scope = parseCallArg(logCalls[0], 0, scopeValidator, "log scope");
+    const level = parseCallArg(logCalls[0], 1, v.string(), "log level");
+    const message = parseCallArg(logCalls[0], 2, v.string(), "log message");
+    const attributes = parseCallArg(logCalls[0], 3, v.record(v.unknown()), "log attributes");
     expect(scope).toEqual({ kind: "action", name: "logAction" });
     expect(level).toBe("info");
     expect(message).toBe("hello sink");
@@ -176,12 +189,10 @@ describe("telemetry sink interface", () => {
 
     const metricCalls = mock.calls.filter((c) => c.method === "onMetric");
     expect(metricCalls.length).toBe(1);
-    const [scope, name, value, labels] = metricCalls[0].args as [
-      { kind: string; name: string },
-      string,
-      number,
-      Record<string, unknown>,
-    ];
+    const scope = parseCallArg(metricCalls[0], 0, scopeValidator, "metric scope");
+    const name = parseCallArg(metricCalls[0], 1, v.string(), "metric name");
+    const value = parseCallArg(metricCalls[0], 2, v.number(), "metric value");
+    const labels = parseCallArg(metricCalls[0], 3, v.record(v.unknown()), "metric labels");
     expect(scope).toEqual({ kind: "action", name: "metricAction" });
     expect(name).toBe("requests");
     expect(value).toBe(42);
@@ -202,7 +213,8 @@ describe("telemetry sink interface", () => {
 
     const spanCalls = mock.calls.filter((c) => c.method === "startSpan");
     expect(spanCalls.length).toBe(1);
-    const [scope, name] = spanCalls[0].args as [{ kind: string; name: string }, string];
+    const scope = parseCallArg(spanCalls[0], 0, scopeValidator, "span scope");
+    const name = parseCallArg(spanCalls[0], 1, v.string(), "span name");
     expect(scope).toEqual({ kind: "action", name: "traceAction" });
     expect(name).toBe("doWork");
 
@@ -245,7 +257,7 @@ describe("telemetry sink interface", () => {
 
     const handlerSpanCalls = mock.calls.filter((c) => c.method === "startHandlerSpan");
     expect(handlerSpanCalls.length).toBe(1);
-    const [scope] = handlerSpanCalls[0].args as [{ kind: string; name: string }];
+    const scope = parseCallArg(handlerSpanCalls[0], 0, scopeValidator, "handler span scope");
     expect(scope).toEqual({ kind: "action", name: "spanAction" });
 
     expect(mock.handlerSpanEnds.length).toBe(1);
@@ -348,7 +360,7 @@ describe("telemetry sink interface", () => {
       }),
     );
     const result = await host.executeAction("__readLogs");
-    const streamLogs = (result.result as unknown[]) ?? [];
+    const streamLogs = v.unknown().array().parse(result.result, "persisted log stream");
     expect(streamLogs.length).toBeGreaterThan(0);
   });
 
@@ -371,7 +383,9 @@ describe("telemetry sink interface", () => {
 
     // Should have handler spans for both action and queue worker
     const handlerSpanCalls = mock.calls.filter((c) => c.method === "startHandlerSpan");
-    const scopes = handlerSpanCalls.map((c) => (c.args as [{ kind: string; name: string }])[0]);
+    const scopes = handlerSpanCalls.map((call) =>
+      parseCallArg(call, 0, scopeValidator, "worker handler span scope")
+    );
 
     expect(scopes.some((s) => s.kind === "action" && s.name === "enqueueAction")).toBe(true);
     expect(scopes.some((s) => s.kind === "queue" && s.name === "test.worker")).toBe(true);
@@ -412,8 +426,10 @@ describe("telemetry sink interface", () => {
         ctx.log.info("running cron");
       }),
       action("__listSchedules", async (ctx) =>
-        await ctx.db.query<{ next_fire_at_ms: number }>(
+        await ctx.db.query(
           "SELECT next_fire_at_ms FROM _chimpbase_cron_schedules ORDER BY schedule_name ASC",
+          undefined,
+          v.object({ next_fire_at_ms: v.number() }),
         ),
       ),
     );
@@ -422,7 +438,10 @@ describe("telemetry sink interface", () => {
 
     // Advance time past the next fire time
     const schedules = await host.executeAction("__listSchedules");
-    const rows = schedules.result as Array<{ next_fire_at_ms: number }>;
+    const rows = v.object({ next_fire_at_ms: v.number() }).array().parse(
+      schedules.result,
+      "cron schedule rows",
+    );
     if (rows.length > 0) {
       now = rows[0].next_fire_at_ms;
     }
@@ -430,7 +449,9 @@ describe("telemetry sink interface", () => {
     await host.drain({ maxRuns: 5 });
 
     const handlerSpanCalls = mock.calls.filter((c) => c.method === "startHandlerSpan");
-    const scopes = handlerSpanCalls.map((c) => (c.args as [{ kind: string; name: string }])[0]);
+    const scopes = handlerSpanCalls.map((call) =>
+      parseCallArg(call, 0, scopeValidator, "cron handler span scope")
+    );
 
     // Cron goes through the queue path first, then processCronQueuePayload creates a cron-scoped span
     expect(scopes.some((s) => s.kind === "cron" && s.name === "test.cleanup")).toBe(true);
@@ -459,7 +480,9 @@ describe("telemetry sink interface", () => {
     const handlerSpanCalls = mock.calls.filter((c) => c.method === "startHandlerSpan");
     expect(handlerSpanCalls.length).toBeGreaterThanOrEqual(1);
 
-    const scopes = handlerSpanCalls.map((c) => (c.args as [{ kind: string; name: string }])[0]);
+    const scopes = handlerSpanCalls.map((call) =>
+      parseCallArg(call, 0, scopeValidator, "route handler span scope")
+    );
     expect(scopes.some((s) => s.kind === "action" && s.name.includes("route:"))).toBe(true);
   });
 });

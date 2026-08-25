@@ -32,6 +32,7 @@ import {
   bindActionInvoker as bindActionReferenceInvoker,
   cron as createCronEntry,
   describeWorkflow,
+  isChimpbaseWorkflowDefinition,
   register as registerEntries,
   registerFrom as registerEntriesFrom,
   route as createRouteEntry,
@@ -39,6 +40,7 @@ import {
   subscription as createSubscriptionEntry,
   workflow as createWorkflowEntry,
   worker as createWorkerEntry,
+  v,
   type ChimpbaseActionHandler,
   type ChimpbaseActionRegistrationLike,
   type ChimpbaseContext,
@@ -181,6 +183,16 @@ const RESERVED_ENGINE_QUEUE_NAMES = new Set([
   "__chimpbase.workflow.run",
 ]);
 
+function isRegisteredActionResult<TResult>(
+  registry: ChimpbaseRegistry,
+  nameOrReference: string | ChimpbaseActionRegistrationLike,
+  _value: unknown,
+): _value is TResult {
+  const registration = typeof nameOrReference === "string"
+    ? registry.actions.get(nameOrReference)
+    : nameOrReference;
+  return registration !== undefined && typeof registration.handler === "function";
+}
 export class ChimpbaseHost<TServer> {
   readonly config: ChimpbaseProjectConfig;
   readonly engine: ChimpbaseEngine;
@@ -195,6 +207,7 @@ export class ChimpbaseHost<TServer> {
   private serializedEngineOperations: Promise<void> = Promise.resolve();
   private readonly storage: StorageHandle;
   private readonly supportsConcurrentWorkers: boolean;
+
 
   constructor(options: RuntimeHostInstanceOptions<TServer>) {
     this.projectDir = options.projectDir;
@@ -331,11 +344,13 @@ export class ChimpbaseHost<TServer> {
     handler?: ChimpbaseTupleActionHandler<unknown[], unknown>,
     options?: { telemetry?: ChimpbaseTelemetryPersistOption },
   ): this {
-    return this.register(
-      typeof nameOrEntry === "string"
-        ? createActionEntry(nameOrEntry, handler as ChimpbaseTupleActionHandler<unknown[], unknown>, options)
-        : nameOrEntry,
-    );
+    if (typeof nameOrEntry === "string") {
+      if (handler === undefined) {
+        throw new Error(`action ${nameOrEntry} requires a handler`);
+      }
+      return this.register(createActionEntry(nameOrEntry, handler, options));
+    }
+    return this.register(nameOrEntry);
   }
 
   subscription<TPayload = unknown, TResult = unknown>(
@@ -411,11 +426,17 @@ export class ChimpbaseHost<TServer> {
     ): Promise<TResult> => {
       if (typeof nameOrReference === "string") {
         const outcome = await this.executeAction(nameOrReference, args);
-        return outcome.result as TResult;
+        if (!isRegisteredActionResult<TResult>(this.registry, nameOrReference, outcome.result)) {
+          throw new TypeError(`action ${nameOrReference} has an invalid registration`);
+        }
+        return outcome.result;
       }
 
-      const outcome = await this.executeAction(nameOrReference, ...(args as unknown[]));
-      return outcome.result as TResult;
+      const outcome = await this.executeAction(nameOrReference, ...args);
+      if (!isRegisteredActionResult<TResult>(this.registry, nameOrReference, outcome.result)) {
+        throw new TypeError(`action ${nameOrReference.name} has an invalid registration`);
+      }
+      return outcome.result;
     });
   }
 
@@ -426,7 +447,7 @@ export class ChimpbaseHost<TServer> {
   ): ChimpbaseSubscriptionHandler<TPayload, TResult> {
     const subscriptions = this.registry.subscriptions.get(eventName) ?? [];
     subscriptions.push({
-      handler: handler as ChimpbaseSubscriptionHandler,
+      handler,
       idempotent: options?.idempotent ?? false,
       name: options?.name ?? "",
     });
@@ -443,7 +464,7 @@ export class ChimpbaseHost<TServer> {
       definition: {
         dlq: definition?.dlq === undefined ? `${name}.dlq` : definition.dlq,
       },
-      handler: handler as ChimpbaseWorkerHandler,
+      handler,
       name,
     };
     this.registry.workers.set(name, registration);
@@ -494,7 +515,7 @@ export class ChimpbaseHost<TServer> {
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
   ): ChimpbaseWorkflowDefinition<TInput, TState> {
     const versions = this.registry.workflows.get(definition.name) ?? new Map();
-    versions.set(definition.version, definition as ChimpbaseWorkflowDefinition);
+    versions.set(definition.version, definition);
     this.registry.workflows.set(definition.name, versions);
     return definition;
   }
@@ -522,7 +543,12 @@ export class ChimpbaseHost<TServer> {
 
   listWorkflowContracts(): ChimpbaseWorkflowContract[] {
     return [...this.registry.workflows.entries()]
-      .flatMap(([, versions]) => [...versions.values()].map((definition) => describeWorkflow(definition)))
+      .flatMap(([, versions]) => [...versions.values()].map((definition) => {
+        if (!isChimpbaseWorkflowDefinition(definition)) {
+          throw new TypeError(`workflow ${definition.name} has an invalid definition`);
+        }
+        return describeWorkflow(definition);
+      }))
       .sort((left, right) => {
         const byName = left.name.localeCompare(right.name);
         if (byName !== 0) {
@@ -1091,9 +1117,10 @@ function registerInternalCleanupCrons<TServer>(
         const keys = await ctx.kv.list({ prefix: IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX });
 
         for (const key of keys) {
-          const [row] = await ctx.db.query<{ updated_at: unknown }>(
+          const [row] = await ctx.db.query(
             "SELECT updated_at FROM _chimpbase_kv WHERE key = ?1 LIMIT 1",
             [key],
+            v.object({ updated_at: v.unknown() }),
           );
           const updatedAtMs = parseDatabaseTimestampMs(row?.updated_at);
           if (updatedAtMs !== null && updatedAtMs < cutoffMs) {

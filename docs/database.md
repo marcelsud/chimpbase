@@ -5,9 +5,12 @@ Every handler has access to the database via `ctx.db`. Chimpbase supports Postgr
 ## Raw SQL
 
 ```ts
-const users = await ctx.db.query<{ id: number; email: string }>(
+import { v } from "@chimpbase/runtime";
+
+const users = await ctx.db.query(
   "SELECT id, email FROM users WHERE status = ?1",
   ["active"],
+  v.object({ id: v.number(), email: v.string() }),
 );
 ```
 
@@ -31,7 +34,7 @@ await ctx.db.query(
 
 ### Return type
 
-`ctx.db.query<T>()` returns `T[]` — an array of rows matching the generic type.
+`ctx.db.query(sql, params, validator)` validates every returned row at the database boundary and returns the validator's inferred type. Invalid rows throw with their exact row and field path.
 
 ## Kysely (type-safe queries)
 

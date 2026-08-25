@@ -14,9 +14,12 @@ import {
   createSqliteEngineAdapter,
   ensureSqliteInternalTables,
 } from "../packages/bun/src/sqlite_adapter.ts";
-import { action } from "../packages/runtime/index.ts";
+import { action, v } from "../packages/runtime/index.ts";
 
-async function createTestEngine(eventBus: ChimpbaseEventBus) {
+async function createTestEngine(
+  eventBus: ChimpbaseEventBus,
+  dispatch: "async" | "sync" = "sync",
+) {
   const platform = createDefaultChimpbasePlatformShim();
   const registry = createChimpbaseRegistry();
   const db = new Database(":memory:");
@@ -29,7 +32,7 @@ async function createTestEngine(eventBus: ChimpbaseEventBus) {
     platform,
     registry,
     secrets: { get: () => null },
-    subscriptions: { dispatch: "sync" },
+    subscriptions: { dispatch },
     telemetry: { minLevel: "debug", persist: { log: false, metric: false, trace: false } },
     worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
   });
@@ -73,6 +76,26 @@ describe("event bus", () => {
     expect(published[0][0].name).toBe("order.created");
     expect(published[0][0].payload).toEqual({ orderId: "123" });
   });
+  test("async subscriptions preserve undefined payloads", async () => {
+    const { engine, registry } = await createTestEngine(new NoopEventBus(), "async");
+    let received: unknown = "not-called";
+    registry.actions.set("emitUndefined", action("emitUndefined", async (ctx) => {
+      ctx.pubsub.publish("optional.payload", undefined);
+    }));
+    registry.subscriptions.set("optional.payload", [{
+      handler: async (_ctx, payload) => {
+        received = payload;
+      },
+      idempotent: false,
+      name: "optional-payload",
+    }]);
+
+    await engine.executeAction("emitUndefined");
+    await engine.processNextQueueJob();
+
+    expect(received).toBeUndefined();
+  });
+
 
   test("ack callback is invoked after subscriptions are dispatched", async () => {
     const ackCalls: number[] = [];
@@ -107,7 +130,7 @@ describe("event bus", () => {
     registry.subscriptions.set("order.created", [
       {
         handler: async (_ctx, payload) => {
-          dispatched.push((payload as { orderId: string }).orderId);
+          dispatched.push(v.object({ orderId: v.string() }).parse(payload, "order event").orderId);
         },
         idempotent: false,
         name: "",
@@ -156,7 +179,7 @@ describe("event bus", () => {
     registry.subscriptions.set("ping", [
       {
         handler: async (_ctx, payload) => {
-          dispatched.push((payload as { msg: string }).msg);
+          dispatched.push(v.object({ msg: v.string() }).parse(payload, "ping event").msg);
         },
         idempotent: false,
         name: "",

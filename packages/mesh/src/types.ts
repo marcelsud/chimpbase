@@ -1,4 +1,4 @@
-import type { ChimpbaseContext, ChimpbaseRouteEnv } from "@chimpbase/runtime";
+import type { ChimpbaseContext, ChimpbaseRouteEnv, ChimpbaseValidator } from "@chimpbase/runtime";
 
 /** The widest method shape a service can expose. */
 export type ServiceMethod = (...args: never[]) => unknown;
@@ -7,7 +7,12 @@ export type ServiceMethod = (...args: never[]) => unknown;
 export type ServiceMethods = Record<string, ServiceMethod>;
 
 export interface ServiceSelf<TSettings = unknown, TMethods extends ServiceMethods = ServiceMethods> {
-  readonly call: <TResult = unknown>(actionName: string, args?: unknown, options?: CallOptions) => Promise<TResult>;
+  readonly call: <TResult>(
+    actionName: string,
+    args: unknown,
+    result: ChimpbaseValidator<TResult>,
+    options?: CallOptions,
+  ) => Promise<TResult>;
   readonly emit: <TPayload = unknown>(event: string, payload: TPayload, options?: EmitOptions) => Promise<void>;
   readonly methods: TMethods & ServiceMethods;
   readonly name: string;
@@ -122,11 +127,14 @@ export interface EmitOptions {
   balanced?: boolean;
 }
 
-export type MeshCallFn = (
-  actionName: string,
-  args: unknown,
-  options: CallOptions,
-) => Promise<unknown>;
+export interface MeshCallFn {
+  <TResult>(
+    actionName: string,
+    args: unknown,
+    result: ChimpbaseValidator<TResult>,
+    options: CallOptions,
+  ): Promise<TResult>;
+}
 
 export type MeshCallMiddleware = (next: MeshCallFn) => MeshCallFn;
 
@@ -147,7 +155,12 @@ export interface NodeRecord {
 }
 
 export interface ChimpbaseMeshClient {
-  call<TResult = unknown>(actionName: string, args?: unknown, options?: CallOptions): Promise<TResult>;
+  call<TResult>(
+    actionName: string,
+    args: unknown,
+    result: ChimpbaseValidator<TResult>,
+    options?: CallOptions,
+  ): Promise<TResult>;
   emit<TPayload = unknown>(event: string, payload: TPayload, options?: EmitOptions): Promise<void>;
   nodeId(): string;
   peers(): readonly NodeRecord[];

@@ -64,7 +64,7 @@ describe("PostgresListenEventBus", () => {
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
       originId: "origin-A",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     await bus.publish([event("order.created", { orderId: "123" })]);
@@ -73,7 +73,8 @@ describe("PostgresListenEventBus", () => {
     expect(pool.queries[0].sql).toBe("SELECT pg_notify($1, $2)");
     const [channel, payload] = pool.queries[0].params;
     expect(channel).toBe("chimpbase_events");
-    expect(parseJson(payload as string)).toEqual({
+    if (typeof payload !== "string") throw new Error("pg_notify payload missing");
+    expect(parseJson(payload)).toEqual({
       event: { id: 1, name: "order.created", payload: { orderId: "123" }, payloadJson: '{"orderId":"123"}' },
       origin: "origin-A",
     });
@@ -81,7 +82,7 @@ describe("PostgresListenEventBus", () => {
 
   test("publish throws PayloadTooLargeError when envelope exceeds limit", async () => {
     const pool = new FakePool();
-    const bus = new PostgresListenEventBus({ pool: pool as unknown as never });
+    const bus = new PostgresListenEventBus({ pool: pool });
     const big = "x".repeat(8000);
 
     await expect(bus.publish([event("huge", { blob: big })])).rejects.toBeInstanceOf(
@@ -96,7 +97,7 @@ describe("PostgresListenEventBus", () => {
       () =>
         new PostgresListenEventBus({
           channel: "bad channel; DROP TABLE",
-          pool: pool as unknown as never,
+          pool: pool,
         }),
     ).toThrow(/invalid channel name/);
   });
@@ -106,7 +107,7 @@ describe("PostgresListenEventBus", () => {
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
       originId: "origin-A",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     const received: ChimpbaseEventRecord[][] = [];
@@ -127,6 +128,16 @@ describe("PostgresListenEventBus", () => {
 
     await waitFor(() => received.length > 0);
     expect(received[0][0].name).toBe("order.created");
+    pool.client.emit("notification", {
+      channel: "chimpbase_events",
+      payload: JSON.stringify({
+        event: { id: 2, name: "optional.payload", payloadJson: "null" },
+        origin: "origin-B",
+      }),
+    });
+    await waitFor(() => received.length > 1);
+    expect(received[1][0].payload).toBeUndefined();
+
 
     bus.stop();
   });
@@ -136,7 +147,7 @@ describe("PostgresListenEventBus", () => {
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
       originId: "origin-A",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     const received: ChimpbaseEventRecord[][] = [];
@@ -166,7 +177,7 @@ describe("PostgresListenEventBus", () => {
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
       originId: "origin-A",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     const received: ChimpbaseEventRecord[][] = [];
@@ -194,7 +205,7 @@ describe("PostgresListenEventBus", () => {
     const pool = new FakePool();
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     bus.start(async () => {});
@@ -210,7 +221,7 @@ describe("PostgresListenEventBus", () => {
     const pool = new FakePool();
     const bus = new PostgresListenEventBus({
       channel: "chimpbase_events",
-      pool: pool as unknown as never,
+      pool: pool,
     });
 
     const received: ChimpbaseEventRecord[][] = [];

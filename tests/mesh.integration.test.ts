@@ -6,6 +6,13 @@ import { createChimpbase } from "../packages/bun/src/library.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
 const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
+function postgresUrl(): string {
+  if (PG_URL === undefined || PG_URL.length === 0) {
+    throw new Error("PostgreSQL integration URL is unavailable");
+  }
+  return PG_URL;
+}
+
 
 function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -62,12 +69,12 @@ describeIfPg("@chimpbase/mesh (integration — requires CHIMPBASE_TEST_PG_URL)",
     const hostA = await createChimpbase({
       project: { name: "mesh-integ-a" },
       projectDir: process.cwd(),
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const hostB = await createChimpbase({
       project: { name: "mesh-integ-b" },
       projectDir: process.cwd(),
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
 
     hostA.register(chimpbaseMesh({

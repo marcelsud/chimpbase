@@ -27,9 +27,10 @@ const chimpbase = await createChimpbase({
 const createTodo = action({
   args: v.object({ title: v.string() }),
   async handler(ctx, input) {
-    const [todo] = await ctx.db.query<{ id: number }>(
+    const [todo] = await ctx.db.query(
       "insert into todos (title) values (?1) returning id",
       [input.title],
+      v.object({ id: v.number() }),
     );
     return todo;
   },

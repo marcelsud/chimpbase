@@ -22,6 +22,7 @@ import type {
   ChimpbaseCollectionFilter,
   ChimpbaseCollectionFindOptions,
   ChimpbaseCollectionPatch,
+  ChimpbaseValidator,
   ChimpbaseContext,
   ChimpbaseCronInvocation,
   ChimpbaseDlqEnvelope,
@@ -47,7 +48,12 @@ import type {
   ChimpbaseTelemetrySink,
   ChimpbaseSinkSpan,
 } from "@chimpbase/runtime";
-import { resolveChimpbaseActionRegistrationName, runWithActionInvoker } from "@chimpbase/runtime";
+import {
+  isChimpbaseWorkflowDefinition,
+  resolveChimpbaseActionRegistrationName,
+  runWithActionInvoker,
+  v,
+} from "@chimpbase/runtime";
 
 import { computeNextCronFireTime } from "./cron.ts";
 import { NoopEventBus, type ChimpbaseEventBus } from "./event-bus.ts";
@@ -182,6 +188,62 @@ interface SubscriptionQueuePayload {
 }
 
 type WorkflowRunDirective = ChimpbaseWorkflowRunResult<unknown, unknown>;
+const cronQueuePayloadValidator = v.object({
+  fireAtMs: v.number(),
+  scheduleName: v.string(),
+});
+const subscriptionQueuePayloadValidator = v.object({
+  eventId: v.integer().optional(),
+  eventName: v.string(),
+  payload: v.unknown().optional(),
+  payloadJson: v.string(),
+});
+const workflowQueuePayloadValidator = v.object({
+  workflowId: v.string(),
+});
+const databaseRowValidator = v.record(v.unknown());
+const workflowIdRowValidator = v.object({ workflow_id: v.string() });
+const workflowSignalRowValidator = v.object({
+  id: v.integer(),
+  payload_json: v.string(),
+});
+const workflowInstanceRowValidator = v.object({
+  current_step_id: v.string().nullable(),
+  current_step_index: v.number(),
+  input_json: v.string(),
+  last_error: v.string().nullable(),
+  status: v.enum(["completed", "failed", "running", "sleeping", "waiting_signal"] as const),
+  state_json: v.string(),
+  wake_at_ms: v.integer().nullable(),
+  workflow_id: v.string(),
+  workflow_name: v.string(),
+  workflow_version: v.number(),
+});
+function isObjectActionHandler<TResult>(
+  value: unknown,
+): value is (ctx: ChimpbaseContext, args: unknown) => TResult | Promise<TResult> {
+  return typeof value === "function";
+}
+
+function isTupleActionHandler<TResult>(
+  value: unknown,
+): value is (ctx: ChimpbaseContext, ...args: unknown[]) => TResult | Promise<TResult> {
+  return typeof value === "function";
+}
+function isSubscriptionHandler(
+  value: unknown,
+): value is (ctx: ChimpbaseContext, payload: unknown) => unknown {
+  return typeof value === "function";
+}
+
+function isWorkerHandler(
+  value: unknown,
+): value is (ctx: ChimpbaseContext, payload: unknown) => unknown {
+  return typeof value === "function";
+}
+
+
+
 
 const INTERNAL_CRON_QUEUE_NAME = "__chimpbase.cron.run";
 const INTERNAL_SUBSCRIPTION_QUEUE_NAME = "__chimpbase.subscription.run";
@@ -208,14 +270,16 @@ export interface ChimpbaseEngineAdapter {
     queueNames: readonly string[],
   ): Promise<ChimpbaseQueueJobRecord[]>;
   collectionDelete(name: string, filter?: ChimpbaseCollectionFilter): Promise<number>;
-  collectionFind<TDocument = Record<string, unknown>>(
-    name: string,
-    filter?: ChimpbaseCollectionFilter,
-    options?: ChimpbaseCollectionFindOptions,
-  ): Promise<TDocument[]>;
-  collectionFindOne<TDocument = Record<string, unknown>>(
+  collectionFind<TDocument>(
     name: string,
     filter: ChimpbaseCollectionFilter,
+    options: ChimpbaseCollectionFindOptions | undefined,
+    validator: ChimpbaseValidator<TDocument>,
+  ): Promise<TDocument[]>;
+  collectionFindOne<TDocument>(
+    name: string,
+    filter: ChimpbaseCollectionFilter,
+    validator: ChimpbaseValidator<TDocument>,
   ): Promise<TDocument | null>;
   collectionInsert<TDocument extends Record<string, unknown>>(
     name: string,
@@ -233,7 +297,7 @@ export interface ChimpbaseEngineAdapter {
   getQueueJobPayload(jobId: number): Promise<string | null>;
   insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean>;
   kvDelete(key: string): Promise<void>;
-  kvGet<TValue = unknown>(key: string): Promise<TValue | null>;
+  kvGet<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
   kvList(options?: ChimpbaseKvListOptions): Promise<string[]>;
   kvSet<TValue = unknown>(key: string, value: TValue, ttlMs?: number): Promise<void>;
   listCronSchedules(): Promise<PersistedCronScheduleRow[]>;
@@ -244,7 +308,7 @@ export interface ChimpbaseEngineAdapter {
     errorMessage: string,
   ): Promise<void>;
   createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase>;
-  query<T = Record<string, unknown>>(sql: string, params?: readonly unknown[]): Promise<T[]>;
+  query<T>(sql: string, params: readonly unknown[], validator: ChimpbaseValidator<T>): Promise<T[]>;
   queueEnqueue<TPayload = unknown>(
     name: string,
     payload: TPayload,
@@ -253,9 +317,10 @@ export interface ChimpbaseEngineAdapter {
   releaseCronScheduleLease(scheduleName: string, leaseToken: string): Promise<void>;
   rollbackTransaction(): Promise<void>;
   streamAppend<TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number>;
-  streamRead<TPayload = unknown>(
+  streamRead<TPayload>(
     stream: string,
-    options?: ChimpbaseStreamReadOptions,
+    options: ChimpbaseStreamReadOptions | undefined,
+    validator: ChimpbaseValidator<TPayload>,
   ): Promise<ChimpbaseStreamEvent<TPayload>[]>;
   upsertCronSchedule(
     scheduleName: string,
@@ -436,7 +501,7 @@ export class ChimpbaseEngine {
     this.registry.workers.set(INTERNAL_CRON_QUEUE_NAME, {
       definition: { dlq: false },
       handler: async (_ctx, payload) => {
-        const message = payload as CronQueuePayload;
+        const message = cronQueuePayloadValidator.parse(payload, "cron queue payload");
         await this.processCronQueuePayload(message);
       },
       name: INTERNAL_CRON_QUEUE_NAME,
@@ -449,7 +514,7 @@ export class ChimpbaseEngine {
     this.registry.workers.set(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
       definition: { dlq: false },
       handler: async (_ctx, payload) => {
-        const message = payload as SubscriptionQueuePayload;
+        const message = subscriptionQueuePayloadValidator.parse(payload, "subscription queue payload");
         await this.dispatchSubscriptions([
           {
             id: message.eventId,
@@ -469,7 +534,7 @@ export class ChimpbaseEngine {
     this.registry.workers.set(INTERNAL_WORKFLOW_QUEUE_NAME, {
       definition: { dlq: false },
       handler: async (_ctx, payload) => {
-        const message = payload as WorkflowQueuePayload;
+        const message = workflowQueuePayloadValidator.parse(payload, "workflow queue payload");
         await this.processWorkflowQueuePayload(message);
       },
       name: INTERNAL_WORKFLOW_QUEUE_NAME,
@@ -499,9 +564,10 @@ export class ChimpbaseEngine {
     try {
       let invoke: () => Promise<unknown> = () => this.invokeActionByName(name, args);
       for (const span of handlerSpans) {
-        if ((span.runInContext !== undefined)) {
+        const runInContext = span.runInContext?.bind(span);
+        if (runInContext !== undefined) {
           const prev = invoke;
-          invoke = () => span.runInContext!(prev) as Promise<unknown>;
+          invoke = async () => await runInContext(prev);
         }
       }
 
@@ -546,9 +612,10 @@ export class ChimpbaseEngine {
       });
 
       for (const span of handlerSpans) {
-        if ((span.runInContext !== undefined)) {
+        const runInContext = span.runInContext?.bind(span);
+        if (runInContext !== undefined) {
           const prev = invoke;
-          invoke = () => span.runInContext!(prev) as Promise<Response | null>;
+          invoke = async () => await runInContext(prev);
         }
       }
 
@@ -716,24 +783,30 @@ export class ChimpbaseEngine {
       throw new Error(`queue handler not found: ${job.queue_name}`);
     }
 
+
     const scope: ChimpbaseExecutionScope = { kind: "queue", name: job.queue_name };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
+      const workerHandler: unknown = worker.handler;
+      if (!isWorkerHandler(workerHandler)) {
+        throw new TypeError(`queue ${job.queue_name} has an invalid handler`);
+      }
       const payload = JSON.parse(job.payload_json) as unknown;
 
       let invoke = async () => {
         await this.runInTransaction(async () => {
           await this.runWithActionInvoker(async () => {
-            await worker.handler(this.createContext(scope), payload);
+            await workerHandler(this.createContext(scope), payload);
           });
         });
       };
 
       for (const span of handlerSpans) {
-        if ((span.runInContext !== undefined)) {
+        const runInContext = span.runInContext?.bind(span);
+        if (runInContext !== undefined) {
           const prev = invoke;
-          invoke = () => span.runInContext!(prev) as Promise<void>;
+          invoke = async () => await runInContext(prev);
         }
       }
 
@@ -932,15 +1005,21 @@ export class ChimpbaseEngine {
   createRouteEnv(): ChimpbaseRouteEnv {
     const contextMap = new Map<string, unknown>();
     const blobsClient = this.createBlobsClient();
+    function get(key: string): unknown;
+    function get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
+    function get<T>(key: string, validator?: ChimpbaseValidator<T>): T | unknown {
+      const value = contextMap.get(key);
+      return validator === undefined || value === undefined
+        ? value
+        : validator.parse(value, `route context ${key}`);
+    }
     const env: ChimpbaseRouteEnv = {
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
         nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
       ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
       blobs: blobsClient,
-      get<T = unknown>(key: string): T | undefined {
-        return contextMap.get(key) as T | undefined;
-      },
+      get,
       set(key: string, value: unknown): void {
         contextMap.set(key, value);
       },
@@ -991,9 +1070,10 @@ export class ChimpbaseEngine {
       };
 
       for (const span of handlerSpans) {
-        if ((span.runInContext !== undefined)) {
+        const runInContext = span.runInContext?.bind(span);
+        if (runInContext !== undefined) {
           const prev = invoke;
-          invoke = () => span.runInContext!(prev) as Promise<void>;
+          invoke = async () => await runInContext(prev);
         }
       }
 
@@ -1026,11 +1106,101 @@ export class ChimpbaseEngine {
       payload: TPayload,
       options?: ChimpbaseQueueEnqueueOptions,
     ): Promise<void> => await this.adapter.queueEnqueue(name, payload, options);
+    const adapter = this.adapter;
+    async function query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+    async function query<T>(
+      sql: string,
+      params: readonly unknown[] | undefined,
+      validator: ChimpbaseValidator<T>,
+    ): Promise<T[]>;
+    async function query<T>(
+      sql: string,
+      params: readonly unknown[] = [],
+      validator?: ChimpbaseValidator<T>,
+    ): Promise<T[] | Record<string, unknown>[]> {
+      return validator === undefined
+        ? await adapter.query(sql, params, databaseRowValidator)
+        : await adapter.query(sql, params, validator);
+    }
+
+    async function getKv(key: string): Promise<unknown | null>;
+    async function getKv<TValue>(
+      key: string,
+      validator: ChimpbaseValidator<TValue>,
+    ): Promise<TValue | null>;
+    async function getKv<TValue>(
+      key: string,
+      validator?: ChimpbaseValidator<TValue>,
+    ): Promise<TValue | unknown | null> {
+      return validator === undefined
+        ? await adapter.kvGet(key, v.unknown())
+        : await adapter.kvGet(key, validator);
+    }
+
+    async function findDocuments(
+      name: string,
+      filter?: ChimpbaseCollectionFilter,
+      options?: ChimpbaseCollectionFindOptions,
+    ): Promise<Record<string, unknown>[]>;
+    async function findDocuments<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter | undefined,
+      options: ChimpbaseCollectionFindOptions | undefined,
+      validator: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument[]>;
+    async function findDocuments<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter = {},
+      options?: ChimpbaseCollectionFindOptions,
+      validator?: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument[] | Record<string, unknown>[]> {
+      return validator === undefined
+        ? await adapter.collectionFind(name, filter, options, databaseRowValidator)
+        : await adapter.collectionFind(name, filter, options, validator);
+    }
+
+    async function findOneDocument(
+      name: string,
+      filter: ChimpbaseCollectionFilter,
+    ): Promise<Record<string, unknown> | null>;
+    async function findOneDocument<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter,
+      validator: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument | null>;
+    async function findOneDocument<TDocument>(
+      name: string,
+      filter: ChimpbaseCollectionFilter,
+      validator?: ChimpbaseValidator<TDocument>,
+    ): Promise<TDocument | Record<string, unknown> | null> {
+      return validator === undefined
+        ? await adapter.collectionFindOne(name, filter, databaseRowValidator)
+        : await adapter.collectionFindOne(name, filter, validator);
+    }
+
+    async function readStream(
+      stream: string,
+      options?: ChimpbaseStreamReadOptions,
+    ): Promise<ChimpbaseStreamEvent<unknown>[]>;
+    async function readStream<TPayload>(
+      stream: string,
+      options: ChimpbaseStreamReadOptions | undefined,
+      validator: ChimpbaseValidator<TPayload>,
+    ): Promise<ChimpbaseStreamEvent<TPayload>[]>;
+    async function readStream<TPayload>(
+      stream: string,
+      options?: ChimpbaseStreamReadOptions,
+      validator?: ChimpbaseValidator<TPayload>,
+    ): Promise<ChimpbaseStreamEvent<TPayload | unknown>[]> {
+      return validator === undefined
+        ? await adapter.streamRead(stream, options, v.unknown())
+        : await adapter.streamRead(stream, options, validator);
+    }
+
 
     const context: ChimpbaseContext = {
       db: {
-        query: <T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []) =>
-          this.adapter.query<T>(sql, params),
+        query,
         kysely: <TDatabase = Record<string, never>>() =>
           this.adapter.createKysely<TDatabase>(),
       },
@@ -1042,22 +1212,15 @@ export class ChimpbaseEngine {
       secret: (name: string) => this.secrets.get(name),
       kv: {
         delete: async (key: string) => await this.adapter.kvDelete(key),
-        get: async <TValue = unknown>(key: string): Promise<TValue | null> => await this.adapter.kvGet<TValue>(key),
+        get: getKv,
         list: async (options?: ChimpbaseKvListOptions): Promise<string[]> => await this.adapter.kvList(options),
         set: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) => await this.adapter.kvSet(key, value, options?.ttlMs),
       },
       collection: {
         delete: async (name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> =>
           await this.adapter.collectionDelete(name, filter),
-        find: async <TDocument = Record<string, unknown>>(
-          name: string,
-          filter: ChimpbaseCollectionFilter = {},
-          options?: ChimpbaseCollectionFindOptions,
-        ): Promise<TDocument[]> => await this.adapter.collectionFind<TDocument>(name, filter, options),
-        findOne: async <TDocument = Record<string, unknown>>(
-          name: string,
-          filter: ChimpbaseCollectionFilter,
-        ): Promise<TDocument | null> => await this.adapter.collectionFindOne<TDocument>(name, filter),
+        find: findDocuments,
+        findOne: findOneDocument,
         insert: async <TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> =>
           await this.adapter.collectionInsert(name, document),
         list: async (): Promise<string[]> => await this.adapter.collectionList(),
@@ -1067,10 +1230,7 @@ export class ChimpbaseEngine {
       stream: {
         append: async <TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number> =>
           await this.adapter.streamAppend(stream, event, payload),
-        read: async <TPayload = unknown>(
-          stream: string,
-          options?: ChimpbaseStreamReadOptions,
-        ): Promise<ChimpbaseStreamEvent<TPayload>[]> => await this.adapter.streamRead<TPayload>(stream, options),
+        read: readStream,
       },
       blobs: this.createBlobsClient(),
       enqueue,
@@ -1139,9 +1299,10 @@ export class ChimpbaseEngine {
         try {
           let invoke: () => TResult | Promise<TResult> = () => callback(span);
           for (const sinkSpan of sinkSpans) {
-            if ((sinkSpan.runInContext !== undefined)) {
+            const runInContext = sinkSpan.runInContext?.bind(sinkSpan);
+            if (runInContext !== undefined) {
               const prev = invoke;
-              invoke = () => sinkSpan.runInContext!(prev) as TResult | Promise<TResult>;
+              invoke = () => runInContext(prev);
             }
           }
           const result = await invoke();
@@ -1188,13 +1349,17 @@ export class ChimpbaseEngine {
       return context;
     }
 
-    const target = context as ChimpbaseContext & Record<string, unknown>;
     for (const extension of extensions) {
       if (!(extension.context !== undefined)) {
         continue;
       }
 
-      target[extension.key] = extension.context(context);
+      Object.defineProperty(context, extension.key, {
+        configurable: true,
+        enumerable: true,
+        value: extension.context(context),
+        writable: true,
+      });
     }
 
     return context;
@@ -1206,13 +1371,17 @@ export class ChimpbaseEngine {
       return env;
     }
 
-    const target = env as ChimpbaseRouteEnv & Record<string, unknown>;
     for (const extension of extensions) {
       if (!(extension.routeEnv !== undefined)) {
         continue;
       }
 
-      target[extension.key] = extension.routeEnv(env);
+      Object.defineProperty(env, extension.key, {
+        configurable: true,
+        enumerable: true,
+        value: extension.routeEnv(env),
+        writable: true,
+      });
     }
 
     return env;
@@ -1252,8 +1421,9 @@ export class ChimpbaseEngine {
         definition.version,
         JSON.stringify(input ?? null),
         JSON.stringify(definition.initialState(input) ?? null),
-        hasWorkflowSteps(definition) ? definition.steps[0]?.id ?? null : null,
+        "steps" in definition && definition.steps !== undefined ? definition.steps[0]?.id ?? null : null,
       ],
+      databaseRowValidator,
     );
 
     await this.adapter.queueEnqueue(INTERNAL_WORKFLOW_QUEUE_NAME, { workflowId } satisfies WorkflowQueuePayload);
@@ -1294,6 +1464,7 @@ export class ChimpbaseEngine {
         signalName,
         JSON.stringify(payload ?? null),
       ],
+      databaseRowValidator,
     );
 
     await this.adapter.queueEnqueue(INTERNAL_WORKFLOW_QUEUE_NAME, { workflowId } satisfies WorkflowQueuePayload);
@@ -1373,6 +1544,7 @@ export class ChimpbaseEngine {
             WHERE workflow_id = ?1
           `,
           [workflowId],
+          databaseRowValidator,
         );
         continue;
       }
@@ -1419,6 +1591,7 @@ export class ChimpbaseEngine {
             WHERE workflow_id = ?1
           `,
           [workflowId, definition.steps.length],
+          databaseRowValidator,
         );
         return;
       }
@@ -1455,6 +1628,7 @@ export class ChimpbaseEngine {
               definition.steps[row.current_step_index + 1]?.id ?? null,
               row.current_step_index + 1,
             ],
+            databaseRowValidator,
           );
           continue;
         }
@@ -1480,6 +1654,7 @@ export class ChimpbaseEngine {
                 definition.steps[row.current_step_index + 1]?.id ?? null,
                 row.current_step_index + 1,
               ],
+              databaseRowValidator,
             );
             continue;
           }
@@ -1502,6 +1677,7 @@ export class ChimpbaseEngine {
               row.current_step_index + 1,
               this.platform.now() + delayMs,
             ],
+            databaseRowValidator,
           );
           await this.adapter.queueEnqueue(
             INTERNAL_WORKFLOW_QUEUE_NAME,
@@ -1521,6 +1697,7 @@ export class ChimpbaseEngine {
                 WHERE id = ?1 AND consumed_at IS NULL
               `,
               [signal.id],
+              databaseRowValidator,
             );
 
             const payloadValue = JSON.parse(signal.payload_json) as unknown;
@@ -1552,6 +1729,7 @@ export class ChimpbaseEngine {
                 definition.steps[row.current_step_index + 1]?.id ?? null,
                 row.current_step_index + 1,
               ],
+              databaseRowValidator,
             );
             continue;
           }
@@ -1590,6 +1768,7 @@ export class ChimpbaseEngine {
               WHERE workflow_id = ?1
             `,
             [workflowId, step.id, wakeAtMs],
+            databaseRowValidator,
           );
           if (wakeAtMs !== null) {
             await this.adapter.queueEnqueue(
@@ -1679,6 +1858,7 @@ export class ChimpbaseEngine {
             WHERE workflow_id = ?1
           `,
           [workflowId, JSON.stringify(directive.state ?? null), directive.stepId ?? null],
+          databaseRowValidator,
         );
         return true;
       }
@@ -1701,6 +1881,7 @@ export class ChimpbaseEngine {
             WHERE workflow_id = ?1
           `,
           [workflowId, JSON.stringify(directive.state ?? null)],
+          databaseRowValidator,
         );
         return false;
       }
@@ -1726,6 +1907,7 @@ export class ChimpbaseEngine {
             directive.stepId ?? null,
             directive.error,
           ],
+          databaseRowValidator,
         );
         return false;
       }
@@ -1746,6 +1928,7 @@ export class ChimpbaseEngine {
               WHERE workflow_id = ?1
             `,
             [workflowId, JSON.stringify(directive.state ?? null), directive.stepId ?? null],
+            databaseRowValidator,
           );
           return true;
         }
@@ -1769,6 +1952,7 @@ export class ChimpbaseEngine {
             directive.stepId ?? null,
             this.platform.now() + directive.delayMs,
           ],
+          databaseRowValidator,
         );
         await this.adapter.queueEnqueue(
           INTERNAL_WORKFLOW_QUEUE_NAME,
@@ -1799,6 +1983,7 @@ export class ChimpbaseEngine {
           WHERE id = ?1 AND consumed_at IS NULL
         `,
         [signal.id],
+        databaseRowValidator,
       );
 
       const payloadValue = JSON.parse(signal.payload_json) as unknown;
@@ -1825,6 +2010,7 @@ export class ChimpbaseEngine {
           WHERE workflow_id = ?1
         `,
         [workflowId, JSON.stringify(nextState ?? null), directive.stepId ?? null],
+        databaseRowValidator,
       );
       return true;
     }
@@ -1868,6 +2054,7 @@ export class ChimpbaseEngine {
         directive.stepId ?? directive.signal,
         wakeAtMs,
       ],
+      databaseRowValidator,
     );
     if (wakeAtMs !== null) {
       await this.adapter.queueEnqueue(
@@ -1901,6 +2088,7 @@ export class ChimpbaseEngine {
           WHERE workflow_id = ?1
         `,
         [workflowId, directive.stepId ?? directive.signal, `workflow signal timed out: ${workflowId}/${directive.signal}`],
+        databaseRowValidator,
       );
       return false;
     }
@@ -1923,6 +2111,7 @@ export class ChimpbaseEngine {
         WHERE workflow_id = ?1
       `,
       [workflowId, JSON.stringify(nextState ?? null), directive.stepId ?? null],
+      databaseRowValidator,
     );
     return true;
   }
@@ -1969,6 +2158,7 @@ export class ChimpbaseEngine {
         nextStepId,
         row.current_step_index + 1,
       ],
+      databaseRowValidator,
     );
   }
 
@@ -1984,13 +2174,14 @@ export class ChimpbaseEngine {
           input_json,
           state_json,
           current_step_index,
-          wake_at_ms,
+          CAST(wake_at_ms AS DOUBLE PRECISION) AS wake_at_ms,
           last_error
         FROM _chimpbase_workflow_instances
         WHERE workflow_id = ?1
         LIMIT 1
       `,
       [workflowId],
+      workflowInstanceRowValidator,
     );
 
     return row ?? null;
@@ -2001,7 +2192,7 @@ export class ChimpbaseEngine {
       | string
       | ChimpbaseWorkflowDefinition<TInput, TState>
       | ChimpbaseWorkflowRegistration<TInput, TState>,
-  ): ChimpbaseWorkflowDefinition<TInput, TState> {
+  ): ChimpbaseWorkflowDefinition<TInput, TState> | ChimpbaseWorkflowDefinition {
     if (typeof reference === "string") {
       const versions = this.registry.workflows.get(reference);
       if (!(versions !== undefined) || versions.size === 0) {
@@ -2009,7 +2200,14 @@ export class ChimpbaseEngine {
       }
 
       const latestVersion = Math.max(...versions.keys());
-      return versions.get(latestVersion) as ChimpbaseWorkflowDefinition<TInput, TState>;
+      const definition = versions.get(latestVersion);
+      if (definition === undefined) {
+        throw new Error(`workflow not found: ${reference}`);
+      }
+      if (!isChimpbaseWorkflowDefinition(definition)) {
+        throw new TypeError(`workflow ${reference} has an invalid definition`);
+      }
+      return definition;
     }
 
     if ("definition" in reference) {
@@ -2028,6 +2226,9 @@ export class ChimpbaseEngine {
 
     if (!(definition !== undefined)) {
       throw new Error(`workflow definition not found: ${workflowName}@${workflowVersion}`);
+    }
+    if (!isChimpbaseWorkflowDefinition(definition)) {
+      throw new TypeError(`workflow ${workflowName}@${workflowVersion} has an invalid definition`);
     }
 
     return definition;
@@ -2055,6 +2256,7 @@ export class ChimpbaseEngine {
         RETURNING workflow_id
       `,
       [workflowId, leaseToken, leaseExpiresAtMs, now],
+      workflowIdRowValidator,
     );
 
     return (row !== null && row !== undefined) ? leaseToken : null;
@@ -2071,6 +2273,7 @@ export class ChimpbaseEngine {
         WHERE workflow_id = ?1 AND lease_token = ?2
       `,
       [workflowId, leaseToken],
+      databaseRowValidator,
     );
   }
 
@@ -2088,6 +2291,7 @@ export class ChimpbaseEngine {
         WHERE workflow_id = ?1
       `,
       [workflowId, errorMessage],
+      databaseRowValidator,
     );
   }
 
@@ -2098,7 +2302,7 @@ export class ChimpbaseEngine {
     const [row] = await this.adapter.query<PersistedWorkflowSignalRow>(
       `
         SELECT
-          id,
+          CAST(id AS DOUBLE PRECISION) AS id,
           payload_json
         FROM _chimpbase_workflow_signals
         WHERE workflow_id = ?1
@@ -2108,6 +2312,7 @@ export class ChimpbaseEngine {
         LIMIT 1
       `,
       [workflowId, signalName],
+      workflowSignalRowValidator,
     );
 
     return row ?? null;
@@ -2144,16 +2349,16 @@ export class ChimpbaseEngine {
         }
 
         const parsedArgs = registration.args.parse(args[0], "args");
-        return await (registration.handler as (ctx: ChimpbaseContext, args: unknown) => TResult | Promise<TResult>)(
-          context,
-          parsedArgs,
-        );
+        if (!isObjectActionHandler<TResult>(registration.handler)) {
+          throw new TypeError(`action ${name} has an invalid handler`);
+        }
+        return await registration.handler(context, parsedArgs);
       }
 
-      return await (registration.handler as (ctx: ChimpbaseContext, ...args: unknown[]) => TResult | Promise<TResult>)(
-        context,
-        ...args,
-      );
+      if (!isTupleActionHandler<TResult>(registration.handler)) {
+        throw new TypeError(`action ${name} has an invalid handler`);
+      }
+      return await registration.handler(context, ...args);
     }));
   }
 
@@ -2161,17 +2366,21 @@ export class ChimpbaseEngine {
     for (const event of events) {
       const subscriptions = this.registry.subscriptions.get(event.name) ?? [];
       for (const sub of subscriptions) {
+        const subscriptionHandler: unknown = sub.handler;
+        if (!isSubscriptionHandler(subscriptionHandler)) {
+          throw new TypeError(`subscription ${event.name} has an invalid handler`);
+        }
         await this.runInTransaction(async () => {
           if (sub.idempotent && event.id !== undefined) {
             const key = `_chimpbase.sub.seen:${event.id}:${sub.name}`;
-            if ((await this.adapter.kvGet<boolean>(key) === true)) return;
+            if ((await this.adapter.kvGet(key, v.boolean()) === true)) return;
             await this.runWithActionInvoker(async () => {
-              await sub.handler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
+              await subscriptionHandler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
             });
             await this.adapter.kvSet(key, true);
           } else {
             await this.runWithActionInvoker(async () => {
-              await sub.handler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
+              await subscriptionHandler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
             });
           }
         });

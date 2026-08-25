@@ -19,7 +19,9 @@ Expired keys are invisible immediately on read — no need to wait for cleanup.
 ## Get
 
 ```ts
-const theme = await ctx.kv.get<string>("workspace.theme");
+import { v } from "@chimpbase/runtime";
+
+const theme = await ctx.kv.get("workspace.theme", v.string());
 // "dark" or null if not set / expired
 ```
 
@@ -47,7 +49,7 @@ const workspaceKeys = await ctx.kv.list({ prefix: "workspace." });
 ```ts
 await ctx.kv.set("feature:dark-mode", true);
 
-const darkMode = await ctx.kv.get<boolean>("feature:dark-mode");
+const darkMode = await ctx.kv.get("feature:dark-mode", v.boolean());
 if (darkMode) {
   // ...
 }
@@ -57,7 +59,7 @@ if (darkMode) {
 
 ```ts
 const key = `ratelimit:${userId}`;
-const current = await ctx.kv.get<number>(key) ?? 0;
+const current = await ctx.kv.get(key, v.number()) ?? 0;
 await ctx.kv.set(key, current + 1, { ttlMs: 60_000 }); // reset after 1 min
 ```
 
@@ -65,7 +67,7 @@ await ctx.kv.set(key, current + 1, { ttlMs: 60_000 }); // reset after 1 min
 
 ```ts
 const cacheKey = `cache:dashboard:${projectId}`;
-const cached = await ctx.kv.get<DashboardData>(cacheKey);
+const cached = await ctx.kv.get(cacheKey, dashboardDataValidator);
 if (cached) return cached;
 
 const data = await computeDashboard(ctx, projectId);

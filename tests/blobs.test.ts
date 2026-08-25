@@ -10,6 +10,8 @@ import {
   fsBlobDriver,
   memoryBlobDriver,
 } from "../packages/blobs/src/index.ts";
+import type { ChimpbaseBlobDriver } from "../packages/core/index.ts";
+
 
 const cleanupDirs: string[] = [];
 
@@ -27,9 +29,15 @@ async function bootBlobsHost(options: {
   clock?: () => number;
   baseUrl?: string;
 } = {}) {
-  const driver = (options.useFs === true)
-    ? fsBlobDriver({ root: options.root! })
-    : memoryBlobDriver();
+  let driver: ChimpbaseBlobDriver;
+  if (options.useFs === true) {
+    if (options.root === undefined) {
+      throw new Error("filesystem blob tests require a root");
+    }
+    driver = fsBlobDriver({ root: options.root });
+  } else {
+    driver = memoryBlobDriver();
+  }
 
   const putBlob = action({
     name: "blobs.put",
@@ -148,12 +156,12 @@ async function bootBlobsHost(options: {
 
   const signBlob = action({
     name: "blobs.sign",
-    args: v.object({ bucket: v.string(), key: v.string(), op: v.string(), ttlSec: v.number() }),
+    args: v.object({ bucket: v.string(), key: v.string(), op: v.enum(["get", "put"] as const), ttlSec: v.number() }),
     async handler(ctx, input) {
       return ctx.blobs.sign({
         bucket: input.bucket,
         key: input.key,
-        op: input.op as "get" | "put",
+        op: input.op,
         ttlSec: input.ttlSec,
       });
     },
@@ -189,6 +197,18 @@ async function bootBlobsHost(options: {
 
 interface PutResult { size: number; etag: string }
 interface ListResult { entries: { key: string }[]; commonPrefixes: string[]; nextCursor: string | null }
+const idResultValidator = v.object({ id: v.string() });
+const listResultValidator = v.object({
+  commonPrefixes: v.string().array(),
+  entries: v.object({ key: v.string() }).array(),
+  nextCursor: v.string().nullable(),
+});
+const putResultValidator = v.object({
+  etag: v.string(),
+  size: v.number(),
+});
+const textResultValidator = v.object({ text: v.string() });
+
 
 describe("chimpbase blobs primitive (memory driver)", () => {
   test("put/head/get/delete roundtrip", async () => {
@@ -197,7 +217,7 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const put = await host.executeAction("blobs.put", {
         bucket: "uploads", key: "hello.txt", body: "hello world",
       });
-      const putResult = put.result as PutResult;
+      const putResult = putResultValidator.parse(put.result, "blob put result");
       expect(putResult.size).toBe(11);
       expect(putResult.etag).toHaveLength(64);
 
@@ -234,7 +254,7 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const listed = await host.executeAction("blobs.list", {
         bucket: "uploads", prefix: "photos/",
       });
-      const listedResult = listed.result as ListResult;
+      const listedResult = listResultValidator.parse(listed.result, "blob list result");
       expect(listedResult.entries.map((e) => e.key)).toEqual([
         "photos/a.jpg", "photos/b.jpg",
       ]);
@@ -242,7 +262,7 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const grouped = await host.executeAction("blobs.list", {
         bucket: "uploads", delimiter: "/",
       });
-      const groupedResult = grouped.result as ListResult;
+      const groupedResult = listResultValidator.parse(grouped.result, "grouped blob list result");
       expect(groupedResult.commonPrefixes.sort()).toEqual(["docs/", "photos/"]);
       expect(groupedResult.entries.map((e) => e.key)).toEqual(["root.txt"]);
     } finally {
@@ -263,7 +283,7 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const copied = await host.executeAction("blobs.get", {
         bucket: "archive", key: "report-copy.txt",
       });
-      expect((copied.result as { text: string }).text).toBe("original");
+      expect((textResultValidator.parse(copied.result, "copied blob result")).text).toBe("original");
     } finally {
       await started.stop();
     }
@@ -277,14 +297,14 @@ describe("chimpbase blobs primitive (memory driver)", () => {
         key: "big.txt",
         parts: ["aaa", "bbb", "ccc"],
       });
-      const completeResult = complete.result as PutResult;
+      const completeResult = putResultValidator.parse(complete.result, "multipart completion result");
       expect(completeResult.size).toBe(9);
       expect(completeResult.etag.endsWith("-3")).toBe(true);
 
       const fetched = await host.executeAction("blobs.get", {
         bucket: "uploads", key: "big.txt",
       });
-      expect((fetched.result as { text: string }).text).toBe("aaabbbccc");
+      expect((textResultValidator.parse(fetched.result, "fetched blob result")).text).toBe("aaabbbccc");
     } finally {
       await started.stop();
     }
@@ -296,13 +316,13 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const signed = await host.executeAction("blobs.sign", {
         bucket: "uploads", key: "hello.txt", op: "get", ttlSec: 60,
       });
-      const url = new URL(signed.result as string);
+      const url = new URL(v.string().parse(signed.result, "signed blob URL"));
       const token = url.searchParams.get("token");
-      expect(token).toBeTruthy();
-      const payload = plugin.signer.verify(token!);
-      expect(payload).not.toBeNull();
-      expect(payload!.bucket).toBe("uploads");
-      expect(payload!.op).toBe("get");
+      if (token === null) throw new Error("signed URL missing token");
+      const payload = plugin.signer.verify(token);
+      if (payload === null) throw new Error("signed token failed verification");
+      expect(payload.bucket).toBe("uploads");
+      expect(payload.op).toBe("get");
 
       const tampered = `${token}x`;
       expect(plugin.signer.verify(tampered)).toBeNull();
@@ -366,11 +386,11 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       const aborted = await host.executeAction("blobs.upload.abort", {
         bucket: "uploads", key: "aborted.txt",
       });
-      const uploadId = (aborted.result as { id: string }).id;
+      const uploadId = (idResultValidator.parse(aborted.result, "aborted upload result")).id;
       const rows = await host.executeAction("blobs.list", {
         bucket: "uploads", prefix: "aborted.txt",
       });
-      expect((rows.result as ListResult).entries).toEqual([]);
+      expect((listResultValidator.parse(rows.result, "aborted upload list result")).entries).toEqual([]);
       // ensure metadata is gone
       const direct = await host.engine.createRouteEnv().blobs.head("uploads", "aborted.txt");
       expect(direct).toBeNull();
@@ -393,7 +413,7 @@ describe("chimpbase blobs primitive (fs driver)", () => {
       const put = await host.executeAction("blobs.put", {
         bucket: "uploads", key: "nested/report.txt", body: "payload",
       });
-      expect((put.result as PutResult).size).toBe(7);
+      expect((putResultValidator.parse(put.result, "blob put result")).size).toBe(7);
 
       const diskRoot = join(root, "uploads", "objects");
       await expect(stat(diskRoot)).resolves.toHaveProperty("isDirectory");
@@ -401,7 +421,7 @@ describe("chimpbase blobs primitive (fs driver)", () => {
       const listed = await host.executeAction("blobs.list", {
         bucket: "uploads", prefix: "nested/",
       });
-      expect((listed.result as ListResult).entries).toHaveLength(1);
+      expect((listResultValidator.parse(listed.result, "blob list result")).entries).toHaveLength(1);
 
       const deleted = await host.executeAction("blobs.delete", {
         bucket: "uploads", key: "nested/report.txt",
@@ -424,7 +444,7 @@ describe("chimpbase blobs signed URLs", () => {
       const signed = await boot.host.executeAction("blobs.sign", {
         bucket: "uploads", key: "signed.txt", op: "get", ttlSec: 60,
       });
-      const signedUrl = new URL(signed.result as string);
+      const signedUrl = new URL(v.string().parse(signed.result, "signed blob URL"));
       const path = `${signedUrl.pathname}?${signedUrl.searchParams.toString()}`;
       const ok = await fetch(`${boot.baseUrl}${path}`);
       expect(ok.status).toBe(200);
@@ -445,7 +465,7 @@ describe("chimpbase blobs signed URLs", () => {
       const signed = await boot.host.executeAction("blobs.sign", {
         bucket: "uploads", key: "uploaded.txt", op: "put", ttlSec: 60,
       });
-      const signedUrl = new URL(signed.result as string);
+      const signedUrl = new URL(v.string().parse(signed.result, "signed blob URL"));
       const res = await fetch(`${boot.baseUrl}${signedUrl.pathname}?${signedUrl.searchParams.toString()}`, {
         method: "PUT",
         body: "uploaded via signed url",
@@ -455,7 +475,7 @@ describe("chimpbase blobs signed URLs", () => {
       const fetched = await boot.host.executeAction("blobs.get", {
         bucket: "uploads", key: "uploaded.txt",
       });
-      expect((fetched.result as { text: string }).text).toBe("uploaded via signed url");
+      expect((textResultValidator.parse(fetched.result, "fetched blob result")).text).toBe("uploaded via signed url");
     } finally {
       await boot.started.stop();
     }
@@ -476,7 +496,7 @@ describe("chimpbase blobs signed URLs", () => {
         bucket: "uploads", key: "maybe.txt", op: "get", ttlSec: 60,
       });
       now += 120 * 1000;
-      const signedUrl = new URL(signed.result as string);
+      const signedUrl = new URL(v.string().parse(signed.result, "signed blob URL"));
       const res = await fetch(`${boot.baseUrl}${signedUrl.pathname}?${signedUrl.searchParams.toString()}`);
       expect(res.status).toBe(401);
     } finally {

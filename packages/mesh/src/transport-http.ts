@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import type { ChimpbaseContext } from "@chimpbase/runtime";
+import { isJsonObject, type ChimpbaseContext } from "@chimpbase/runtime";
 
 import type { NodeRecord } from "./types.ts";
 import { MeshCallError } from "./types.ts";
@@ -25,20 +25,18 @@ export interface CreateHttpDispatcherOptions {
 
 export function createHttpDispatcher(
   options: CreateHttpDispatcherOptions,
-): <TResult = unknown>(params: {
+): (params: {
   actionName: string;
   args: unknown;
-  ctx: ChimpbaseContext;
   deadlineMs: number;
   peer: NodeRecord;
-}) => Promise<TResult> {
-  return async <TResult = unknown>(params: {
+}) => Promise<unknown> {
+  return async (params: {
     actionName: string;
     args: unknown;
-    ctx: ChimpbaseContext;
     deadlineMs: number;
     peer: NodeRecord;
-  }): Promise<TResult> => {
+  }): Promise<unknown> => {
     const { peer, actionName, args, deadlineMs } = params;
     if (!(peer.advertisedUrl !== null && peer.advertisedUrl.length > 0)) {
       throw new MeshCallError(actionName, peer.nodeId, `peer ${peer.nodeId} has no advertised URL`);
@@ -93,12 +91,29 @@ export function createHttpDispatcher(
       );
     }
 
-    const body = (await response.json()) as { ok: boolean; result?: unknown; error?: string };
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw new MeshCallError(
+        actionName,
+        peer.nodeId,
+        "mesh RPC returned invalid JSON",
+        error,
+      );
+    }
+    if (!isJsonObject(body) || typeof body.ok !== "boolean") {
+      throw new MeshCallError(actionName, peer.nodeId, "mesh RPC returned an invalid response");
+    }
     if (!body.ok) {
-      throw new MeshCallError(actionName, peer.nodeId, body.error ?? "mesh RPC remote error");
+      throw new MeshCallError(
+        actionName,
+        peer.nodeId,
+        typeof body.error === "string" ? body.error : "mesh RPC remote error",
+      );
     }
 
-    return body.result as TResult;
+    return body.result;
   };
 }
 

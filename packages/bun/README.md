@@ -21,6 +21,8 @@ Add `@chimpbase/runtime` when you want explicit `chimpbase.app.ts`, exported `re
 
 ```ts
 import { createChimpbase } from "@chimpbase/bun";
+import { v } from "@chimpbase/runtime";
+
 
 const chimpbase = await createChimpbase({
   storage: { engine: "postgres", url: process.env.DATABASE_URL! },
@@ -28,9 +30,10 @@ const chimpbase = await createChimpbase({
 
 chimpbase
   .action("createCustomer", async (ctx, input) => {
-    const [customer] = await ctx.db.query<{ id: number }>(
+    const [customer] = await ctx.db.query(
       "insert into customers (email, name, plan) values (?1, ?2, ?3) returning id",
       [input.email, input.name, input.plan],
+      v.object({ id: v.number() }),
     );
 
     await ctx.kv.set(`customer:${customer.id}:status`, "new");
