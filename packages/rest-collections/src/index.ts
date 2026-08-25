@@ -4,7 +4,9 @@ import {
   plugin,
   readJsonBody,
   route,
+  v,
   type ChimpbaseCollectionFilter,
+  type ChimpbaseCollectionClient,
   type ChimpbasePluginDependency,
   type ChimpbasePluginRegistration,
   type ChimpbaseRegistrationSource,
@@ -117,6 +119,13 @@ const DEFAULT_LIMIT = 50;
 const DEFAULT_MAX_LIMIT = 100;
 const REST_METHODS: readonly RestCollectionMethod[] = ["list", "get", "create", "update", "delete"];
 const REST_COLLECTION_METADATA_COLLECTION = "__chimpbase.rest.collection_metadata";
+const restCollectionMetadataValidator = v.object({
+  collectionName: v.string(),
+  documentId: v.string(),
+  id: v.string(),
+  schemaVersion: v.integer(),
+});
+
 
 class RestCollectionsRequestError extends Error {
   readonly status: number;
@@ -506,12 +515,7 @@ async function applyWriteTransform(
 }
 
 async function resolveSchemaVersion(
-  collection: {
-    findOne<TDocument = Record<string, unknown>>(
-      name: string,
-      filter: ChimpbaseCollectionFilter,
-    ): Promise<TDocument | null>;
-  },
+  collection: Pick<ChimpbaseCollectionClient, "findOne">,
   definition: ResolvedRestCollectionDefinition,
   document: Record<string, unknown> | null,
 ): Promise<number | null> {
@@ -519,12 +523,13 @@ async function resolveSchemaVersion(
     return null;
   }
 
-  const metadata = await collection.findOne<RestCollectionMetadataRecord>(
+  const metadata = await collection.findOne(
     REST_COLLECTION_METADATA_COLLECTION,
     {
       collectionName: definition.collectionName,
       documentId: document.id,
     },
+    restCollectionMetadataValidator,
   );
 
   if (metadata?.schemaVersion !== undefined) {
@@ -535,14 +540,7 @@ async function resolveSchemaVersion(
 }
 
 async function persistSchemaVersion(
-  collection: {
-    findOne<TDocument = Record<string, unknown>>(
-      name: string,
-      filter: ChimpbaseCollectionFilter,
-    ): Promise<TDocument | null>;
-    insert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string>;
-    update(name: string, filter: ChimpbaseCollectionFilter, patch: Record<string, unknown>): Promise<number>;
-  },
+  collection: Pick<ChimpbaseCollectionClient, "insert" | "update">,
   definition: ResolvedRestCollectionDefinition,
   documentId: string,
 ): Promise<void> {
@@ -573,9 +571,7 @@ async function persistSchemaVersion(
 }
 
 async function deleteSchemaVersionMetadata(
-  collection: {
-    delete(name: string, filter?: ChimpbaseCollectionFilter): Promise<number>;
-  },
+  collection: Pick<ChimpbaseCollectionClient, "delete">,
   definition: ResolvedRestCollectionDefinition,
   documentId: string,
 ): Promise<void> {

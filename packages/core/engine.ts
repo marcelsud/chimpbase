@@ -193,9 +193,9 @@ const cronQueuePayloadValidator = v.object({
   scheduleName: v.string(),
 });
 const subscriptionQueuePayloadValidator = v.object({
-  eventId: v.number().optional(),
+  eventId: v.integer().optional(),
   eventName: v.string(),
-  payload: v.unknown(),
+  payload: v.unknown().optional(),
   payloadJson: v.string(),
 });
 const workflowQueuePayloadValidator = v.object({
@@ -204,7 +204,7 @@ const workflowQueuePayloadValidator = v.object({
 const databaseRowValidator = v.record(v.unknown());
 const workflowIdRowValidator = v.object({ workflow_id: v.string() });
 const workflowSignalRowValidator = v.object({
-  id: v.number(),
+  id: v.integer(),
   payload_json: v.string(),
 });
 const workflowInstanceRowValidator = v.object({
@@ -214,7 +214,7 @@ const workflowInstanceRowValidator = v.object({
   last_error: v.string().nullable(),
   status: v.enum(["completed", "failed", "running", "sleeping", "waiting_signal"] as const),
   state_json: v.string(),
-  wake_at_ms: v.number().nullable(),
+  wake_at_ms: v.integer().nullable(),
   workflow_id: v.string(),
   workflow_name: v.string(),
   workflow_version: v.number(),
@@ -564,7 +564,7 @@ export class ChimpbaseEngine {
     try {
       let invoke: () => Promise<unknown> = () => this.invokeActionByName(name, args);
       for (const span of handlerSpans) {
-        const runInContext = span.runInContext;
+        const runInContext = span.runInContext?.bind(span);
         if (runInContext !== undefined) {
           const prev = invoke;
           invoke = async () => await runInContext(prev);
@@ -612,7 +612,7 @@ export class ChimpbaseEngine {
       });
 
       for (const span of handlerSpans) {
-        const runInContext = span.runInContext;
+        const runInContext = span.runInContext?.bind(span);
         if (runInContext !== undefined) {
           const prev = invoke;
           invoke = async () => await runInContext(prev);
@@ -782,16 +782,16 @@ export class ChimpbaseEngine {
       await this.failQueueJob(job.id, job.queue_name, `queue handler not found: ${job.queue_name}`, job.attempt_count);
       throw new Error(`queue handler not found: ${job.queue_name}`);
     }
-    const workerHandler: unknown = worker.handler;
-    if (!isWorkerHandler(workerHandler)) {
-      throw new TypeError(`queue ${job.queue_name} has an invalid handler`);
-    }
 
 
     const scope: ChimpbaseExecutionScope = { kind: "queue", name: job.queue_name };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
+      const workerHandler: unknown = worker.handler;
+      if (!isWorkerHandler(workerHandler)) {
+        throw new TypeError(`queue ${job.queue_name} has an invalid handler`);
+      }
       const payload = JSON.parse(job.payload_json) as unknown;
 
       let invoke = async () => {
@@ -803,7 +803,7 @@ export class ChimpbaseEngine {
       };
 
       for (const span of handlerSpans) {
-        const runInContext = span.runInContext;
+        const runInContext = span.runInContext?.bind(span);
         if (runInContext !== undefined) {
           const prev = invoke;
           invoke = async () => await runInContext(prev);
@@ -1070,7 +1070,7 @@ export class ChimpbaseEngine {
       };
 
       for (const span of handlerSpans) {
-        const runInContext = span.runInContext;
+        const runInContext = span.runInContext?.bind(span);
         if (runInContext !== undefined) {
           const prev = invoke;
           invoke = async () => await runInContext(prev);
@@ -1299,7 +1299,7 @@ export class ChimpbaseEngine {
         try {
           let invoke: () => TResult | Promise<TResult> = () => callback(span);
           for (const sinkSpan of sinkSpans) {
-            const runInContext = sinkSpan.runInContext;
+            const runInContext = sinkSpan.runInContext?.bind(sinkSpan);
             if (runInContext !== undefined) {
               const prev = invoke;
               invoke = () => runInContext(prev);
@@ -2174,7 +2174,7 @@ export class ChimpbaseEngine {
           input_json,
           state_json,
           current_step_index,
-          wake_at_ms,
+          CAST(wake_at_ms AS DOUBLE PRECISION) AS wake_at_ms,
           last_error
         FROM _chimpbase_workflow_instances
         WHERE workflow_id = ?1
@@ -2302,7 +2302,7 @@ export class ChimpbaseEngine {
     const [row] = await this.adapter.query<PersistedWorkflowSignalRow>(
       `
         SELECT
-          id,
+          CAST(id AS DOUBLE PRECISION) AS id,
           payload_json
         FROM _chimpbase_workflow_signals
         WHERE workflow_id = ?1

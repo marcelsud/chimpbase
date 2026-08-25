@@ -25,7 +25,7 @@ import type {
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
-import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord } from "@chimpbase/runtime";
+import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord, v } from "@chimpbase/runtime";
 
 import { createPostgresKysely } from "./kysely.ts";
 
@@ -1189,10 +1189,11 @@ async function persistEvents(queryable: Queryable, events: ChimpbaseEventRecord[
 
   for (const event of events) {
     const result = await queryable.query<{ id: number }>(
-      "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, $2::jsonb) RETURNING id",
+      "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, $2::jsonb) RETURNING CAST(id AS DOUBLE PRECISION) AS id",
       [event.name, event.payloadJson],
     );
-    event.id = result.rows[0]?.id;
+    const row = v.object({ id: v.integer() }).parse(result.rows[0], "persisted event row");
+    event.id = row.id;
   }
 }
 

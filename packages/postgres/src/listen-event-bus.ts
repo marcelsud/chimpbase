@@ -47,9 +47,9 @@ interface NotifyEnvelope {
 }
 const notifyEnvelopeValidator = v.object({
   event: v.object({
-    id: v.number().optional(),
+    id: v.integer().optional(),
     name: v.string(),
-    payload: v.unknown(),
+    payload: v.unknown().optional(),
     payloadJson: v.string(),
   }),
   origin: v.string(),
@@ -139,10 +139,14 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
 
     let envelope: NotifyEnvelope;
     try {
-      envelope = notifyEnvelopeValidator.parse(
+      const parsed = notifyEnvelopeValidator.parse(
         parseJson(payload, "Postgres notification"),
         "Postgres notification",
       );
+      envelope = {
+        event: { ...parsed.event, payload: parsed.event.payload },
+        origin: parsed.origin,
+      };
     } catch (error) {
       console.error("[@chimpbase/postgres][listen-event-bus] invalid payload", error);
       return;

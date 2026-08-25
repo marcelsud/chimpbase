@@ -2171,17 +2171,10 @@ function isObjectValidatorResult<TShape extends ChimpbaseValidatorShape>(
   }
 
   for (const [key, validator] of Object.entries(shape)) {
-    const hasKey = Object.prototype.hasOwnProperty.call(value, key);
-    if (!hasKey) {
-      if (validator.isOptional !== true) {
-        return false;
-      }
-      continue;
-    }
-
-    try {
-      validator.parse(value[key], key);
-    } catch {
+    if (
+      validator.isOptional !== true
+      && !Object.prototype.hasOwnProperty.call(value, key)
+    ) {
       return false;
     }
   }
@@ -2235,32 +2228,15 @@ function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
   });
 }
 
-function isUnionValidatorResult<TValidators extends readonly ChimpbaseValidator<unknown>[]>(
-  value: unknown,
-  validators: TValidators,
-): value is Infer<TValidators[number]> {
-  return validators.some((validator) => {
-    try {
-      validator.parse(value);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function createUnionValidator<TValidators extends readonly ChimpbaseValidator<unknown>[]>(
-  validators: TValidators,
-): ChimpbaseValidator<Infer<TValidators[number]>> {
-  return createValidator<Infer<TValidators[number]>>({
+function createUnionValidator<TValue>(
+  validators: readonly ChimpbaseValidator<TValue>[],
+): ChimpbaseValidator<TValue> {
+  return createValidator<TValue>({
     parser(value, path) {
       const messages: string[] = [];
       for (const validator of validators) {
         try {
-          const parsed = validator.parse(value, path);
-          if (isUnionValidatorResult(parsed, validators)) {
-            return parsed;
-          }
+          return validator.parse(value, path);
         } catch (error) {
           messages.push(error instanceof Error ? error.message : String(error));
         }
@@ -2273,6 +2249,17 @@ function createUnionValidator<TValidators extends readonly ChimpbaseValidator<un
     },
   });
 }
+function unionValidator<
+  TValidators extends readonly [ChimpbaseValidator<unknown>, ...ChimpbaseValidator<unknown>[]],
+>(
+  ...validators: TValidators
+): ChimpbaseValidator<Infer<TValidators[number]>>;
+function unionValidator(
+  ...validators: ChimpbaseValidator<unknown>[]
+): ChimpbaseValidator<unknown> {
+  return createUnionValidator(validators);
+}
+
 
 export const v = {
   any(): ChimpbaseValidator<unknown> {
@@ -2333,6 +2320,17 @@ export const v = {
       schema: { type: "null" },
     });
   },
+  integer(): ChimpbaseValidator<number> {
+    return createValidator<number>({
+      parser(value, path) {
+        if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+          throw new Error(`${path} must be a safe integer`);
+        }
+        return value;
+      },
+      schema: { type: "integer" },
+    });
+  },
   number(): ChimpbaseValidator<number> {
     return createValidator<number>({
       parser(value, path) {
@@ -2362,7 +2360,12 @@ export const v = {
 
         const output: Record<string, TValue> = {};
         for (const [key, entry] of Object.entries(value)) {
-          output[key] = validator.parse(entry, `${path}.${key}`);
+          Object.defineProperty(output, key, {
+            configurable: true,
+            enumerable: true,
+            value: validator.parse(entry, `${path}.${key}`),
+            writable: true,
+          });
         }
         return output;
       },
@@ -2381,11 +2384,7 @@ export const v = {
       schema: { type: "string" },
     });
   },
-  union<TValidators extends readonly [ChimpbaseValidator<unknown>, ...ChimpbaseValidator<unknown>[]]>(
-    ...validators: TValidators
-  ): ChimpbaseValidator<Infer<TValidators[number]>> {
-    return createUnionValidator(validators);
-  },
+  union: unionValidator,
   unknown(): ChimpbaseValidator<unknown> {
     return createValidator<unknown>({
       parser(value) {

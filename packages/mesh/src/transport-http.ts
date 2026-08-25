@@ -28,14 +28,12 @@ export function createHttpDispatcher(
 ): (params: {
   actionName: string;
   args: unknown;
-  ctx: ChimpbaseContext;
   deadlineMs: number;
   peer: NodeRecord;
 }) => Promise<unknown> {
   return async (params: {
     actionName: string;
     args: unknown;
-    ctx: ChimpbaseContext;
     deadlineMs: number;
     peer: NodeRecord;
   }): Promise<unknown> => {
@@ -93,7 +91,17 @@ export function createHttpDispatcher(
       );
     }
 
-    const body: unknown = await response.json();
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw new MeshCallError(
+        actionName,
+        peer.nodeId,
+        "mesh RPC returned invalid JSON",
+        error,
+      );
+    }
     if (!isJsonObject(body) || typeof body.ok !== "boolean") {
       throw new MeshCallError(actionName, peer.nodeId, "mesh RPC returned an invalid response");
     }

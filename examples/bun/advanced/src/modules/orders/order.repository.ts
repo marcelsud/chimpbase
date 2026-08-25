@@ -9,38 +9,38 @@ import {
   type OrderStatus,
 } from "./order.types.ts";
 const orderRecordValidator = v.object({
-  amount: v.number(),
+  amount: v.integer(),
   assignee: v.string().nullable(),
   created_at: v.string(),
   customer: v.string(),
-  id: v.number(),
+  id: v.integer(),
   status: v.enum(ORDER_STATUSES),
   updated_at: v.string(),
 });
 const orderAuditRowValidator = v.object({
   created_at: v.string(),
   event: v.string(),
-  id: v.number(),
-  order_id: v.number(),
+  id: v.integer(),
+  order_id: v.integer(),
   payload: v.string(),
 });
 const orderNotificationRowValidator = v.object({
   channel: v.string(),
   created_at: v.string(),
   detail: v.string().nullable(),
-  id: v.number(),
-  order_id: v.number(),
+  id: v.integer(),
+  order_id: v.integer(),
   status: v.enum(["pending", "sent", "failed"] as const),
 });
 const orderBacklogSnapshotRowValidator = v.object({
-  id: v.number(),
-  in_progress_count: v.number(),
-  pending_count: v.number(),
+  id: v.integer(),
+  in_progress_count: v.integer(),
+  pending_count: v.integer(),
   snapshot_at: v.string(),
-  total_count: v.number(),
+  total_count: v.integer(),
 });
 const statusCountRowValidator = v.object({
-  count: v.number(),
+  count: v.integer(),
   status: v.enum(ORDER_STATUSES),
 });
 
@@ -51,7 +51,7 @@ export async function insertOrder(
 ): Promise<OrderRecord> {
   const [row] = await ctx.db.query(
     `INSERT INTO orders (customer, amount, status) VALUES (?1, ?2, 'pending')
-     RETURNING id, customer, amount, status, assignee, created_at, updated_at`,
+     RETURNING CAST(id AS DOUBLE PRECISION) AS id, customer, CAST(amount AS DOUBLE PRECISION) AS amount, status, assignee, CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at`,
     [input.customer, input.amount],
     orderRecordValidator,
   );
@@ -70,7 +70,7 @@ export async function updateOrderStatus(
          assignee = COALESCE(?3, assignee),
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?1
-     RETURNING id, customer, amount, status, assignee, created_at, updated_at`,
+     RETURNING CAST(id AS DOUBLE PRECISION) AS id, customer, CAST(amount AS DOUBLE PRECISION) AS amount, status, assignee, CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at`,
     [id, status, assignee],
     orderRecordValidator,
   );
@@ -83,7 +83,7 @@ export async function getOrder(
   id: number,
 ): Promise<OrderRecord | null> {
   const rows = await ctx.db.query(
-    `SELECT id, customer, amount, status, assignee, created_at, updated_at
+    `SELECT CAST(id AS DOUBLE PRECISION) AS id, customer, CAST(amount AS DOUBLE PRECISION) AS amount, status, assignee, CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at
      FROM orders WHERE id = ?1`,
     [id],
     orderRecordValidator,
@@ -95,7 +95,7 @@ export async function listOrders(
   ctx: ChimpbaseContext,
 ): Promise<OrderRecord[]> {
   return await ctx.db.query(
-    `SELECT id, customer, amount, status, assignee, created_at, updated_at
+    `SELECT CAST(id AS DOUBLE PRECISION) AS id, customer, CAST(amount AS DOUBLE PRECISION) AS amount, status, assignee, CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at
      FROM orders ORDER BY id DESC`,
     undefined,
     orderRecordValidator,
@@ -117,7 +117,7 @@ export async function listOrderAudit(
   orderId: number,
 ): Promise<OrderAuditRow[]> {
   return await ctx.db.query(
-    `SELECT id, order_id, event, payload, created_at
+    `SELECT CAST(id AS DOUBLE PRECISION) AS id, CAST(order_id AS DOUBLE PRECISION) AS order_id, event, CAST(payload AS TEXT) AS payload, CAST(created_at AS TEXT) AS created_at
      FROM order_audit_log WHERE order_id = ?1 ORDER BY id`,
     [orderId],
     orderAuditRowValidator,
@@ -144,7 +144,7 @@ export async function listNotifications(
   ctx: ChimpbaseContext,
 ): Promise<OrderNotificationRow[]> {
   return await ctx.db.query(
-    `SELECT id, order_id, channel, status, detail, created_at
+    `SELECT CAST(id AS DOUBLE PRECISION) AS id, CAST(order_id AS DOUBLE PRECISION) AS order_id, channel, status, detail, CAST(created_at AS TEXT) AS created_at
      FROM order_notifications ORDER BY id DESC`,
     undefined,
     orderNotificationRowValidator,
@@ -155,7 +155,7 @@ export async function countByStatus(
   ctx: ChimpbaseContext,
 ): Promise<{ pending: number; in_progress: number; total: number }> {
   const rows = await ctx.db.query(
-    `SELECT status, COUNT(*) AS count FROM orders GROUP BY status`,
+    `SELECT status, CAST(COUNT(*) AS DOUBLE PRECISION) AS count FROM orders GROUP BY status`,
     undefined,
     statusCountRowValidator,
   );
@@ -180,7 +180,7 @@ export async function listBacklogSnapshots(
   ctx: ChimpbaseContext,
 ): Promise<OrderBacklogSnapshotRow[]> {
   return await ctx.db.query(
-    `SELECT id, pending_count, in_progress_count, total_count, snapshot_at
+    `SELECT CAST(id AS DOUBLE PRECISION) AS id, pending_count, in_progress_count, total_count, CAST(snapshot_at AS TEXT) AS snapshot_at
      FROM order_backlog_snapshots ORDER BY id DESC LIMIT 50`,
     undefined,
     orderBacklogSnapshotRowValidator,

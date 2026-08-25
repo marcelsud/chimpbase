@@ -7,10 +7,13 @@ import {
   chimpbaseMesh,
   service,
   MeshNoAvailableNodeError,
+  MeshCallError,
   type MeshCallMiddleware,
 } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { v } from "../packages/runtime/index.ts";
+import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
+
 
 
 const cleanupDirs: string[] = [];
@@ -32,7 +35,42 @@ async function createMeshHost() {
     projectDir,
     storage: { engine: "memory" },
   });
+
 }
+test("HTTP dispatcher wraps malformed JSON as MeshCallError", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response("{", {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    },
+  });
+  const dispatcher = createHttpDispatcher({
+    callerNodeId: "caller",
+    rpcPath: "/rpc",
+    tokenProvider: () => "token",
+  });
+
+  try {
+    await expect(dispatcher({
+      actionName: "v1.test.invalid",
+      args: {},
+      deadlineMs: Date.now() + 1_000,
+      peer: {
+        advertisedUrl: `http://127.0.0.1:${server.port}`,
+        lastHeartbeatMs: Date.now(),
+        metadata: {},
+        nodeId: "peer",
+        services: [],
+        startedAtMs: Date.now(),
+      },
+    })).rejects.toBeInstanceOf(MeshCallError);
+  } finally {
+    server.stop(true);
+  }
+});
 
 describe("@chimpbase/mesh ctx.mesh.call", () => {
   test("uses fallback when no node serves the action", async () => {

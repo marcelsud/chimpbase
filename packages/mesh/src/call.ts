@@ -29,7 +29,6 @@ export interface CallResolverOptions {
 export type RemoteDispatcher = (params: {
   actionName: string;
   args: unknown;
-  ctx: ChimpbaseContext;
   deadlineMs: number;
   peer: NodeRecord;
 }) => Promise<unknown>;
@@ -85,7 +84,6 @@ export function createCallDispatcher(options: CallResolverOptions) {
           options.remoteDispatcher({
             actionName,
             args,
-            ctx,
             deadlineMs,
             peer: target.peer,
           }),

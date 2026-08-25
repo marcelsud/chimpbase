@@ -56,18 +56,21 @@ function createMockSink() {
     },
     startHandlerSpan(scope): ChimpbaseSinkSpan {
       calls.push({ method: "startHandlerSpan", args: [scope] });
-      return {
-        setAttribute(key, value) {
+      const handlerSpan = {
+        active: true,
+        setAttribute(key: string, value: string | number | boolean) {
           calls.push({ method: "handlerSpan.setAttribute", args: [key, value] });
         },
-        end(status, errorMessage) {
+        end(status: "error" | "ok", errorMessage?: string) {
           handlerSpanEnds.push({ status, errorMessage });
         },
         runInContext<T>(fn: () => T | Promise<T>): T | Promise<T> {
+          if (!this.active) throw new Error("handler span receiver missing");
           runInContextCalled = true;
           return fn();
         },
       };
+      return handlerSpan;
     },
   };
 

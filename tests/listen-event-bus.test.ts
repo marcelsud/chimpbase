@@ -128,6 +128,16 @@ describe("PostgresListenEventBus", () => {
 
     await waitFor(() => received.length > 0);
     expect(received[0][0].name).toBe("order.created");
+    pool.client.emit("notification", {
+      channel: "chimpbase_events",
+      payload: JSON.stringify({
+        event: { id: 2, name: "optional.payload", payloadJson: "null" },
+        origin: "origin-B",
+      }),
+    });
+    await waitFor(() => received.length > 1);
+    expect(received[1][0].payload).toBeUndefined();
+
 
     bus.stop();
   });

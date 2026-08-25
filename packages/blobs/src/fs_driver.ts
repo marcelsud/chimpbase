@@ -47,13 +47,23 @@ async function* readWebStream(
   stream: ReadableStream<Uint8Array>,
 ): AsyncGenerator<Uint8Array, void, undefined> {
   const reader = stream.getReader();
+  let completed = false;
   try {
     while (true) {
       const chunk = await reader.read();
-      if (chunk.done) return;
+      if (chunk.done) {
+        completed = true;
+        return;
+      }
       yield chunk.value;
     }
   } finally {
+    if (!completed) {
+      try {
+        await reader.cancel("Node stream consumer stopped");
+      } catch {
+      }
+    }
     reader.releaseLock();
   }
 }

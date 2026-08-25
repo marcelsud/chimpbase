@@ -4,7 +4,17 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { action, middleware, onStart, onStop, plugin, route, v } from "../packages/runtime/index.ts";
+import {
+  action,
+  middleware,
+  onStart,
+  onStop,
+  parseJson,
+  plugin,
+  route,
+  v,
+  type ChimpbaseValidator,
+} from "../packages/runtime/index.ts";
 import { readJsonResponse } from "./support/http.ts";
 
 const cleanupDirs: string[] = [];
@@ -219,4 +229,35 @@ describe("plugin system", () => {
       await host.close();
     }
   });
+  test("composed validators parse transforming members once", () => {
+    const base = v.number();
+    let parseCalls = 0;
+    const normalizingNumber: ChimpbaseValidator<number> = {
+      ...base,
+      parse(value, path = "value") {
+        parseCalls += 1;
+        if (typeof value !== "string") {
+          throw new Error(`${path} must be a numeric string`);
+        }
+        return base.parse(Number(value), path);
+      },
+    };
+
+    expect(v.object({ value: normalizingNumber }).parse({ value: "42" })).toEqual({ value: 42 });
+    expect(parseCalls).toBe(1);
+
+    parseCalls = 0;
+    expect(v.union(normalizingNumber, v.boolean()).parse("7")).toBe(7);
+    expect(parseCalls).toBe(1);
+  });
+
+  test("record validators preserve special keys as data", () => {
+    const source = parseJson('{"__proto__":{"polluted":true}}');
+    const record = v.record(v.unknown()).parse(source);
+
+    expect(Object.hasOwn(record, "__proto__")).toBe(true);
+    expect(Reflect.getPrototypeOf(record)).toBe(Object.prototype);
+    expect(() => v.integer().parse(Number.MAX_SAFE_INTEGER + 1)).toThrow("must be a safe integer");
+  });
+
 });
