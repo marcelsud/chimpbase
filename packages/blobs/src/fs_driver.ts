@@ -34,12 +34,40 @@ async function ensureDir(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
 }
 
+function isByteReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return value instanceof ReadableStream;
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error
+    && (!("code" in error) || error.code === undefined || typeof error.code === "string");
+}
+
+async function* readWebStream(
+  stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<Uint8Array, void, undefined> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) return;
+      yield chunk.value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function webToNode(stream: ReadableStream<Uint8Array>): Readable {
-  return Readable.fromWeb(stream as unknown as import("node:stream/web").ReadableStream);
+  return Readable.from(readWebStream(stream));
 }
 
 function nodeToWeb(stream: Readable): ReadableStream<Uint8Array> {
-  return Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
+  const result: unknown = Readable.toWeb(stream);
+  if (!isByteReadableStream(result)) {
+    throw new TypeError("Node readable did not produce a web byte stream");
+  }
+  return result;
 }
 
 function toBuffer(chunk: unknown): Buffer {
@@ -84,7 +112,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       try {
         statResult = await stat(driverRef);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        if (isErrnoException(error) && error.code === "ENOENT") return null;
         throw error;
       }
       const total = statResult.size;
@@ -102,7 +130,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       try {
         await rm(driverRef, { force: true });
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
       }
     },
     async copy(src, dst): Promise<ChimpbaseBlobDriverPutResult> {
@@ -174,7 +202,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       try {
         await rm(uploadsRoot(uploadId), { recursive: true, force: true });
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
       }
     },
   };

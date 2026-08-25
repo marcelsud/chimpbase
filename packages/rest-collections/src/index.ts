@@ -625,11 +625,11 @@ async function parseJsonObject(request: Request): Promise<Record<string, unknown
     throw badRequest("request body must be valid JSON");
   }
 
-  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
+  if (!isJsonObject(body)) {
     throw badRequest("request body must be a JSON object");
   }
 
-  return body as Record<string, unknown>;
+  return body;
 }
 
 function methodNotAllowed(allowedMethods: readonly string[]): Response {

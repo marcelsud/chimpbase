@@ -1,5 +1,7 @@
 import { createChimpbase } from "@chimpbase/bun";
 import { restCollections } from "@chimpbase/rest-collections";
+import { readJsonBody, v } from "@chimpbase/runtime";
+
 const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server: { port: 0 } });
 chimpbase.register({ rest: restCollections({
   basePath: "/api",
@@ -25,12 +27,13 @@ if (note.body !== "First note") throw new Error("body should match");
 // List
 const r2 = await chimpbase.executeRoute(new Request("http://test.local/api/notes"));
 if (r2.response?.status !== 200) throw new Error("should list notes");
-const notes = await r2.response!.json() as unknown[];
+const notes = v.unknown().array().parse(await readJsonBody(r2.response), "notes");
 if (notes.length !== 1) throw new Error("should have 1 note");
 
 // Filter
 const r3 = await chimpbase.executeRoute(new Request("http://test.local/api/notes?todoId=42"));
-const filtered = await r3.response!.json() as unknown[];
+if (r3.response === null) throw new Error("filter should return a response");
+const filtered = v.unknown().array().parse(await readJsonBody(r3.response), "filtered notes");
 if (filtered.length !== 1) throw new Error("filter should return 1 note");
 
 // Get by ID

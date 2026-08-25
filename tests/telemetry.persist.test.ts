@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { defineChimpbaseApp } from "../packages/core/index.ts";
-import { action, worker } from "../packages/runtime/index.ts";
+import { action, v, worker } from "../packages/runtime/index.ts";
 import type { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 
 const cleanupHosts: ChimpbaseBunHost[] = [];
@@ -367,5 +367,11 @@ async function readStream(host: ChimpbaseBunHost, streamName: string) {
     );
   }
   const result = await host.executeAction(readActionName);
-  return result.result as Array<{ event: string; payload: unknown; stream: string; id: number; createdAt: string }>;
+  return v.object({
+    createdAt: v.string(),
+    event: v.string(),
+    id: v.number(),
+    payload: v.unknown(),
+    stream: v.string(),
+  }).array().parse(result.result, `telemetry stream ${streamName}`);
 }

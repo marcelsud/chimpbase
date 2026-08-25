@@ -16,6 +16,7 @@ import type {
   ChimpbaseWorkerDefinition,
   ChimpbaseWorkerHandler,
   ChimpbaseWorkflowDefinition,
+  ChimpbaseWorkflowDefinitionLike,
 } from "@chimpbase/runtime";
 import {
   defineChimpbaseMigrations,
@@ -169,7 +170,7 @@ export type ChimpbaseAppModuleInput = ChimpbaseAppDefinitionInput;
 
 export interface ChimpbaseWorkerRegistration {
   definition: Required<ChimpbaseWorkerDefinition>;
-  handler: ChimpbaseWorkerHandler;
+  handler: ChimpbaseWorkerHandler<never, unknown>;
   name: string;
 }
 
@@ -180,7 +181,7 @@ export interface ChimpbaseCronRegistration {
 }
 
 export interface ChimpbaseSubscriptionEntry {
-  handler: ChimpbaseSubscriptionHandler;
+  handler: ChimpbaseSubscriptionHandler<never, unknown>;
   idempotent: boolean;
   name: string;
 }
@@ -196,7 +197,7 @@ export interface ChimpbaseRegistry {
   subscriptions: Map<string, ChimpbaseSubscriptionEntry[]>;
   telemetryOverrides: Map<string, ChimpbaseTelemetryPersistOverride>;
   workers: Map<string, ChimpbaseWorkerRegistration>;
-  workflows: Map<string, Map<number, ChimpbaseWorkflowDefinition>>;
+  workflows: Map<string, Map<number, ChimpbaseWorkflowDefinitionLike>>;
 }
 
 export interface ChimpbaseEntrypointTarget {

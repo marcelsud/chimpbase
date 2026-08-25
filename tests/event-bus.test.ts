@@ -14,7 +14,7 @@ import {
   createSqliteEngineAdapter,
   ensureSqliteInternalTables,
 } from "../packages/bun/src/sqlite_adapter.ts";
-import { action } from "../packages/runtime/index.ts";
+import { action, v } from "../packages/runtime/index.ts";
 
 async function createTestEngine(eventBus: ChimpbaseEventBus) {
   const platform = createDefaultChimpbasePlatformShim();
@@ -107,7 +107,7 @@ describe("event bus", () => {
     registry.subscriptions.set("order.created", [
       {
         handler: async (_ctx, payload) => {
-          dispatched.push((payload as { orderId: string }).orderId);
+          dispatched.push(v.object({ orderId: v.string() }).parse(payload, "order event").orderId);
         },
         idempotent: false,
         name: "",
@@ -156,7 +156,7 @@ describe("event bus", () => {
     registry.subscriptions.set("ping", [
       {
         handler: async (_ctx, payload) => {
-          dispatched.push((payload as { msg: string }).msg);
+          dispatched.push(v.object({ msg: v.string() }).parse(payload, "ping event").msg);
         },
         idempotent: false,
         name: "",

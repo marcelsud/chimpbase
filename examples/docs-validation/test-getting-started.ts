@@ -1,7 +1,7 @@
 import { createChimpbase } from "@chimpbase/bun";
 import { action, subscription, worker, v } from "@chimpbase/runtime";
 const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server: { port: 0 }, migrationsSql: [`CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, name TEXT NOT NULL, plan TEXT NOT NULL, synced_at TEXT)`] });
-const createCustomer = action({ args: v.object({ email: v.string(), name: v.string(), plan: v.string() }), async handler(ctx, input) { const [customer] = await ctx.db.query<{ id: number }>("insert into customers (email, name, plan) values (?1, ?2, ?3) returning id", [input.email, input.name, input.plan]); ctx.pubsub.publish("customer.created", { customerId: customer.id, email: input.email }); return customer; } });
+const createCustomer = action({ args: v.object({ email: v.string(), name: v.string(), plan: v.string() }), async handler(ctx, input) { const [customer] = await ctx.db.query("insert into customers (email, name, plan) values (?1, ?2, ?3) returning id", [input.email, input.name, input.plan], v.object({ id: v.number() })); ctx.pubsub.publish("customer.created", { customerId: customer.id, email: input.email }); return customer; } });
 const onCustomerCreated = subscription("customer.created", async (ctx, event) => { await ctx.enqueue("customer.sync", event); }, { idempotent: true, name: "enqueueCustomerSync" });
 const syncCustomer = worker("customer.sync", async (ctx, event: { customerId: number }) => { ctx.log.info("syncing customer", { customerId: event.customerId }); await ctx.db.query("update customers set synced_at = datetime('now') where id = ?1", [event.customerId]); });
 chimpbase.register({ createCustomer, onCustomerCreated, syncCustomer });

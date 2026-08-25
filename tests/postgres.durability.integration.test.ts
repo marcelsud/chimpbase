@@ -13,6 +13,13 @@ import {
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
 const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
+function postgresUrl(): string {
+  if (PG_URL === undefined || PG_URL.length === 0) {
+    throw new Error("PostgreSQL integration URL is unavailable");
+  }
+  return PG_URL;
+}
+
 
 function uniqueName(label: string): string {
   return `stability.${label}.${Date.now()}.${Math.floor(Math.random() * 1e6)}`;
@@ -53,7 +60,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("producer") },
       projectDir: process.cwd(),
       registrations: [enqueueJob, worker(queueName, async () => {})],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedA = await hostA.start({ serve: false, runWorker: false });
 
@@ -72,7 +79,7 @@ describeIfPg("PostgreSQL queue durability", () => {
           processed.push(payload.id);
         }),
       ],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedB = await hostB.start({ serve: false, runWorker: false });
 
@@ -114,7 +121,7 @@ describeIfPg("PostgreSQL queue durability", () => {
           deadLetters.push(envelope);
         }, { dlq: false }),
       ],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
       worker: { maxAttempts: 2, retryDelayMs: 0 },
     });
     const started = await host.start({ serve: false, runWorker: false });
@@ -158,13 +165,13 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("worker-a") },
       projectDir: process.cwd(),
       registrations: [enqueueJob, consume],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const hostB = await createChimpbase({
       project: { name: uniqueName("worker-b") },
       projectDir: process.cwd(),
       registrations: [consume],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedA = await hostA.start({ serve: false, runWorker: false });
     const startedB = await hostB.start({ serve: false, runWorker: false });
@@ -208,7 +215,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("lease-owner") },
       projectDir: process.cwd(),
       registrations: [enqueueJob, worker(queueName, async () => {})],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedA = await hostA.start({ serve: false, runWorker: false });
 
@@ -233,7 +240,7 @@ describeIfPg("PostgreSQL queue durability", () => {
           processed.push(payload.id);
         }),
       ],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedB = await hostB.start({ serve: false, runWorker: false });
 
@@ -283,16 +290,17 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("workflow-a") },
       projectDir: process.cwd(),
       registrations: [durableWorkflow, launch, signal, inspect],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedA = await hostA.start({ serve: false, runWorker: false });
 
     try {
       await hostA.executeAction("launchDurableWorkflow", []);
       await hostA.processNextQueueJob();
-      const waiting = (await hostA.executeAction("inspectDurableWorkflow", [])).result as {
-        status: string;
-      };
+      const waiting = v.object({ status: v.string() }).parse(
+        (await hostA.executeAction("inspectDurableWorkflow", [])).result,
+        "waiting workflow",
+      );
       expect(waiting.status).toBe("waiting_signal");
     } finally {
       await startedA.stop();
@@ -303,17 +311,20 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("workflow-b") },
       projectDir: process.cwd(),
       registrations: [durableWorkflow, launch, signal, inspect],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedB = await hostB.start({ serve: false, runWorker: false });
 
     try {
       await hostB.executeAction("signalDurableWorkflow", []);
       await hostB.processNextQueueJob();
-      const completed = (await hostB.executeAction("inspectDurableWorkflow", [])).result as {
-        state: State;
-        status: string;
-      };
+      const completed = v.object({
+        state: v.object({ phase: v.enum(["waiting", "done"] as const) }),
+        status: v.string(),
+      }).parse(
+        (await hostB.executeAction("inspectDurableWorkflow", [])).result,
+        "completed workflow",
+      );
       expect(completed.status).toBe("completed");
       expect(completed.state.phase).toBe("done");
     } finally {
@@ -335,13 +346,13 @@ describeIfPg("PostgreSQL queue durability", () => {
       project: { name: uniqueName("cron-a") },
       projectDir: process.cwd(),
       registrations: [registration],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const hostB = await createChimpbase({
       project: { name: uniqueName("cron-b") },
       projectDir: process.cwd(),
       registrations: [registration],
-      storage: { engine: "postgres", url: PG_URL! },
+      storage: { engine: "postgres", url: postgresUrl() },
     });
     const startedA = await hostA.start({ serve: false, runWorker: false });
     const startedB = await hostB.start({ serve: false, runWorker: false });

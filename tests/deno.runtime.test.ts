@@ -37,6 +37,9 @@ const cleanupDirs: string[] = [];
 const originalDeno: unknown = Reflect.get(globalThis, "Deno");
 // SQLite for @chimpbase/deno is validated in a real Deno process because Bun is not the target runtime here.
 const bunSupportsBetterSqlite3 = false;
+const payloadValueValidator = v.object({ value: v.string() });
+const valueRowsValidator = payloadValueValidator.array();
+
 
 afterEach(async () => {
   restoreDenoRuntime();
@@ -86,7 +89,7 @@ if (!bunSupportsBetterSqlite3) {
         return null;
       });
       host.registerWorker("batch.job", async (_ctx, payload) => {
-        processed.push((payload as { value: string }).value);
+        processed.push(payloadValueValidator.parse(payload, "worker payload").value);
       });
 
       try {
@@ -104,7 +107,8 @@ if (!bunSupportsBetterSqlite3) {
           pollIntervalMs: 25,
           retryDelayMs: 1000,
         });
-        await access(resolve(projectDir, host.config.storage.path!));
+        if (host.config.storage.path === null) throw new Error("sqlite storage path missing");
+        await access(resolve(projectDir, host.config.storage.path));
 
         await host.executeAction("enqueueJobs");
 
@@ -183,7 +187,7 @@ if (!dockerAvailable) {
         return null;
       });
       host.registerWorker("batch.job", async (_ctx, payload) => {
-        processed.push((payload as { value: string }).value);
+        processed.push(payloadValueValidator.parse(payload, "worker payload").value);
       });
 
       try {
@@ -321,10 +325,10 @@ if (!dockerAvailable) {
         });
 
         await expect(
-          host.executeAction(createAccount, {
+          host.executeAction("createDenoAccountRef", [{
             email: 10,
             name: "Broken",
-          } as never),
+          }]),
         ).rejects.toThrow("args.email must be a string");
       } finally {
         await host.close();
@@ -364,7 +368,8 @@ if (!dockerAvailable) {
         },
       };
       host.serializedEngineOperations = Promise.resolve();
-      const typedHost = host as unknown as ChimpbaseDenoHost;
+      if (!(host instanceof ChimpbaseDenoHost)) throw new Error("invalid Deno host fixture");
+      const typedHost = host;
 
       const actionPromise = typedHost.executeAction("health");
       const drainPromise = typedHost.drain({ maxRuns: 1 });
@@ -418,7 +423,7 @@ if (!dockerAvailable) {
       });
 
       subscriber.registerSubscription("audit.created", async (ctx, payload) => {
-        await ctx.db.query("INSERT INTO cross_process_audit (value) VALUES (?1)", [(payload as { value: string }).value]);
+        await ctx.db.query("INSERT INTO cross_process_audit (value) VALUES (?1)", [payloadValueValidator.parse(payload, "worker payload").value]);
       });
       publisher.registerAction("publishAudit", async (ctx, value) => {
         ctx.pubsub.publish("audit.created", { value });
@@ -437,7 +442,7 @@ if (!dockerAvailable) {
 
         await waitFor(async () => {
           const audit = await publisher.executeAction("listAudit");
-          return audit.result as Array<{ value: string }>;
+          return valueRowsValidator.parse(audit.result, "cross-process audit rows");
         }, (rows) => rows.length === 1);
 
         const audit = await publisher.executeAction("listAudit");
@@ -489,7 +494,7 @@ if (!dockerAvailable) {
         async (ctx) => await ctx.db.query("SELECT value FROM worker_audit ORDER BY id ASC"),
       );
       host.registerWorker("audit.job", async (ctx, payload) => {
-        await ctx.db.query("INSERT INTO worker_audit (value) VALUES (?1)", [(payload as { value: string }).value]);
+        await ctx.db.query("INSERT INTO worker_audit (value) VALUES (?1)", [payloadValueValidator.parse(payload, "worker payload").value]);
       });
 
       try {
@@ -546,7 +551,7 @@ if (!dockerAvailable) {
           {
             definition: undefined,
             handler: async (ctx, payload) => {
-              await ctx.db.query("INSERT INTO worker_audit (value) VALUES (?1)", [(payload as { value: string }).value]);
+              await ctx.db.query("INSERT INTO worker_audit (value) VALUES (?1)", [payloadValueValidator.parse(payload, "worker payload").value]);
             },
             kind: "worker",
             name: "audit.job",
@@ -607,7 +612,7 @@ if (!dockerAvailable) {
           async (ctx) => await ctx.collection.find("audit_log"),
         )
         .worker("audit.job", async (ctx, payload) => {
-          await ctx.collection.insert("audit_log", { value: (payload as { value: string }).value });
+          await ctx.collection.insert("audit_log", { value: payloadValueValidator.parse(payload, "worker payload").value });
         });
 
       try {
@@ -783,7 +788,7 @@ describe("chimpbase-deno runtime guards", () => {
         return null;
       });
       host.registerWorker("memory.job", async (_ctx, payload) => {
-        processed.push((payload as { value: string }).value);
+        processed.push(payloadValueValidator.parse(payload, "worker payload").value);
       });
 
       try {

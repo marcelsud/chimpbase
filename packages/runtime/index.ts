@@ -432,7 +432,8 @@ export interface ChimpbaseKvSetOptions {
 
 export interface ChimpbaseKvClient {
   delete(key: string): Promise<void>;
-  get<TValue = unknown>(key: string): Promise<TValue | null>;
+  get(key: string): Promise<unknown | null>;
+  get<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
   list(options?: ChimpbaseKvListOptions): Promise<string[]>;
   set<TValue = unknown>(key: string, value: TValue, options?: ChimpbaseKvSetOptions): Promise<void>;
 }
@@ -446,14 +447,25 @@ export type ChimpbaseCollectionPatch = Record<string, unknown>;
 
 export interface ChimpbaseCollectionClient {
   delete(name: string, filter?: ChimpbaseCollectionFilter): Promise<number>;
-  find<TDocument = Record<string, unknown>>(
+  find(
     name: string,
     filter?: ChimpbaseCollectionFilter,
     options?: ChimpbaseCollectionFindOptions,
+  ): Promise<Record<string, unknown>[]>;
+  find<TDocument>(
+    name: string,
+    filter: ChimpbaseCollectionFilter | undefined,
+    options: ChimpbaseCollectionFindOptions | undefined,
+    validator: ChimpbaseValidator<TDocument>,
   ): Promise<TDocument[]>;
-  findOne<TDocument = Record<string, unknown>>(
+  findOne(
     name: string,
     filter: ChimpbaseCollectionFilter,
+  ): Promise<Record<string, unknown> | null>;
+  findOne<TDocument>(
+    name: string,
+    filter: ChimpbaseCollectionFilter,
+    validator: ChimpbaseValidator<TDocument>,
   ): Promise<TDocument | null>;
   insert<TDocument extends Record<string, unknown>>(
     name: string,
@@ -482,9 +494,11 @@ export interface ChimpbaseStreamEvent<TPayload = unknown> {
 
 export interface ChimpbaseStreamClient {
   append<TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number>;
-  read<TPayload = unknown>(
+  read(stream: string, options?: ChimpbaseStreamReadOptions): Promise<ChimpbaseStreamEvent<unknown>[]>;
+  read<TPayload>(
     stream: string,
-    options?: ChimpbaseStreamReadOptions,
+    options: ChimpbaseStreamReadOptions | undefined,
+    validator: ChimpbaseValidator<TPayload>,
   ): Promise<ChimpbaseStreamEvent<TPayload>[]>;
 }
 
@@ -642,9 +656,11 @@ export interface ChimpbaseLogger {
 }
 
 export interface ChimpbaseDbClient {
-  query<T = ChimpbaseRow>(
+  query(sql: string, params?: readonly unknown[]): Promise<ChimpbaseQueryResult<ChimpbaseRow>>;
+  query<T>(
     sql: string,
-    params?: readonly unknown[],
+    params: readonly unknown[] | undefined,
+    validator: ChimpbaseValidator<T>,
   ): Promise<ChimpbaseQueryResult<T>>;
   kysely<TDatabase = Record<string, never>>(): Kysely<TDatabase>;
 }
@@ -704,7 +720,8 @@ export interface ChimpbaseRouteEnv<TActions extends ChimpbaseActionMap = Chimpba
     ...args: TArgs
   ): Promise<TResult>;
   blobs: ChimpbaseBlobsClient;
-  get<T = unknown>(key: string): T | undefined;
+  get(key: string): unknown;
+  get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
   set(key: string, value: unknown): void;
 }
 
@@ -996,6 +1013,18 @@ type ChimpbaseDecoratorMethod = (...args: never[]) => unknown;
 interface ChimpbaseLegacyDecoratedEntry {
   createEntry(owner: object): ChimpbaseAnyRegistration;
 }
+function invokeDecoratorMethod(method: ChimpbaseDecoratorMethod, args: unknown[]): unknown {
+  return Reflect.apply(method, undefined, args);
+}
+
+function isConcreteConstructor(value: unknown): value is new () => object {
+  if (typeof value !== "function") {
+    return false;
+  }
+  const prototype: unknown = Reflect.get(value, "prototype");
+  return typeof prototype === "object" && prototype !== null;
+}
+
 
 const decoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseAnyRegistration[]>();
 const legacyDecoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseLegacyDecoratedEntry[]>();
@@ -1037,6 +1066,12 @@ export interface ChimpbasePluginOptions {
   name?: string;
 }
 
+function isActionHandler<TArgs, TResult, TActions extends ChimpbaseActionMap>(
+  value: unknown,
+): value is ChimpbaseActionHandler<TArgs, TResult, TActions> {
+  return typeof value === "function";
+}
+
 export function runWithActionInvoker<TResult>(
   invoker: ChimpbaseActionInvoker,
   callback: () => TResult | Promise<TResult>,
@@ -1069,7 +1104,11 @@ interface ChimpbaseActionWithoutArgsInput<
   name?: string;
 }
 
-export function action<TArgs extends unknown[] = unknown[], TResult = unknown, TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
+export function action<
+  TArgs extends unknown[] = unknown[],
+  TResult = unknown,
+  TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+>(
   name: string,
   handler: ChimpbaseTupleActionHandler<TArgs, TResult, TActions>,
   options?: ChimpbaseActionOptions,
@@ -1087,38 +1126,54 @@ export function action<
 >(
   input: ChimpbaseActionWithoutArgsInput<TResult, TActions>,
 ): ChimpbaseActionRegistration<[], TResult, TActions>;
-export function action<TArgs = unknown[], TResult = unknown, TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
-  inputOrName: string | ChimpbaseActionDefinitionInput<TArgs, TResult, TActions> | ChimpbaseActionWithoutArgsInput<TResult, TActions>,
+export function action<
+  TArgs = unknown[],
+  TResult = unknown,
+  TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+>(
+  inputOrName:
+    | string
+    | ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>
+    | ChimpbaseActionWithoutArgsInput<TResult, TActions>,
   handler?: ChimpbaseTupleActionHandler<never[], TResult, TActions>,
   options?: ChimpbaseActionOptions,
-): ChimpbaseActionRegistration<TArgs, TResult, TActions> {
-  if (inputOrName === undefined || inputOrName === null) {
-    throw new Error("action requires either a string name or a definition object");
-  }
-
+): ChimpbaseActionRegistrationLike {
   if (typeof inputOrName !== "string") {
-    const definition = inputOrName;
+    if ("args" in inputOrName) {
+      return createActionRegistration({
+        args: inputOrName.args,
+        handler: inputOrName.handler,
+        kind: "action",
+        name: inputOrName.name ?? "",
+        telemetry: inputOrName.telemetry,
+      });
+    }
     return createActionRegistration({
-      args: "args" in definition ? definition.args : undefined,
-      handler: definition.handler as ChimpbaseActionHandler<TArgs, TResult, TActions>,
+      handler: inputOrName.handler,
       kind: "action",
-      name: definition.name ?? "",
-      telemetry: definition.telemetry,
+      name: inputOrName.name ?? "",
+      telemetry: inputOrName.telemetry,
     });
   }
 
   if (isChimpbaseActionRegistration(handler)) {
+    if (!isActionHandler<unknown, unknown, ChimpbaseActionRegistry>(handler.handler)) {
+      throw new TypeError(`action ${inputOrName} has an invalid handler`);
+    }
     return createActionRegistration({
-      args: handler.args as ChimpbaseValidator<TArgs> | undefined,
-      handler: handler.handler as ChimpbaseActionHandler<TArgs, TResult, TActions>,
+      args: handler.args,
+      handler: handler.handler,
       kind: "action",
       name: inputOrName,
       telemetry: options?.telemetry ?? handler.telemetry,
     });
   }
 
+  if (handler === undefined) {
+    throw new Error(`action ${inputOrName} requires a handler`);
+  }
   return createActionRegistration({
-    handler: handler as ChimpbaseActionHandler<TArgs, TResult, TActions>,
+    handler,
     kind: "action",
     name: inputOrName,
     telemetry: options?.telemetry,
@@ -1130,14 +1185,25 @@ export function subscription<TPayload = unknown, TResult = unknown>(
   handler: ChimpbaseSubscriptionHandler<TPayload, TResult>,
   options?: ChimpbaseSubscriptionOptions,
 ): ChimpbaseSubscriptionRegistration<TPayload, TResult> {
+  const telemetry = options?.telemetry === undefined ? {} : { telemetry: options.telemetry };
+  if (options?.idempotent === true) {
+    return {
+      eventName,
+      handler,
+      idempotent: true,
+      kind: "subscription",
+      name: options.name,
+      ...telemetry,
+    };
+  }
   return {
     eventName,
     handler,
-    idempotent: options?.idempotent,
+    ...((options?.idempotent === false) ? { idempotent: false as const } : {}),
     kind: "subscription",
-    name: options?.name,
-    telemetry: options?.telemetry,
-  } as ChimpbaseSubscriptionRegistration<TPayload, TResult>;
+    ...((options?.name !== undefined) ? { name: options.name } : {}),
+    ...telemetry,
+  };
 }
 
 export function worker<TPayload = unknown, TResult = unknown>(
@@ -1474,6 +1540,48 @@ function resolveChimpbaseEntries(
   return state.expanded;
 }
 
+function isObjectRegistrationHandler(
+  value: unknown,
+): value is ChimpbaseObjectActionHandler<unknown, unknown> {
+  return typeof value === "function";
+}
+
+function isSubscriptionRegistrationHandler(
+  value: unknown,
+): value is ChimpbaseSubscriptionHandler<unknown, unknown> {
+  return typeof value === "function";
+}
+
+function isTupleRegistrationHandler(
+  value: unknown,
+): value is ChimpbaseTupleActionHandler<unknown[], unknown> {
+  return typeof value === "function";
+}
+
+function isWorkerRegistrationHandler(
+  value: unknown,
+): value is ChimpbaseWorkerHandler<unknown, unknown> {
+  return typeof value === "function";
+}
+
+export function isChimpbaseWorkflowDefinition(
+  value: ChimpbaseWorkflowDefinitionLike,
+): value is ChimpbaseWorkflowDefinition {
+  return ("run" in value && typeof value.run === "function")
+    || ("steps" in value && isArrayValue(value.steps));
+}
+
+function isRegistrationSource(value: unknown): value is ChimpbaseRegistrationSource {
+  if (isChimpbaseRegistration(value)) {
+    return true;
+  }
+  if (isArrayValue(value)) {
+    return value.every((entry) => isRegistrationSource(entry));
+  }
+  return isJsonObject(value)
+    && Object.values(value).every((entry) => isRegistrationSource(entry));
+}
+
 export function register(
   target: ChimpbaseRegistrationTarget,
   ...entriesOrGroups: ChimpbaseRegistrationSource[]
@@ -1483,13 +1591,16 @@ export function register(
       case "action": {
         const actionName = resolveActionRegistrationName(entry);
         target.bindActionInvoker?.(entry);
-        const actionHandler = entry.handler as ChimpbaseTupleActionHandler<unknown[], unknown>;
         if ((entry.args !== undefined)) {
-          target.registerAction(actionName, entry.handler as ChimpbaseObjectActionHandler<unknown, unknown>, {
-            args: entry.args,
-          });
+          if (!isObjectRegistrationHandler(entry.handler)) {
+            throw new TypeError(`action ${actionName} has an invalid object handler`);
+          }
+          target.registerAction(actionName, entry.handler, { args: entry.args });
         } else {
-          target.registerAction(actionName, actionHandler);
+          if (!isTupleRegistrationHandler(entry.handler)) {
+            throw new TypeError(`action ${actionName} has an invalid tuple handler`);
+          }
+          target.registerAction(actionName, entry.handler);
         }
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`action:${actionName}`, entry.telemetry);
@@ -1514,9 +1625,12 @@ export function register(
         target.registerRoute(entry.name, entry.handler);
         break;
       case "subscription":
+        if (!isSubscriptionRegistrationHandler(entry.handler)) {
+          throw new TypeError(`subscription ${entry.eventName} has an invalid handler`);
+        }
         target.registerSubscription(
           entry.eventName,
-          entry.handler as ChimpbaseSubscriptionHandler,
+          entry.handler,
           (entry.idempotent === true)
             ? { idempotent: true, name: entry.name }
             : { idempotent: entry.idempotent, name: entry.name },
@@ -1526,13 +1640,19 @@ export function register(
         }
         break;
       case "worker":
-        target.registerWorker(entry.name, entry.handler as ChimpbaseWorkerHandler, entry.definition);
+        if (!isWorkerRegistrationHandler(entry.handler)) {
+          throw new TypeError(`worker ${entry.name} has an invalid handler`);
+        }
+        target.registerWorker(entry.name, entry.handler, entry.definition);
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`queue:${entry.name}`, entry.telemetry);
         }
         break;
       case "workflow":
-        target.registerWorkflow(entry.definition as ChimpbaseWorkflowDefinition);
+        if (!isChimpbaseWorkflowDefinition(entry.definition)) {
+          throw new TypeError(`workflow ${entry.definition.name} has an invalid definition`);
+        }
+        target.registerWorkflow(entry.definition);
         break;
       case "onStart":
         target.registerOnStart?.(entry.name, entry.handler);
@@ -1566,7 +1686,10 @@ function scanRegistrationSource(
 ): void {
   if (isArrayValue(entryOrGroup)) {
     for (const entry of entryOrGroup) {
-      scanRegistrationSource(entry as ChimpbaseRegistrationSource, state);
+      if (!isRegistrationSource(entry)) {
+        throw new TypeError("registration array contains an invalid entry");
+      }
+      scanRegistrationSource(entry, state);
     }
     return;
   }
@@ -1579,7 +1702,10 @@ function scanRegistrationSource(
   for (const [key, value] of Object.entries(entryOrGroup)) {
     if (isArrayValue(value)) {
       for (const entry of value) {
-        scanRegistrationSource(entry as ChimpbaseRegistrationSource, state);
+        if (!isRegistrationSource(entry)) {
+          throw new TypeError(`registration map entry "${key}" contains an invalid value`);
+        }
+        scanRegistrationSource(entry, state);
       }
       continue;
     }
@@ -1633,7 +1759,10 @@ function expandRegistrationSource(
 ): void {
   if (isArrayValue(entryOrGroup)) {
     for (const entry of entryOrGroup) {
-      expandRegistrationSource(entry as ChimpbaseRegistrationSource, state);
+      if (!isRegistrationSource(entry)) {
+        throw new TypeError("registration array contains an invalid entry");
+      }
+      expandRegistrationSource(entry, state);
     }
     return;
   }
@@ -1646,7 +1775,10 @@ function expandRegistrationSource(
   for (const [key, value] of Object.entries(entryOrGroup)) {
     if (isArrayValue(value)) {
       for (const entry of value) {
-        expandRegistrationSource(entry as ChimpbaseRegistrationSource, state);
+        if (!isRegistrationSource(entry)) {
+          throw new TypeError(`registration map entry "${key}" contains an invalid value`);
+        }
+        expandRegistrationSource(entry, state);
       }
       continue;
     }
@@ -1793,7 +1925,9 @@ export function Action(name: string) {
     registerDecoratedMethod(
       "Action",
       args,
-      (boundValue) => action(name, boundValue as ChimpbaseActionHandler<unknown[], unknown>),
+      (boundValue) => action(name, (ctx, ...handlerArgs) =>
+        invokeDecoratorMethod(boundValue, [ctx, ...handlerArgs])
+      ),
     );
   };
 }
@@ -1803,7 +1937,9 @@ export function Subscription(eventName: string) {
     registerDecoratedMethod(
       "Subscription",
       args,
-      (boundValue) => subscription(eventName, boundValue as ChimpbaseSubscriptionHandler<unknown, unknown>),
+      (boundValue) => subscription(eventName, (ctx, payload) =>
+        invokeDecoratorMethod(boundValue, [ctx, payload])
+      ),
     );
   };
 }
@@ -1813,7 +1949,9 @@ export function Worker(name: string, definition?: ChimpbaseWorkerDefinition) {
     registerDecoratedMethod(
       "Worker",
       args,
-      (boundValue) => worker(name, boundValue as ChimpbaseWorkerHandler<unknown, unknown>, definition),
+      (boundValue) => worker(name, (ctx, payload) =>
+        invokeDecoratorMethod(boundValue, [ctx, payload]), definition
+      ),
     );
   };
 }
@@ -1823,7 +1961,9 @@ export function Cron(name: string, schedule: string) {
     registerDecoratedMethod(
       "Cron",
       args,
-      (boundValue) => cron(name, schedule, boundValue as ChimpbaseCronHandler<unknown>),
+      (boundValue) => cron(name, schedule, (ctx, invocation) =>
+        invokeDecoratorMethod(boundValue, [ctx, invocation])
+      ),
     );
   };
 }
@@ -1875,15 +2015,19 @@ export function defineAction<
   handler?: ChimpbaseTupleActionHandler<never[], TResult>,
 ): ChimpbaseTupleActionHandler<never[], TResult> | ChimpbaseActionRegistrationLike {
   if (typeof inputOrName !== "string") {
-    return action(inputOrName as ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>);
+    return "args" in inputOrName ? action(inputOrName) : action(inputOrName);
+  }
+
+  if (handler === undefined) {
+    throw new Error(`action ${inputOrName} requires a handler`);
   }
 
   const runtimeDefineAction = (globalThis as RuntimeGlobals).defineAction;
   if (typeof runtimeDefineAction === "function") {
-    return runtimeDefineAction(inputOrName, handler as ChimpbaseTupleActionHandler<never[], TResult>);
+    return runtimeDefineAction(inputOrName, handler);
   }
 
-  return handler as ChimpbaseTupleActionHandler<never[], TResult>;
+  return handler;
 }
 
 export function defineSubscription<TPayload = unknown, TResult = unknown>(
@@ -2018,6 +2162,33 @@ function createOptionalValidator<TValue>(
   };
 }
 
+function isObjectValidatorResult<TShape extends ChimpbaseValidatorShape>(
+  value: unknown,
+  shape: TShape,
+): value is ChimpbaseObjectValidatorResult<TShape> {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+
+  for (const [key, validator] of Object.entries(shape)) {
+    const hasKey = Object.prototype.hasOwnProperty.call(value, key);
+    if (!hasKey) {
+      if (validator.isOptional !== true) {
+        return false;
+      }
+      continue;
+    }
+
+    try {
+      validator.parse(value[key], key);
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
   shape: TShape,
 ): ChimpbaseValidator<ChimpbaseObjectValidatorResult<TShape>> {
@@ -2045,19 +2216,36 @@ function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
           throw new Error(`${path}.${key} is required`);
         }
 
-        const parsed = validator.parse((value as Record<string, unknown>)[key], `${path}.${key}`);
+        const parsed = validator.parse(value[key], `${path}.${key}`);
         if (parsed !== undefined || hasKey) {
           output[key] = parsed;
         }
       }
 
-      return output as ChimpbaseObjectValidatorResult<TShape>;
+      if (!isObjectValidatorResult(output, shape)) {
+        throw new Error(`${path} failed object validation`);
+      }
+      return output;
     },
     schema: {
       properties,
       required,
       type: "object",
     },
+  });
+}
+
+function isUnionValidatorResult<TValidators extends readonly ChimpbaseValidator<unknown>[]>(
+  value: unknown,
+  validators: TValidators,
+): value is Infer<TValidators[number]> {
+  return validators.some((validator) => {
+    try {
+      validator.parse(value);
+      return true;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -2069,7 +2257,10 @@ function createUnionValidator<TValidators extends readonly ChimpbaseValidator<un
       const messages: string[] = [];
       for (const validator of validators) {
         try {
-          return validator.parse(value, path) as Infer<TValidators[number]>;
+          const parsed = validator.parse(value, path);
+          if (isUnionValidatorResult(parsed, validators)) {
+            return parsed;
+          }
         } catch (error) {
           messages.push(error instanceof Error ? error.message : String(error));
         }
@@ -2162,6 +2353,22 @@ export const v = {
   optional<TValue>(validator: ChimpbaseValidator<TValue>): ChimpbaseOptionalValidator<TValue | undefined> {
     return validator.optional();
   },
+  record<TValue>(validator: ChimpbaseValidator<TValue>): ChimpbaseValidator<Record<string, TValue>> {
+    return createValidator<Record<string, TValue>>({
+      parser(value, path) {
+        if (!isPlainObject(value)) {
+          throw new Error(`${path} must be an object`);
+        }
+
+        const output: Record<string, TValue> = {};
+        for (const [key, entry] of Object.entries(value)) {
+          output[key] = validator.parse(entry, `${path}.${key}`);
+        }
+        return output;
+      },
+      schema: { additionalProperties: validator.schema, type: "object" },
+    });
+  },
   string(): ChimpbaseValidator<string> {
     return createValidator<string>({
       parser(value, path) {
@@ -2197,8 +2404,12 @@ export const v = {
 const jsonParse: (text: string) => unknown = JSON.parse;
 
 /** Parse JSON from an untrusted boundary into `unknown`. */
-export function parseJson(text: string): unknown {
-  return jsonParse(text);
+export function parseJson(text: string, label = "value"): unknown {
+  try {
+    return jsonParse(text);
+  } catch (error) {
+    throw new TypeError(`${label} must be valid JSON`, { cause: error });
+  }
 }
 
 /** Parse JSON from an untrusted boundary, returning `undefined` when it is malformed. */
@@ -2243,7 +2454,7 @@ export async function readJsonBody(source: { json(): Promise<unknown> }): Promis
 
 /** Parse JSON that must decode to an object, throwing when it does not. */
 export function parseJsonObject(text: string, label = "value"): Record<string, unknown> {
-  const parsed = parseJson(text);
+  const parsed = parseJson(text, label);
   if (!isJsonObject(parsed)) {
     throw new TypeError(`${label} must decode to a JSON object`);
   }
@@ -2253,7 +2464,7 @@ export function parseJsonObject(text: string, label = "value"): Record<string, u
 
 /** Parse JSON that must decode to an object of string values, throwing when it does not. */
 export function parseStringRecord(text: string, label = "value"): Record<string, string> {
-  const parsed = parseJson(text);
+  const parsed = parseJson(text, label);
   if (!isStringRecord(parsed)) {
     throw new TypeError(`${label} must decode to a JSON object of string values`);
   }
@@ -2379,6 +2590,22 @@ function getBoundActionInvokers(): WeakMap<ChimpbaseActionRegistrationLike, Chim
   return runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY];
 }
 
+function matchesActionRegistration<
+  TArgs,
+  TResult,
+  TActions extends ChimpbaseActionMap,
+>(
+  value: unknown,
+  registration: {
+    args?: ChimpbaseValidator<TArgs>;
+    handler: unknown;
+  },
+): value is ChimpbaseActionRegistration<TArgs, TResult, TActions> {
+  return isChimpbaseActionRegistration(value)
+    && value.args === registration.args
+    && value.handler === registration.handler;
+}
+
 function createActionRegistration<
   TArgs = unknown[],
   TResult = unknown,
@@ -2386,14 +2613,18 @@ function createActionRegistration<
 >(
   registration: {
     args?: ChimpbaseValidator<TArgs>;
-    handler: ChimpbaseActionHandler<TArgs, TResult, TActions>;
+    handler: unknown;
     kind: "action";
     name?: string;
     telemetry?: ChimpbaseTelemetryPersistOption;
   },
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions> {
-  const callable = (async (...args: ChimpbaseActionCallArgs<TArgs>): Promise<TResult> => {
-    const invoker = actionInvokerStorage.getStore() ?? getBoundActionInvokers().get(callable);
+  let actionReference: ChimpbaseActionRegistrationLike | null = null;
+  const callable = async (...args: ChimpbaseActionCallArgs<TArgs>): Promise<TResult> => {
+    if (actionReference === null) {
+      throw new TypeError("action registration was invoked before initialization");
+    }
+    const invoker = actionInvokerStorage.getStore() ?? getBoundActionInvokers().get(actionReference);
     if (!(invoker !== undefined)) {
       const actionName = formatActionRegistrationName(registration.name);
       throw new Error(
@@ -2401,8 +2632,8 @@ function createActionRegistration<
       );
     }
 
-    return await invoker<TResult>(callable, args as unknown[]);
-  }) as ChimpbaseActionRegistration<TArgs, TResult, TActions>;
+    return await invoker<TResult>(actionReference, Array.from(args));
+  };
 
   defineRegistrationProperty(callable, "kind", registration.kind);
   defineRegistrationProperty(callable, "name", registration.name ?? "");
@@ -2416,6 +2647,10 @@ function createActionRegistration<
     defineRegistrationProperty(callable, "telemetry", registration.telemetry);
   }
 
+  if (!matchesActionRegistration<TArgs, TResult, TActions>(callable, registration)) {
+    throw new TypeError("failed to construct action registration");
+  }
+  actionReference = callable;
   return callable;
 }
 
@@ -2464,7 +2699,10 @@ function registerDecoratedMethod(
     }
 
     context.addInitializer(function () {
-      const owner = this as ChimpbaseDecoratedOwner;
+      if (typeof this !== "object" || this === null) {
+        throw new TypeError(`@${decoratorName} initializer requires an object owner`);
+      }
+      const owner = this;
       const entries = decoratedEntryStore.get(owner) ?? [];
       entries.push(createEntry(value.bind(owner)));
       decoratedEntryStore.set(owner, entries);
@@ -2482,7 +2720,7 @@ function registerDecoratedMethod(
     const entries = legacyDecoratedEntryStore.get(target) ?? [];
     entries.push({
       createEntry(owner) {
-        const member = (owner as Record<PropertyKey, unknown>)[propertyKey];
+        const member: unknown = Reflect.get(owner, propertyKey);
         const boundMethod = isDecoratorMethod(member)
           ? member.bind(owner)
           : method.bind(owner);
@@ -2497,9 +2735,9 @@ function registerDecoratedMethod(
 }
 
 function collectDecoratedEntries(source: ChimpbaseDecoratedOwner): ChimpbaseAnyRegistration[] {
-  if (typeof source === "function") {
-    if (chimpbaseModuleMarker.has(source as ChimpbaseAnyConstructor)) {
-      const instance = new (source as new () => object)();
+  if (isConcreteConstructor(source)) {
+    if (chimpbaseModuleMarker.has(source)) {
+      const instance = new source();
       return collectDecoratedEntries(instance);
     }
 
@@ -2774,12 +3012,12 @@ function sortSerializableValue(value: unknown): unknown {
     return value.map((entry) => sortSerializableValue(entry));
   }
 
-  if (!(value !== null && value !== undefined) || typeof value !== "object") {
+  if (!isPlainObject(value)) {
     return value;
   }
 
   return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
+    Object.entries(value)
       .filter(([, entry]) => entry !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, entry]) => [key, sortSerializableValue(entry)]),
@@ -2793,7 +3031,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function hasWorkflowSteps<TInput = unknown, TState = unknown>(
   definition: ChimpbaseWorkflowDraftDefinition<TInput, TState> | ChimpbaseWorkflowDefinition<TInput, TState>,
 ): definition is ChimpbaseWorkflowStepsDraftDefinition<TInput, TState> | (ChimpbaseWorkflowDefinition<TInput, TState> & ChimpbaseWorkflowStepsDraftDefinition<TInput, TState>) {
-  return isArrayValue((definition as { steps?: unknown }).steps);
+  return "steps" in definition && isArrayValue(definition.steps);
 }
 
 function getDecoratedConstructorEntries(source: ChimpbaseDecoratedOwner): ChimpbaseAnyRegistration[] {
@@ -2866,7 +3104,7 @@ function isStandardClassDecoratorArgs(
     typeof args[1] === "object" &&
     args[1] !== null &&
     "kind" in args[1] &&
-    (args[1] as ClassDecoratorContext).kind === "class"
+    args[1].kind === "class"
   );
 }
 

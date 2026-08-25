@@ -1,4 +1,4 @@
-import { isArrayValue, isJsonObject, isStringArray, tryParseJson } from "@chimpbase/runtime";
+import { isArrayValue, isJsonObject, isStringArray, tryParseJson, v } from "@chimpbase/runtime";
 import type { ChimpbaseContext } from "@chimpbase/runtime";
 
 import type { NodeRecord, NodeServiceEntry } from "./types.ts";
@@ -80,21 +80,23 @@ export async function listLiveNodes(
   ctx: ChimpbaseContext,
   minHeartbeatMs: number,
 ): Promise<NodeRecord[]> {
-  const rows = await ctx.db.query<RegistryRow>(
+  const rows = await ctx.db.query(
     `SELECT node_id, advertised_url, metadata_json, services_json, started_at_ms, last_heartbeat_ms
        FROM ${TABLE_NAME}
       WHERE last_heartbeat_ms >= ?1`,
     [minHeartbeatMs],
+    registryRowValidator,
   );
 
   return rows.map((row) => rowToNodeRecord(row));
 }
 
 export async function getNode(ctx: ChimpbaseContext, nodeId: string): Promise<NodeRecord | null> {
-  const rows = await ctx.db.query<RegistryRow>(
+  const rows = await ctx.db.query(
     `SELECT node_id, advertised_url, metadata_json, services_json, started_at_ms, last_heartbeat_ms
        FROM ${TABLE_NAME} WHERE node_id = ?1`,
     [nodeId],
+    registryRowValidator,
   );
 
   if (rows.length === 0) {
@@ -108,9 +110,10 @@ export async function gcStaleNodes(
   ctx: ChimpbaseContext,
   olderThanMs: number,
 ): Promise<number> {
-  const before = await ctx.db.query<{ node_id: string }>(
+  const before = await ctx.db.query(
     `SELECT node_id FROM ${TABLE_NAME} WHERE last_heartbeat_ms < ?1`,
     [olderThanMs],
+    nodeIdRowValidator,
   );
 
   if (before.length === 0) {
@@ -133,6 +136,16 @@ interface RegistryRow {
   started_at_ms: string | number;
   last_heartbeat_ms: string | number;
 }
+const registryRowValidator = v.object({
+  advertised_url: v.string().nullable(),
+  last_heartbeat_ms: v.union(v.string(), v.number()),
+  metadata_json: v.unknown(),
+  node_id: v.string(),
+  services_json: v.unknown(),
+  started_at_ms: v.union(v.string(), v.number()),
+});
+const nodeIdRowValidator = v.object({ node_id: v.string() });
+
 
 function rowToNodeRecord(row: RegistryRow): NodeRecord {
   return {

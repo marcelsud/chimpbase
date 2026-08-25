@@ -1,11 +1,13 @@
 import {
   action,
+  isJsonObject,
   isStringArray,
   plugin,
   readJsonBody,
   route,
   subscription,
   tryParseJson,
+  v,
   worker,
   type ChimpbasePluginDependency,
   type ChimpbasePluginRegistration,
@@ -125,6 +127,28 @@ export interface WebhookDeliveryLog {
   error: string | null;
   createdAt: string;
 }
+const deliveryLogValidator = v.object({
+  attempt: v.number(),
+  createdAt: v.string(),
+  deliveryId: v.string(),
+  error: v.string().nullable(),
+  event: v.string(),
+  id: v.string(),
+  status: v.string(),
+  statusCode: v.number().nullable(),
+  webhookId: v.string(),
+});
+const webhookRegistrationValidator = v.object({
+  active: v.boolean(),
+  createdAt: v.string(),
+  events: v.string(),
+  id: v.string(),
+  label: v.string(),
+  secret: v.string(),
+  updatedAt: v.string(),
+  url: v.string(),
+});
+
 
 // ── Verification helpers (exported) ─────────────────────────────────────────
 
@@ -360,12 +384,11 @@ async function parseJsonBody(request: Request): Promise<Record<string, unknown>>
   } catch {
     throw new WebhooksRequestError(400, "request body must be valid JSON");
   }
-
-  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
+  if (!isJsonObject(body)) {
     throw new WebhooksRequestError(400, "request body must be a JSON object");
   }
 
-  return body as Record<string, unknown>;
+  return body;
 }
 
 class WebhooksRequestError extends Error {
@@ -510,7 +533,7 @@ export function chimpbaseWebhooks(
 
   entries.push(
     action("__chimpbase.webhooks.list", async (ctx) => {
-      const records = await ctx.collection.find<WebhookRegistration>(REGISTRATIONS_COLLECTION, {});
+      const records = await ctx.collection.find(REGISTRATIONS_COLLECTION, {}, undefined, webhookRegistrationValidator);
       return records.map((r) => ({
         id: r.id,
         url: r.url,
@@ -525,7 +548,7 @@ export function chimpbaseWebhooks(
 
   entries.push(
     action("__chimpbase.webhooks.get", async (ctx, id: string) => {
-      const record = await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, { id });
+      const record = await ctx.collection.findOne(REGISTRATIONS_COLLECTION, { id }, webhookRegistrationValidator);
       if (!(record !== null)) {
         return null;
       }
@@ -544,7 +567,7 @@ export function chimpbaseWebhooks(
 
   entries.push(
     action("__chimpbase.webhooks.update", async (ctx, input: { id: string; url?: string; events?: string[]; active?: boolean; label?: string }) => {
-      const existing = await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, { id: input.id });
+      const existing = await ctx.collection.findOne(REGISTRATIONS_COLLECTION, { id: input.id }, webhookRegistrationValidator);
       if (!(existing !== null)) {
         return null;
       }
@@ -556,7 +579,7 @@ export function chimpbaseWebhooks(
       if (input.label !== undefined) patch.label = input.label;
 
       await ctx.collection.update(REGISTRATIONS_COLLECTION, { id: input.id }, patch);
-      return await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, { id: input.id });
+      return await ctx.collection.findOne(REGISTRATIONS_COLLECTION, { id: input.id }, webhookRegistrationValidator);
     }),
   );
 
@@ -568,7 +591,7 @@ export function chimpbaseWebhooks(
 
   entries.push(
     action("__chimpbase.webhooks.listDeliveries", async (ctx, webhookId: string) => {
-      return await ctx.collection.find<WebhookDeliveryLog>(DELIVERY_LOG_COLLECTION, { webhookId });
+      return await ctx.collection.find(DELIVERY_LOG_COLLECTION, { webhookId }, undefined, deliveryLogValidator);
     }),
   );
 
@@ -578,9 +601,9 @@ export function chimpbaseWebhooks(
     action(
       "__chimpbase.webhooks.deliver",
       async (ctx, input: { webhookId: string; event: string; payload: unknown; deliveryId: string; attempt: number }) => {
-        const webhook = await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, {
+        const webhook = await ctx.collection.findOne(REGISTRATIONS_COLLECTION, {
           id: input.webhookId,
-        });
+        }, webhookRegistrationValidator);
 
         if (!(webhook !== null) || !webhook.active) {
           ctx.log.warn("webhook not found or inactive, skipping delivery", {
@@ -658,9 +681,9 @@ export function chimpbaseWebhooks(
   for (const eventName of options.allowedEvents) {
     entries.push(
       subscription(eventName, async (ctx, payload) => {
-        const webhooks = await ctx.collection.find<WebhookRegistration>(REGISTRATIONS_COLLECTION, {
+        const webhooks = await ctx.collection.find(REGISTRATIONS_COLLECTION, {
           active: true,
-        });
+        }, undefined, webhookRegistrationValidator);
 
         for (const webhook of webhooks) {
           const events = parseEvents(webhook.events);

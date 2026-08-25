@@ -5,6 +5,7 @@ import type { ChimpbaseRegistry } from "@chimpbase/core";
 import {
   compareWorkflowContracts,
   describeWorkflow,
+  isChimpbaseWorkflowDefinition,
   type ChimpbaseWorkflowCompatibility,
   type ChimpbaseWorkflowContract,
 } from "@chimpbase/runtime";
@@ -131,6 +132,9 @@ function flattenRegisteredWorkflowContracts(registry: ChimpbaseRegistry): Chimpb
 
   for (const [name, versions] of registry.workflows) {
     for (const definition of versions.values()) {
+      if (!isChimpbaseWorkflowDefinition(definition)) {
+        throw new TypeError(`workflow ${name} has an invalid definition`);
+      }
       const contract = describeWorkflow(definition);
       if (contract.name !== name) {
         throw new Error(`workflow registry mismatch: expected ${name}, received ${contract.name}`);

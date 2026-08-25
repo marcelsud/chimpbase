@@ -159,14 +159,13 @@ function coerceProjectMigrationsDefinition(
   modulePath: string,
 ): ChimpbaseMigrationsDefinition {
   const candidate = moduleExports.default ?? moduleExports.migrations;
-  if (!(candidate !== null && candidate !== undefined) || typeof candidate !== "object") {
+  if (!isJsonObject(candidate)) {
     throw new Error(`project migrations module must export a default object or named "migrations": ${modulePath}`);
   }
 
-  const definition = candidate as Record<string, unknown>;
   return defineChimpbaseMigrations({
-    postgres: coerceMigrationList(definition.postgres, modulePath, "postgres"),
-    sqlite: coerceMigrationList(definition.sqlite, modulePath, "sqlite"),
+    postgres: coerceMigrationList(candidate.postgres, modulePath, "postgres"),
+    sqlite: coerceMigrationList(candidate.sqlite, modulePath, "sqlite"),
   });
 }
 
@@ -192,22 +191,21 @@ function coerceMigration(
   engine: "postgres" | "sqlite",
   index: number,
 ): SqlMigration {
-  if (!(value !== null && value !== undefined) || typeof value !== "object") {
+  if (!isJsonObject(value)) {
     throw new Error(`project migration ${engine}[${index}] must be an object: ${modulePath}`);
   }
 
-  const migration = value as Record<string, unknown>;
-  if (typeof migration.name !== "string" || migration.name.length === 0) {
+  if (typeof value.name !== "string" || value.name.length === 0) {
     throw new Error(`project migration ${engine}[${index}] must define a non-empty name: ${modulePath}`);
   }
 
-  if (typeof migration.sql !== "string") {
+  if (typeof value.sql !== "string") {
     throw new Error(`project migration ${engine}[${index}] must define sql as a string: ${modulePath}`);
   }
 
   return {
-    name: migration.name,
-    sql: migration.sql,
+    name: value.name,
+    sql: value.sql,
   };
 }
 

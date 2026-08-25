@@ -14,6 +14,7 @@ import {
   type ChimpbasePluginRegistration,
   type ChimpbaseRegistrationSource,
   type ChimpbaseRouteHandler,
+  type ChimpbaseValidator,
 } from "@chimpbase/runtime";
 
 import {
@@ -87,6 +88,27 @@ export interface ChimpbaseMeshOptions {
   services: readonly AnyServiceDefinition[];
   transport?: "local-only" | "http";
 }
+function hasUnref(value: unknown): value is { unref(): void } {
+  return typeof value === "object"
+    && value !== null
+    && "unref" in value
+    && typeof value.unref === "function";
+}
+
+function isServiceActionDispatch(value: unknown): value is ServiceActionDispatch {
+  return typeof value === "function";
+}
+
+function isServiceEventDispatch(value: unknown): value is ServiceEventDispatch {
+  return typeof value === "function";
+}
+
+function isServiceStartedHook(
+  value: unknown,
+): value is (ctx: ChimpbaseContext, self: ServiceSelf) => unknown {
+  return typeof value === "function";
+}
+
 
 export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginRegistration {
   const transport = options.transport ?? "http";
@@ -148,9 +170,14 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   });
 
   const clientFor = (ctx: ChimpbaseContext): ChimpbaseMeshClient => ({
-    call: async <TResult = unknown>(actionName: string, args?: unknown, opts?: CallOptions) => {
+    call: async <TResult>(
+      actionName: string,
+      args: unknown,
+      result: ChimpbaseValidator<TResult>,
+      opts?: CallOptions,
+    ) => {
       currentToken = (options.meshToken !== undefined && options.meshToken.length > 0) ? ctx.secret(options.meshToken) : null;
-      return await dispatcher<TResult>(ctx, actionName, args, opts ?? {});
+      return await dispatcher(ctx, actionName, args, result, opts ?? {});
     },
     emit: async (event, payload, opts?: EmitOptions) => {
       await meshEmit(ctx, event, payload, opts ?? {}, balancedEventSet);
@@ -255,9 +282,11 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       cache.seed(live.filter((peer) => peer.nodeId !== nodeId));
 
       for (const svc of services) {
-        if ((svc.started !== undefined)) {
-          const started = svc.started as (ctx: ChimpbaseContext, self: ServiceSelf) => unknown;
-          await started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
+        if (svc.started !== undefined) {
+          if (!isServiceStartedHook(svc.started)) {
+            throw new TypeError(`service ${svc.name} has an invalid started hook`);
+          }
+          await svc.started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
         }
       }
 
@@ -269,7 +298,9 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
             nodeId,
           });
         }, heartbeatMs);
-        (heartbeatState.timer as unknown as { unref?: () => void }).unref?.();
+        if (hasUnref(heartbeatState.timer)) {
+          heartbeatState.timer.unref();
+        }
       }
     }),
   );
@@ -313,11 +344,10 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
           }
 
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
-          await (eventEntry.handler as ServiceEventDispatch)(
-            ctx,
-            envelope.payload,
-            buildServiceSelf(svc, nodeId, meshClient),
-          );
+          if (!isServiceEventDispatch(eventEntry.handler)) {
+            throw new TypeError(`service ${svc.name} has an invalid event handler`);
+          }
+          await eventEntry.handler(ctx, envelope.payload, buildServiceSelf(svc, nodeId, meshClient));
         }
       }),
     );
@@ -375,7 +405,10 @@ function buildServiceRegistrations(
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
           const self = buildServiceSelf(svc, meshClient?.nodeId() ?? "", meshClient);
           const actionArgs = args.length <= 1 ? args[0] : args;
-          return await (handler as ServiceActionDispatch)(ctx, actionArgs, self);
+          if (!isServiceActionDispatch(handler)) {
+            throw new TypeError(`service ${svc.name} has an invalid action handler`);
+          }
+          return await handler(ctx, actionArgs, self);
         }),
       );
     }
@@ -389,7 +422,10 @@ function buildServiceRegistrations(
         subscription(eventName, async (ctx, payload) => {
           const meshClient = (ctx as ChimpbaseContext & { mesh?: ChimpbaseMeshClient }).mesh;
           const self = buildServiceSelf(svc, meshClient?.nodeId() ?? "", meshClient);
-          await (event.handler as ServiceEventDispatch)(ctx, payload, self);
+          if (!isServiceEventDispatch(event.handler)) {
+            throw new TypeError(`service ${svc.name} has an invalid event handler`);
+          }
+          await event.handler(ctx, payload, self);
         }),
       );
     }
@@ -404,11 +440,16 @@ function buildServiceSelf(
   meshClient: ChimpbaseMeshClient | undefined,
 ): ServiceSelf {
   return {
-    call: async <TResult = unknown>(actionName: string, args?: unknown, options?: CallOptions) => {
+    call: async <TResult>(
+      actionName: string,
+      args: unknown,
+      result: ChimpbaseValidator<TResult>,
+      options?: CallOptions,
+    ) => {
       if (!(meshClient !== undefined)) {
         throw new Error("mesh client is not available in this context");
       }
-      return await meshClient.call<TResult>(actionName, args, options);
+      return await meshClient.call(actionName, args, result, options);
     },
     emit: async (event, payload, options?: EmitOptions) => {
       if (!(meshClient !== undefined)) {
@@ -416,7 +457,7 @@ function buildServiceSelf(
       }
       await meshClient.emit(event, payload, options);
     },
-    methods: svc.methods as Record<string, never>,
+    methods: svc.methods,
     name: svc.name,
     nodeId,
     settings: svc.settings,

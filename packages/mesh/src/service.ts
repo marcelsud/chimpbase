@@ -1,3 +1,5 @@
+import { isJsonObject } from "@chimpbase/runtime";
+
 import type {
   AnyServiceActionHandler,
   AnyServiceDefinition,
@@ -23,7 +25,7 @@ export function service<
 export interface ResolvedService {
   actions: Record<string, AnyServiceActionHandler>;
   events: Record<string, AnyServiceEventDefinition>;
-  methods: Record<string, unknown>;
+  methods: ServiceMethods;
   name: string;
   settings: Record<string, unknown>;
   started?: AnyServiceDefinition["started"];
@@ -58,8 +60,8 @@ export function resolveService(
     Object.assign(merged.settings, resolved.settings);
   }
 
-  if ((Boolean(def.settings))) {
-    Object.assign(merged.settings, def.settings as Record<string, unknown>);
+  if (isJsonObject(def.settings)) {
+    Object.assign(merged.settings, def.settings);
   }
 
   if ((def.methods !== undefined)) {

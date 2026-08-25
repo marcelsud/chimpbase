@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { action, middleware, onStart, onStop, plugin, route } from "../packages/runtime/index.ts";
+import { action, middleware, onStart, onStop, plugin, route, v } from "../packages/runtime/index.ts";
 import { readJsonResponse } from "./support/http.ts";
 
 const cleanupDirs: string[] = [];
@@ -42,8 +42,8 @@ describe("plugin system", () => {
           return null; // pass through
         }),
         reader: route("test.reader", async (_request, env) => {
-          const userId = env.get<number>("user.id");
-          const userName = env.get<string>("user.name");
+          const userId = env.get("user.id", v.number());
+          const userName = env.get("user.name", v.string());
           return Response.json({ userId, userName });
         }),
       });

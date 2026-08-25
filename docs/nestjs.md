@@ -14,7 +14,7 @@ Wrap your action handlers in NestJS injectable services:
 
 ```ts
 import { Injectable } from "@nestjs/common";
-import type { ChimpbaseContext } from "@chimpbase/runtime";
+import { v, type ChimpbaseContext } from "@chimpbase/runtime";
 
 @Injectable()
 export class TodoService {
@@ -23,9 +23,10 @@ export class TodoService {
   }
 
   async createTodo(ctx: ChimpbaseContext, input: { title: string; projectId: number }) {
-    const [todo] = await ctx.db.query<{ id: number }>(
+    const [todo] = await ctx.db.query(
       "insert into todos (title, project_id) values (?1, ?2) returning id",
       [input.title, input.projectId],
+      v.object({ id: v.number() }),
     );
     return todo;
   }

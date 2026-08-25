@@ -225,6 +225,10 @@ async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<Chim
   return app;
 }
 
+function isByteReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return value instanceof ReadableStream;
+}
+
 function createWebRequest(request: IncomingMessage, port: number): Request {
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
@@ -244,9 +248,14 @@ function createWebRequest(request: IncomingMessage, port: number): Request {
 
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? `127.0.0.1:${port}`}`);
-  const body = method === "GET" || method === "HEAD"
-    ? undefined
-    : Readable.toWeb(request) as unknown as ReadableStream<Uint8Array>;
+  let body: ReadableStream<Uint8Array> | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    const stream: unknown = Readable.toWeb(request);
+    if (!isByteReadableStream(stream)) {
+      throw new TypeError("Node request did not produce a web byte stream");
+    }
+    body = stream;
+  }
 
   return new Request(url, {
     body,

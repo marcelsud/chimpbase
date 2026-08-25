@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { restCollections } from "../packages/rest-collections/src/index.ts";
 import { readJsonResponse } from "./support/http.ts";
+import { v } from "../packages/runtime/index.ts";
+
 
 const cleanupDirs: string[] = [];
 
@@ -219,14 +221,14 @@ describe("@chimpbase/rest-collections", () => {
 
     host.registerAction(
       "readStoredUser",
-      async (ctx, id) => await ctx.collection.findOne("users", { id: id as string }),
+      async (ctx, id: string) => await ctx.collection.findOne("users", { id }),
     );
     host.registerAction(
       "readStoredUserMetadata",
-      async (ctx, id) =>
+      async (ctx, id: string) =>
         await ctx.collection.findOne("__chimpbase.rest.collection_metadata", {
           collectionName: "users",
-          documentId: id as string,
+          documentId: id,
         }),
     );
     host.registerAction(
@@ -315,7 +317,10 @@ describe("@chimpbase/rest-collections", () => {
         schemaVersion: 2,
       });
 
-      const legacyUserId = (await host.executeAction("seedLegacyUser")).result as string;
+      const legacyUserId = v.string().parse(
+        (await host.executeAction("seedLegacyUser")).result,
+        "legacy user id",
+      );
       const legacyOutcome = await host.executeRoute(
         new Request(`http://rest.test/api/users/${legacyUserId}`),
       );

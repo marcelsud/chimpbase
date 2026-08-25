@@ -10,6 +10,8 @@ import {
   type MeshCallMiddleware,
 } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { v } from "../packages/runtime/index.ts";
+
 
 const cleanupDirs: string[] = [];
 
@@ -42,7 +44,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         actions: {
           tryCall: async (ctx) => {
             if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
-            return await ctx.mesh.call<string>("v1.missing.thing", {}, {
+            return await ctx.mesh.call("v1.missing.thing", {}, v.string(), {
               fallback: (error) => {
                 captured = error;
                 return "fallback-result";
@@ -71,9 +73,9 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
     try {
       const trace: string[] = [];
 
-      const logging: MeshCallMiddleware = (next) => async (name, args, opts) => {
+      const logging: MeshCallMiddleware = (next) => async (name, args, resultValidator, opts) => {
         trace.push(`before:${name}`);
-        const result = await next(name, args, opts);
+        const result = await next(name, args, resultValidator, opts);
         trace.push(`after:${name}`);
         return result;
       };
@@ -84,7 +86,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
           add: async (_ctx, args: { a: number; b: number }) => args.a + args.b,
           run: async (ctx) => {
             if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
-            return await ctx.mesh.call<number>("v1.calc.add", { a: 2, b: 3 });
+            return await ctx.mesh.call("v1.calc.add", { a: 2, b: 3 }, v.number());
           },
         },
       });
@@ -124,7 +126,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
           },
           run: async (ctx) => {
             if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
-            return await ctx.mesh.call<string>("v1.flaky.flaky", {}, {
+            return await ctx.mesh.call("v1.flaky.flaky", {}, v.string(), {
               retry: { attempts: 3, delayMs: 1 },
             });
           },

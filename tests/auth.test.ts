@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { chimpbaseAuth, type AuthApiKey, type AuthScope, type AuthUser } from "../packages/auth/src/index.ts";
 import { readJsonResponse } from "./support/http.ts";
+import { v } from "../packages/runtime/index.ts";
+
 
 /** The API key route returns the raw key once, alongside the stored record's public fields. */
 interface CreatedApiKey extends Omit<AuthApiKey, "keyHash" | "revokedAt" | "scopes"> {
@@ -15,6 +17,10 @@ interface CreatedApiKey extends Omit<AuthApiKey, "keyHash" | "revokedAt" | "scop
 
 /** Listing keys returns the public fields only: the raw key and its hash are never included. */
 type ListedApiKey = Omit<CreatedApiKey, "key"> & { key?: undefined; keyHash?: undefined };
+
+const idResultValidator = v.object({ id: v.string() });
+const keyResultValidator = v.object({ key: v.string() });
+const scopesResultValidator = v.object({ scopes: v.string().array() });
 
 const cleanupDirs: string[] = [];
 
@@ -328,14 +334,14 @@ describe("@chimpbase/auth", () => {
         email: "expire@test.com",
         name: "Expire",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id,
         label: "expired",
         expiresAt: "2020-01-01T00:00:00Z",
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const authOutcome = await host.executeRoute(
         new Request("http://test.local/some-path", { headers: authHeaders(keyData.key) }),
@@ -441,11 +447,11 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "rl@test.com", name: "RL",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id,
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
       const prefix = keyData.key.substring(0, 8);
 
       // Build a bad key with the same prefix
@@ -511,12 +517,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "scope@test.com", name: "Scope",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["read"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/some-path", { headers: authHeaders(keyData.key) }),
@@ -534,12 +540,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "readonly@test.com", name: "ReadOnly",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["read"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/some-path", {
@@ -561,12 +567,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "writer@test.com", name: "Writer",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["write"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const getOutcome = await host.executeRoute(
         new Request("http://test.local/app-route", { headers: authHeaders(keyData.key) }),
@@ -592,12 +598,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "admin@test.com", name: "Admin",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["admin"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/_auth/users", { headers: authHeaders(keyData.key) }),
@@ -614,12 +620,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "noauth@test.com", name: "NoAuth",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["read"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/_auth/users", { headers: authHeaders(keyData.key) }),
@@ -636,12 +642,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "authmgr@test.com", name: "AuthMgr",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["auth:manage"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/_auth/users", { headers: authHeaders(keyData.key) }),
@@ -658,12 +664,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "whmgr@test.com", name: "WhMgr",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["webhooks:manage"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       const outcome = await host.executeRoute(
         new Request("http://test.local/_auth/users", { headers: authHeaders(keyData.key) }),
@@ -702,7 +708,7 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "badscope@test.com", name: "BadScope",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       await expect(
         host.executeAction("__chimpbase.auth.createApiKey", [{
@@ -720,12 +726,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "default@test.com", name: "Default",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id,
       }]);
-      const keyData = keyResult.result as { scopes: string[] };
+      const keyData = scopesResultValidator.parse(keyResult.result, "API key scopes result");
       expect(keyData.scopes).toEqual(["read", "write"]);
     } finally {
       await host.close();
@@ -740,12 +746,12 @@ describe("@chimpbase/auth", () => {
       const userResult = await host.executeAction("__chimpbase.auth.createUser", [{
         email: "ctx@test.com", name: "Ctx",
       }]);
-      const user = userResult.result as { id: string };
+      const user = idResultValidator.parse(userResult.result, "user action result");
 
       const keyResult = await host.executeAction("__chimpbase.auth.createApiKey", [{
         userId: user.id, scopes: ["read", "write"],
       }]);
-      const keyData = keyResult.result as { key: string };
+      const keyData = keyResultValidator.parse(keyResult.result, "API key action result");
 
       // Register a route that reads auth context
       let capturedUserId: string | undefined;
@@ -755,9 +761,9 @@ describe("@chimpbase/auth", () => {
       const { route } = await import("../packages/runtime/index.ts");
       host.register({
         contextReader: route("test.contextReader", async (_request, env) => {
-          capturedUserId = env.get<string>("auth.userId");
-          capturedScopes = env.get<string[]>("auth.scopes");
-          capturedBootstrap = env.get<boolean>("auth.bootstrap");
+          capturedUserId = env.get("auth.userId", v.string());
+          capturedScopes = env.get("auth.scopes", v.string().array());
+          capturedBootstrap = env.get("auth.bootstrap", v.boolean());
           return Response.json({ userId: capturedUserId });
         }),
       });
@@ -783,7 +789,7 @@ describe("@chimpbase/auth", () => {
       const { route } = await import("../packages/runtime/index.ts");
       host.register({
         reader: route("test.bootstrapReader", async (_request, env) => {
-          capturedBootstrap = env.get<boolean>("auth.bootstrap");
+          capturedBootstrap = env.get("auth.bootstrap", v.boolean());
           return Response.json({ bootstrap: capturedBootstrap });
         }),
       });

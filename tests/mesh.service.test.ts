@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { v } from "../packages/runtime/index.ts";
+
 
 const cleanupDirs: string[] = [];
 
@@ -127,7 +129,7 @@ describe("@chimpbase/mesh service()", () => {
           double: async (ctx, args: { n: number }) => {
             const mesh = ctx.mesh;
             if (!(mesh !== undefined)) throw new Error("mesh missing");
-            const sum = await mesh.call<number>("v1.calc.add", { a: args.n, b: args.n });
+            const sum = await mesh.call("v1.calc.add", { a: args.n, b: args.n }, v.number());
             return sum;
           },
         },
