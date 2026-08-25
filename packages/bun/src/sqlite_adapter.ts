@@ -60,7 +60,7 @@ export async function openSqliteDatabase(
   projectDir: string,
   config: ChimpbaseProjectConfig,
 ): Promise<Database> {
-  if (config.storage.engine === "memory" || !config.storage.path || config.storage.path === ":memory:") {
+  if (config.storage.engine === "memory" || !(config.storage.path !== null && config.storage.path.length > 0) || config.storage.path === ":memory:") {
     return new Database(":memory:");
   }
 
@@ -382,7 +382,7 @@ export function createSqliteEngineAdapter(
           `,
         ).all(now) as PersistedCronScheduleRow[];
 
-        if (!schedule) {
+        if (!(schedule !== null && schedule !== undefined)) {
           db.exec("COMMIT");
           return null;
         }
@@ -452,7 +452,7 @@ export function createSqliteEngineAdapter(
           `,
         ).all(now, ...queueFilter.params) as ChimpbaseQueueJobRecord[];
 
-        if (!job) {
+        if (!(job !== null && job !== undefined)) {
           db.exec("COMMIT");
           return null;
         }
@@ -506,7 +506,7 @@ export function createSqliteEngineAdapter(
       filter: ChimpbaseCollectionFilter,
     ): Promise<TDocument | null> {
       const [row] = findCollectionDocuments(db, name, filter, { limit: 1 });
-      return row ? parseJson(row.document_json) as TDocument : null;
+      return (row !== null && row !== undefined) ? parseJson(row.document_json) as TDocument : null;
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -601,7 +601,7 @@ export function createSqliteEngineAdapter(
           LIMIT 1
         `,
       ).all(key) as Array<{ value_json: string }>;
-      return row ? parseJson(row.value_json) as TValue : null;
+      return (row !== null && row !== undefined) ? parseJson(row.value_json) as TValue : null;
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
@@ -660,7 +660,7 @@ export function createSqliteEngineAdapter(
       ).run(status, nextAvailableAtMs, errorMessage, jobId);
     },
     createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      if (!kysely) {
+      if (!(kysely !== null)) {
         kysely = createSqliteKysely({
           executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
             const statement = db.query(compiledQuery.sql);
@@ -828,7 +828,7 @@ export function createSqliteEngineAdapter(
         content_type: string; metadata_json: string; driver_ref: string;
         created_at: string; updated_at: string;
       }>;
-      if (!row) return null;
+      if (!(row !== null && row !== undefined)) return null;
       return {
         bucket: row.bucket,
         key: row.key,
@@ -912,7 +912,7 @@ export function createSqliteEngineAdapter(
         content_type: string | null; metadata_json: string;
         driver_ref: string; created_at_ms: number; expires_at_ms: number;
       }>;
-      if (!row) return null;
+      if (row === undefined) return null;
       return {
         uploadId: row.upload_id,
         bucket: row.bucket,
@@ -1050,7 +1050,7 @@ function sliceBlobList(
       nextCursor = entries.length > 0 ? entries[entries.length - 1].key : row.key;
       break;
     }
-    if (delimiter) {
+    if ((delimiter !== null && delimiter.length > 0)) {
       const after = row.key.slice(prefix.length);
       const idx = after.indexOf(delimiter);
       if (idx >= 0) {
@@ -1060,7 +1060,7 @@ function sliceBlobList(
     }
     entries.push(row);
   }
-  if (!nextCursor && rows.length > limit) {
+  if (!(nextCursor !== null && nextCursor.length > 0) && rows.length > limit) {
     nextCursor = rows[limit - 1]?.key ?? null;
   }
   return {

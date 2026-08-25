@@ -111,7 +111,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   const balancedEventSet = new Set<string>();
   for (const svc of services) {
     for (const [eventName, event] of Object.entries(svc.events)) {
-      if (event.balanced) {
+      if ((event.balanced === true)) {
         balancedEventSet.add(eventName);
       }
     }
@@ -149,7 +149,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   const clientFor = (ctx: ChimpbaseContext): ChimpbaseMeshClient => ({
     call: async <TResult = unknown>(actionName: string, args?: unknown, opts?: CallOptions) => {
-      currentToken = options.meshToken ? ctx.secret(options.meshToken) : null;
+      currentToken = (options.meshToken !== undefined && options.meshToken.length > 0) ? ctx.secret(options.meshToken) : null;
       return await dispatcher<TResult>(ctx, actionName, args, opts ?? {});
     },
     emit: async (event, payload, opts?: EmitOptions) => {
@@ -171,7 +171,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<AnnouncePayload>(INFO_EVENT_ANNOUNCE, async (_ctx, payload) => {
-      if (!payload?.nodeId || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 
@@ -188,7 +188,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<LeavePayload>(INFO_EVENT_LEAVE, async (_ctx, payload) => {
-      if (!payload?.nodeId || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 
@@ -198,7 +198,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     subscription<HeartbeatPayload>(INFO_EVENT_HEARTBEAT, async (_ctx, payload) => {
-      if (!payload?.nodeId || payload.nodeId === nodeId) {
+      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
         return;
       }
 
@@ -211,12 +211,12 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       action(
         RPC_EXECUTE_ACTION,
         async (ctx, rawEnvelope: RpcEnvelope, providedToken: string | null) => {
-          const expected = options.meshToken ? ctx.secret(options.meshToken) : null;
+          const expected = (options.meshToken !== undefined && options.meshToken.length > 0) ? ctx.secret(options.meshToken) : null;
           if (!compareTokens(expected, providedToken ?? null)) {
             throw new Error("unauthorized mesh rpc");
           }
 
-          if (!rawEnvelope || typeof rawEnvelope.actionName !== "string") {
+          if (!(rawEnvelope !== null && rawEnvelope !== undefined) || typeof rawEnvelope.actionName !== "string") {
             throw new Error("invalid rpc envelope");
           }
 
@@ -255,7 +255,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       cache.seed(live.filter((peer) => peer.nodeId !== nodeId));
 
       for (const svc of services) {
-        if (svc.started) {
+        if ((svc.started !== undefined)) {
           const started = svc.started as (ctx: ChimpbaseContext, self: ServiceSelf) => unknown;
           await started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
         }
@@ -276,13 +276,13 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   entries.push(
     onStop("__chimpbase.mesh.shutdown", async () => {
-      if (heartbeatState.timer) {
+      if ((heartbeatState.timer !== null)) {
         clearInterval(heartbeatState.timer);
         heartbeatState.timer = null;
       }
 
       for (const svc of services) {
-        if (svc.stopped) {
+        if ((svc.stopped !== undefined)) {
           await svc.stopped();
         }
       }
@@ -308,7 +308,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       worker<BalancedEnvelope>(balancedWorkerName(event), async (ctx, envelope) => {
         for (const svc of services) {
           const eventEntry = svc.events[envelope.event];
-          if (!eventEntry || !eventEntry.balanced) {
+          if (!(eventEntry !== null && eventEntry !== undefined) || !(eventEntry.balanced === true)) {
             continue;
           }
 
@@ -381,7 +381,7 @@ function buildServiceRegistrations(
     }
 
     for (const [eventName, event] of Object.entries(svc.events)) {
-      if (event.balanced) {
+      if ((event.balanced === true)) {
         continue;
       }
 
@@ -405,13 +405,13 @@ function buildServiceSelf(
 ): ServiceSelf {
   return {
     call: async <TResult = unknown>(actionName: string, args?: unknown, options?: CallOptions) => {
-      if (!meshClient) {
+      if (!(meshClient !== undefined)) {
         throw new Error("mesh client is not available in this context");
       }
       return await meshClient.call<TResult>(actionName, args, options);
     },
     emit: async (event, payload, options?: EmitOptions) => {
-      if (!meshClient) {
+      if (!(meshClient !== undefined)) {
         throw new Error("mesh client is not available in this context");
       }
       await meshClient.emit(event, payload, options);

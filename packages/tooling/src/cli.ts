@@ -53,8 +53,12 @@ export async function runChimpbaseCli(
   dependencies: RunChimpbaseCliDependencies,
 ): Promise<void> {
   const [command = "dev", maybeSubcommand, ...rawRest] = argv;
-  const subcommand = maybeSubcommand && !maybeSubcommand.startsWith("--") ? maybeSubcommand : null;
-  const rest = subcommand ? rawRest : [maybeSubcommand, ...rawRest].filter((token): token is string => Boolean(token));
+  const subcommand = maybeSubcommand !== undefined
+    && maybeSubcommand.length > 0
+    && !maybeSubcommand.startsWith("--")
+    ? maybeSubcommand
+    : null;
+  const rest = (subcommand !== null && subcommand.length > 0) ? rawRest : [maybeSubcommand, ...rawRest].filter((token): token is string => Boolean(token));
 
   const args = parseArgs(rest);
   const projectDirArg = args["project-dir"];
@@ -131,7 +135,7 @@ export async function runChimpbaseCli(
     serve: serveFlag ? true : undefined,
   });
 
-  if (started.server) {
+  if ((started.server !== null && started.server !== undefined)) {
     writeLine(`listening on http://127.0.0.1:${started.server.port}`);
     if (workerFlag || !serveFlag) {
       writeLine("queue worker started");
@@ -159,7 +163,7 @@ function parseArgs(rawArgs: readonly string[]): Record<string, string | boolean>
 
     const key = token.slice(2);
     const next = rawArgs[index + 1];
-    if (!next || next.startsWith("--")) {
+    if (next === undefined || next.length === 0 || next.startsWith("--")) {
       parsed[key] = true;
       continue;
     }

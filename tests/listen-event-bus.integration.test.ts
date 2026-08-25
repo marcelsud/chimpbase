@@ -8,7 +8,7 @@ import {
 } from "../packages/postgres/src/listen-event-bus.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
-const describeIfPg = PG_URL ? describe : describe.skip;
+const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
 
 function uniqueChannel(suffix: string): string {
   return `chimpbase_test_${Date.now()}_${Math.floor(Math.random() * 1e6)}_${suffix}`;

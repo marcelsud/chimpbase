@@ -93,7 +93,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events, async () => {
           ackCallOrder++;
           ackCalls.push(ackCallOrder);
@@ -144,7 +144,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }
@@ -189,7 +189,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }
@@ -244,7 +244,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }
@@ -290,7 +290,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }
@@ -336,7 +336,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }
@@ -382,7 +382,7 @@ describe("event bus", () => {
       }
 
       async simulateExternalEvents(events: ChimpbaseEventRecord[]): Promise<void> {
-        if (!this.callback) throw new Error("not started");
+        if (!(this.callback !== null)) throw new Error("not started");
         await this.callback(events);
       }
     }

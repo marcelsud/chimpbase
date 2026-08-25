@@ -133,7 +133,7 @@ export function restCollections(
 ): ChimpbasePluginRegistration {
   const definitions = resolveCollections(options);
   const entries = definitions.flatMap((definition) => buildCollectionEntries(definition));
-  if (options.dependsOn || options.name) {
+  if (options.dependsOn !== undefined || (options.name ?? "").length > 0) {
     return plugin(
       {
         dependsOn: options.dependsOn,
@@ -184,7 +184,7 @@ function buildCollectionEntries(
     }),
     action(definition.actionNames.update, async (ctx, input: RestUpdateInput) => {
       const current = await ctx.collection.findOne(definition.collectionName, { id: input.id });
-      if (!current) {
+      if (!(current !== null)) {
         return null;
       }
 
@@ -391,7 +391,7 @@ function parseListInput(
     }
 
     const parser = definition.filterParsers.get(key);
-    if (!parser) {
+    if (!(parser !== undefined)) {
       throw badRequest(`unsupported filter field: ${key}`);
     }
 
@@ -404,7 +404,7 @@ function parseListInput(
 function normalizeFilterParsers(
   fields: RestCollectionFilterFields | undefined,
 ): ReadonlyMap<string, (value: string) => unknown> {
-  if (!fields) {
+  if (!(fields !== undefined)) {
     return new Map();
   }
 
@@ -420,7 +420,7 @@ function normalizeFilterParsers(
 function normalizeWritableFields(
   fields: readonly string[] | undefined,
 ): ReadonlySet<string> | null {
-  return fields ? new Set(fields) : null;
+  return (fields !== undefined) ? new Set(fields) : null;
 }
 
 function sanitizeWritableDocument(
@@ -438,7 +438,7 @@ function sanitizeWritableDocument(
     }
   }
 
-  if (!writableFields) {
+  if (!(writableFields !== null)) {
     return value;
   }
 
@@ -457,11 +457,11 @@ async function applyReadTransform(
   operation: RestCollectionReadOperation,
   schemaVersion: number | null,
 ): Promise<unknown> {
-  if (!document) {
+  if (!(document !== null)) {
     return null;
   }
 
-  if (!definition.onRead) {
+  if (!(definition.onRead !== undefined)) {
     return document;
   }
 
@@ -480,7 +480,7 @@ async function applyWriteTransform(
   current: Record<string, unknown> | null,
   schemaVersion: number | null,
 ): Promise<Record<string, unknown>> {
-  const transformed = definition.onWrite
+  const transformed = (definition.onWrite !== undefined)
     ? await definition.onWrite({
         configuredSchemaVersion: definition.schemaVersion,
         current,
@@ -490,7 +490,7 @@ async function applyWriteTransform(
       })
     : input;
 
-  if (!transformed || typeof transformed !== "object" || Array.isArray(transformed)) {
+  if (!(transformed !== null && transformed !== undefined) || typeof transformed !== "object" || Array.isArray(transformed)) {
     throw new Error(`rest collection onWrite must return a plain object for ${definition.routePath}`);
   }
 
@@ -515,7 +515,7 @@ async function resolveSchemaVersion(
   definition: ResolvedRestCollectionDefinition,
   document: Record<string, unknown> | null,
 ): Promise<number | null> {
-  if (!document || typeof document.id !== "string") {
+  if (!(document !== null) || typeof document.id !== "string") {
     return null;
   }
 
@@ -625,7 +625,7 @@ async function parseJsonObject(request: Request): Promise<Record<string, unknown
     throw badRequest("request body must be valid JSON");
   }
 
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
+  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
     throw badRequest("request body must be a JSON object");
   }
 
@@ -668,12 +668,13 @@ function joinRoutePath(basePath: string | undefined, path: string): string {
 
 function normalizePath(path: string): string {
   const trimmed = path.trim();
-  if (!trimmed || trimmed === "/") {
+  if (!(trimmed.length > 0) || trimmed === "/") {
     return "/";
   }
 
   const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return withLeadingSlash.replace(/\/+$/g, "") || "/";
+  const normalized = withLeadingSlash.replace(/\/+$/g, "");
+  return normalized.length > 0 ? normalized : "/";
 }
 
 function splitPath(path: string): string[] {

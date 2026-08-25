@@ -17,12 +17,12 @@ async function reservePort(): Promise<number> {
     server.once("error", rejectFn);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (!address || typeof address === "string") {
+      if (address === null || typeof address === "string") {
         server.close(() => rejectFn(new Error("no port")));
         return;
       }
       const { port } = address;
-      server.close((error) => (error ? rejectFn(error) : resolveFn(port)));
+      server.close((error) => ((error !== undefined) ? rejectFn(error) : resolveFn(port)));
     });
   });
 }

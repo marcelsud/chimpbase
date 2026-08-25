@@ -92,7 +92,7 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
     async stop(handle: NodeServeHandle): Promise<void> {
       await new Promise<void>((resolveStop, rejectStop) => {
         handle.server.close((error?: Error | null) => {
-          if (error) {
+          if ((error !== null && error !== undefined)) {
             rejectStop(error);
             return;
           }
@@ -117,7 +117,7 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
       ];
 
       if (config.storage.engine === "postgres") {
-        if (!config.storage.url) {
+        if (!(config.storage.url !== null && config.storage.url.length > 0)) {
           throw new Error("@chimpbase/node requires storage.url for postgres storage");
         }
 
@@ -218,7 +218,7 @@ function buildConfigFromApp(app: ChimpbaseAppDefinition): ChimpbaseProjectConfig
 
 async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<ChimpbaseAppDefinition> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (!app) {
+  if (!(app !== null)) {
     throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
   }
 
@@ -252,7 +252,7 @@ function createWebRequest(request: IncomingMessage, port: number): Request {
     body,
     headers,
     method,
-    ...(body ? { duplex: "half" } : {}),
+    ...((body !== undefined) ? { duplex: "half" } : {}),
   } as RequestInit);
 }
 
@@ -263,7 +263,7 @@ async function writeNodeResponse(response: ServerResponse, webResponse: Response
     response.setHeader(name, value);
   });
 
-  if (!webResponse.body) {
+  if (!(webResponse.body !== null)) {
     response.end();
     return;
   }

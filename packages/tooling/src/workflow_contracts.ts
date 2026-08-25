@@ -46,12 +46,12 @@ export async function syncRegisteredWorkflowContracts(
         .filter((entry) => entry.version < contract.version)
         .sort((left, right) => right.version - left.version)[0]
       ?? null;
-    const compatibility = previousVersion
+    const compatibility = (previousVersion !== null && previousVersion !== undefined)
       ? compareWorkflowContracts(previousVersion, contract)
       : "additive";
     const path = join(contractsDir, workflowContractFileName(contract.name, contract.version));
 
-    if (storedSameVersion) {
+    if ((storedSameVersion !== null)) {
       if (storedSameVersion.hash !== contract.hash) {
         issues.push(`workflow ${contract.name} v${contract.version} changed without a version bump`);
       } else {
@@ -66,14 +66,14 @@ export async function syncRegisteredWorkflowContracts(
       continue;
     }
 
-    const expectedVersion = previousVersion ? previousVersion.version + 1 : 1;
+    const expectedVersion = (previousVersion !== null && previousVersion !== undefined) ? previousVersion.version + 1 : 1;
     if (contract.version !== expectedVersion) {
       issues.push(`workflow ${contract.name} expected version ${expectedVersion}, received ${contract.version}`);
       latestByName.set(contract.name, contract);
       continue;
     }
 
-    if (!options.allowBreaking && (compatibility === "breaking" || compatibility === "requires_migration")) {
+    if (!(options.allowBreaking === true) && (compatibility === "breaking" || compatibility === "requires_migration")) {
       issues.push(`workflow ${contract.name} v${contract.version} is ${compatibility} relative to v${previousVersion?.version}`);
       latestByName.set(contract.name, contract);
       continue;
@@ -83,7 +83,7 @@ export async function syncRegisteredWorkflowContracts(
       compatibility,
       contract,
       path,
-      status: options.check ? "missing" : "written",
+      status: (options.check === true) ? "missing" : "written",
     });
     latestByName.set(contract.name, contract);
   }
@@ -92,7 +92,7 @@ export async function syncRegisteredWorkflowContracts(
     throw new Error(issues.join("\n"));
   }
 
-  if (options.check) {
+  if ((options.check === true)) {
     const missing = entries.filter((entry) => entry.status === "missing");
     if (missing.length > 0) {
       throw new Error(
@@ -159,7 +159,7 @@ async function readWorkflowContracts(contractsDir: string): Promise<Map<string, 
   try {
     files = await readdir(contractsDir);
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+    if ((error !== null && error !== undefined) && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return contracts;
     }
 

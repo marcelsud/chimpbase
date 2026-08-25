@@ -114,7 +114,7 @@ describe("portable package guards", () => {
         files?: string[];
       };
 
-      if (!manifest.files?.includes("dist")) {
+      if (!(manifest.files?.includes("dist") === true)) {
         violations.push(`packages/${packageName}/package.json: missing dist in files`);
       }
 
@@ -124,15 +124,15 @@ describe("portable package guards", () => {
           continue;
         }
 
-        if (!entry.import?.endsWith(".js")) {
+        if (!(entry.import?.endsWith(".js") === true)) {
           violations.push(`packages/${packageName}/package.json: ${subpath} import must point to .js`);
         }
 
-        if (!entry.default?.endsWith(".js")) {
+        if (!(entry.default?.endsWith(".js") === true)) {
           violations.push(`packages/${packageName}/package.json: ${subpath} default must point to .js`);
         }
 
-        if (!entry.types?.endsWith(".d.ts")) {
+        if (!(entry.types?.endsWith(".d.ts") === true)) {
           violations.push(`packages/${packageName}/package.json: ${subpath} types must point to .d.ts`);
         }
       }

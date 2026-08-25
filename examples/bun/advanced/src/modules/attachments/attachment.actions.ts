@@ -32,7 +32,7 @@ export const downloadAttachment = action({
   args: v.object({ orderId: v.string(), filename: v.string() }),
   async handler(ctx, input) {
     const obj = await ctx.blobs.get(ATTACHMENT_BUCKET, `${input.orderId}/${input.filename}`);
-    if (!obj) return null;
+    if (!(obj !== null)) return null;
     const text = await new Response(obj.body).text();
     return { text, size: obj.size, etag: obj.etag };
   },
@@ -52,7 +52,7 @@ export const backupAttachments = cron(
   async (ctx) => {
     const source = process.env.ATTACHMENTS_ROOT;
     const target = process.env.ATTACHMENTS_BACKUP_ROOT;
-    if (!source || !target) {
+    if (!(source !== undefined && source.length > 0) || !(target !== undefined && target.length > 0)) {
       ctx.log.debug("attachments backup skipped (ATTACHMENTS_ROOT or ATTACHMENTS_BACKUP_ROOT unset)");
       return;
     }

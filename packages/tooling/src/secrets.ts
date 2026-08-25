@@ -27,7 +27,7 @@ export async function loadLocalSecretStore(
     projectDir,
     config.secrets.envFile ?? options.envFileDefault ?? DEFAULT_ENV_FILE,
   );
-  if (envFilePath) {
+  if ((envFilePath !== null && envFilePath.length > 0)) {
     await preloadDotenvFile(envFilePath, values);
   }
 
@@ -41,7 +41,7 @@ export async function loadLocalSecretStore(
     projectDir,
     config.secrets.dir ?? options.secretsDirDefault ?? DEFAULT_SECRETS_DIR,
   );
-  if (secretsDirPath) {
+  if ((secretsDirPath !== null && secretsDirPath.length > 0)) {
     await preloadSecretDirectory(secretsDirPath, values);
   }
 
@@ -57,7 +57,7 @@ export function parseDotenv(raw: string): Map<string, string> {
 
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
+    if (!(trimmed.length > 0) || trimmed.startsWith("#")) {
       continue;
     }
 
@@ -108,7 +108,7 @@ async function preloadSecretDirectory(path: string, values: Map<string, string>)
 }
 
 function resolveLocalPath(projectDir: string, path: string | null): string | null {
-  if (!path) {
+  if (!(path !== null && path.length > 0)) {
     return null;
   }
 

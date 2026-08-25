@@ -171,16 +171,16 @@ function serializeInteraction(interaction: ChimpbasePactInteraction): Serialized
         kind: "action",
         name: interaction.name,
         states: interaction.states,
-        ...(interaction.args ? { argsSchema: interaction.args.schema } : {}),
-        ...(interaction.result ? { resultSchema: interaction.result.schema } : {}),
-        ...(interaction.example ? { example: interaction.example } : {}),
+        ...((interaction.args !== undefined) ? { argsSchema: interaction.args.schema } : {}),
+        ...((interaction.result !== undefined) ? { resultSchema: interaction.result.schema } : {}),
+        ...((interaction.example !== undefined) ? { example: interaction.example } : {}),
       };
     case "event":
       return {
         kind: "event",
         eventName: interaction.eventName,
         states: interaction.states,
-        ...(interaction.payload ? { payloadSchema: interaction.payload.schema } : {}),
+        ...((interaction.payload !== undefined) ? { payloadSchema: interaction.payload.schema } : {}),
         ...(interaction.example !== undefined ? { example: interaction.example } : {}),
       };
     case "worker":
@@ -188,7 +188,7 @@ function serializeInteraction(interaction: ChimpbasePactInteraction): Serialized
         kind: "worker",
         queueName: interaction.queueName,
         states: interaction.states,
-        ...(interaction.payload ? { payloadSchema: interaction.payload.schema } : {}),
+        ...((interaction.payload !== undefined) ? { payloadSchema: interaction.payload.schema } : {}),
         ...(interaction.example !== undefined ? { example: interaction.example } : {}),
       };
   }

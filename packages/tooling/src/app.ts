@@ -19,7 +19,7 @@ const PROJECT_APP_MODULE_FILE = "chimpbase.app.ts";
 export async function loadProjectAppDefinition(projectDir: string): Promise<ChimpbaseAppDefinition | null> {
   const resolvedProjectDir = resolve(projectDir);
   const appModulePath = await resolveProjectAppModulePath(resolvedProjectDir);
-  if (!appModulePath) {
+  if (!(appModulePath !== null && appModulePath.length > 0)) {
     return null;
   }
 
@@ -39,9 +39,10 @@ export async function loadChimpbaseAppDefinitionModule(
   modulePath: string,
   projectDir = dirname(modulePath),
 ): Promise<ChimpbaseAppDefinition> {
+  const moduleExtension = extname(modulePath);
   const tempModulePath = join(
     dirname(modulePath),
-    `.__chimpbase_app_${globalThis.crypto.randomUUID()}${extname(modulePath) || ".ts"}`,
+    `.__chimpbase_app_${globalThis.crypto.randomUUID()}${moduleExtension.length > 0 ? moduleExtension : ".ts"}`,
   );
 
   await writeFile(tempModulePath, await readFile(modulePath, "utf8"));
@@ -66,7 +67,7 @@ function coerceChimpbaseAppDefinition(
   inferUnnamedActionExportNames(moduleExports, modulePath, projectDir);
 
   const candidate = moduleExports.default ?? moduleExports.app;
-  if (!candidate || typeof candidate !== "object") {
+  if (!(candidate !== null && candidate !== undefined) || typeof candidate !== "object") {
     throw new Error(`project app module must export a default object or named "app": ${modulePath}`);
   }
 
@@ -78,7 +79,8 @@ function inferUnnamedActionExportNames(
   modulePath: string,
   projectDir: string,
 ): void {
-  const relativeModulePath = toPosixPath(relative(projectDir, modulePath) || modulePath);
+  const relativePath = relative(projectDir, modulePath);
+  const relativeModulePath = toPosixPath(relativePath.length > 0 ? relativePath : modulePath);
 
   for (const [exportName, value] of Object.entries(moduleExports)) {
     if (exportName === "default" || exportName === "app") {

@@ -13,7 +13,7 @@ export function service<
 >(
   def: ServiceDefinition<TSettings, TMethods>,
 ): ServiceDefinition<TSettings, TMethods> {
-  if (!def.name) {
+  if (!(def.name.length > 0)) {
     throw new Error("service definition requires a name");
   }
 
@@ -58,11 +58,11 @@ export function resolveService(
     Object.assign(merged.settings, resolved.settings);
   }
 
-  if (def.settings) {
+  if ((Boolean(def.settings))) {
     Object.assign(merged.settings, def.settings as Record<string, unknown>);
   }
 
-  if (def.methods) {
+  if ((def.methods !== undefined)) {
     Object.assign(merged.methods, def.methods as Record<string, unknown>);
   }
 

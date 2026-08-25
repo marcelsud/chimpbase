@@ -35,7 +35,7 @@ export async function updateOrderStatus(
      RETURNING id, customer, amount, status, assignee, created_at, updated_at`,
     [id, status, assignee],
   );
-  if (!row) throw new Error(`order ${id} not found`);
+  if (!(row !== null && row !== undefined)) throw new Error(`order ${id} not found`);
   return row;
 }
 

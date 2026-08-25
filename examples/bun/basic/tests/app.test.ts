@@ -18,7 +18,7 @@ describe("bun/basic example", () => {
     });
     started = await chimpbase.start();
     const port = started.server?.port;
-    if (!port) throw new Error("server failed to bind a port");
+    if (!(port !== undefined && port > 0)) throw new Error("server failed to bind a port");
     baseUrl = `http://127.0.0.1:${port}`;
   });
 

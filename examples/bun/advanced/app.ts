@@ -18,7 +18,7 @@ export async function createAdvancedApp() {
   );
 
   const otelEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-  const sinks = otelEndpoint
+  const sinks = (otelEndpoint !== undefined && otelEndpoint.length > 0)
     ? [
         createOtelSink({
           endpoint: otelEndpoint,
@@ -28,7 +28,7 @@ export async function createAdvancedApp() {
     : [];
 
   const blobsRoot = process.env.ATTACHMENTS_ROOT;
-  const driver = blobsRoot ? fsBlobDriver({ root: blobsRoot }) : memoryBlobDriver();
+  const driver = (blobsRoot !== undefined && blobsRoot.length > 0) ? fsBlobDriver({ root: blobsRoot }) : memoryBlobDriver();
   const blobsPlugin = chimpbaseBlobs({
     secret: process.env.BLOBS_SIGNING_SECRET ?? "advanced-example-secret",
     baseUrl: process.env.BLOBS_BASE_URL ?? "http://127.0.0.1:3000",

@@ -43,7 +43,7 @@ export class MeshPeerCache {
 
   touch(nodeId: string, lastHeartbeatMs: number, metadata: Record<string, unknown>): void {
     const existing = this.peers.get(nodeId);
-    if (!existing) {
+    if (!(existing !== undefined)) {
       return;
     }
 

@@ -24,7 +24,7 @@ export function getDenoEnv(name: string): string | undefined {
 
 export function getDenoEnvObject(): Record<string, string> {
   const env = getOptionalDenoRuntime()?.env;
-  if (!env || typeof env.toObject !== "function") {
+  if (!(env !== undefined) || typeof env.toObject !== "function") {
     return {};
   }
 
@@ -49,7 +49,7 @@ const reflectGet: (target: object, key: PropertyKey) => unknown = Reflect.get;
 
 function getOptionalDenoRuntime(): DenoRuntimeLike | null {
   const runtime = reflectGet(globalThis, "Deno");
-  if (!runtime || typeof runtime !== "object") {
+  if (!(runtime !== null && runtime !== undefined) || typeof runtime !== "object") {
     return null;
   }
 

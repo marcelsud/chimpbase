@@ -71,7 +71,7 @@ export function computeNextCronFireTime(expression: string, afterMs: number): nu
 function parseCronExpression(expression: string): ParsedCronExpression {
   const normalized = expression.trim().replace(/\s+/g, " ");
   const cached = parsedCronCache.get(normalized);
-  if (cached) {
+  if ((cached !== undefined)) {
     return cached;
   }
 
@@ -198,7 +198,7 @@ function normalizeCronValue(
     throw new Error(`cron value out of range (${min}-${maxInputValue}): ${token}`);
   }
 
-  const normalized = normalizeValue ? normalizeValue(value) : value;
+  const normalized = (normalizeValue !== undefined) ? normalizeValue(value) : value;
   if (normalized < min || normalized > max) {
     throw new Error(`cron value out of range (${min}-${max}): ${token}`);
   }

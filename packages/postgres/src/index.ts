@@ -49,7 +49,7 @@ interface PersistedCronScheduleRow {
 type Queryable = Pool | PoolClient;
 
 export function openPostgresPool(config: ChimpbaseProjectConfig): Pool {
-  if (!config.storage.url) {
+  if (!(config.storage.url !== null && config.storage.url.length > 0)) {
     throw new Error("postgres storage requires storage.url");
   }
 
@@ -354,7 +354,7 @@ export function createPostgresEngineAdapter(
       }
     },
     async beginTransaction() {
-      if (transactionClient) {
+      if ((transactionClient !== null)) {
         return;
       }
 
@@ -504,7 +504,7 @@ export function createPostgresEngineAdapter(
       filter: ChimpbaseCollectionFilter,
     ): Promise<TDocument | null> {
       const [row] = await findCollectionDocuments(queryable(), name, filter, { limit: 1 });
-      return row ? parseJson(row.document_json) as TDocument : null;
+      return (row !== null && row !== undefined) ? parseJson(row.document_json) as TDocument : null;
     },
     async collectionInsert<TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> {
       const documentId = platform.randomUUID();
@@ -549,7 +549,7 @@ export function createPostgresEngineAdapter(
     },
     async commitTransaction(events: ChimpbaseEventRecord[]) {
       await persistEvents(queryable(), events);
-      if (transactionClient) {
+      if ((transactionClient !== null)) {
         await transactionClient.query("COMMIT");
         transactionClient.release();
         transactionClient = null;
@@ -605,7 +605,7 @@ export function createPostgresEngineAdapter(
         [key],
       );
       const row = result.rows[0];
-      return row ? parseJson(row.value_json) as TValue : null;
+      return (row !== null && row !== undefined) ? parseJson(row.value_json) as TValue : null;
     },
     async kvList(options?: ChimpbaseKvListOptions): Promise<string[]> {
       const prefix = options?.prefix ?? "";
@@ -669,7 +669,7 @@ export function createPostgresEngineAdapter(
       );
     },
     createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      if (!kysely) {
+      if (!(kysely !== null)) {
         kysely = createPostgresKysely({
           async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
             const result = await queryable().query(compiledQuery.sql, [...compiledQuery.parameters]);
@@ -717,7 +717,7 @@ export function createPostgresEngineAdapter(
       );
     },
     async rollbackTransaction() {
-      if (!transactionClient) {
+      if (!(transactionClient !== null)) {
         return;
       }
 
@@ -848,7 +848,7 @@ export function createPostgresEngineAdapter(
         [bucket, key],
       );
       const row = result.rows[0];
-      if (!row) return null;
+      if (!(row !== null && row !== undefined)) return null;
       return {
         bucket: row.bucket,
         key: row.key,
@@ -954,7 +954,7 @@ export function createPostgresEngineAdapter(
         [uploadId],
       );
       const row = result.rows[0];
-      if (!row) return null;
+      if (row === undefined) return null;
       return {
         uploadId: row.upload_id,
         bucket: row.bucket,
@@ -1012,7 +1012,7 @@ export function createPostgresEngineAdapter(
       finalMeta: ChimpbaseBlobMetaRow,
     ): Promise<void> {
       const client = transactionClient ?? await pool.connect();
-      const ownsClient = !transactionClient;
+      const ownsClient = !(transactionClient !== null);
       try {
         if (ownsClient) await client.query("BEGIN");
         await client.query(
@@ -1134,7 +1134,7 @@ function sliceBlobList(
       nextCursor = entries.length > 0 ? entries[entries.length - 1].key : row.key;
       break;
     }
-    if (delimiter) {
+    if ((delimiter !== null && delimiter.length > 0)) {
       const after = row.key.slice(prefix.length);
       const idx = after.indexOf(delimiter);
       if (idx >= 0) {
@@ -1144,7 +1144,7 @@ function sliceBlobList(
     }
     entries.push(row);
   }
-  if (!nextCursor && rows.length > limit) {
+  if (!(nextCursor !== null && nextCursor.length > 0) && rows.length > limit) {
     nextCursor = rows[limit - 1]?.key ?? null;
   }
   return {

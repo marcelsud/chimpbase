@@ -31,19 +31,19 @@ export function chimpbaseBlobs(options: ChimpbaseBlobsPluginOptions): ChimpbaseB
     const url = new URL(request.url);
     if (request.method !== "GET" || url.pathname !== `${basePath}/get`) return null;
     const token = url.searchParams.get("token");
-    if (!token) return new Response("missing token", { status: 400 });
+    if (!(token !== null && token.length > 0)) return new Response("missing token", { status: 400 });
     const payload = signer.verify(token);
-    if (!payload || payload.op !== "get") {
+    if (!(payload !== null) || payload.op !== "get") {
       return new Response("invalid token", { status: 401 });
     }
     const obj = await env.blobs.get(payload.bucket, payload.key);
-    if (!obj) return new Response("not found", { status: 404 });
+    if (!(obj !== null)) return new Response("not found", { status: 404 });
     const headers = new Headers({
       "content-type": obj.contentType,
       "content-length": String(obj.size),
       etag: obj.etag,
     });
-    if (payload.responseContentDisposition) {
+    if ((payload.responseContentDisposition !== undefined && payload.responseContentDisposition.length > 0)) {
       headers.set("content-disposition", payload.responseContentDisposition);
     }
     return new Response(obj.body, { status: 200, headers });
@@ -53,12 +53,12 @@ export function chimpbaseBlobs(options: ChimpbaseBlobsPluginOptions): ChimpbaseB
     const url = new URL(request.url);
     if (request.method !== "PUT" || url.pathname !== `${basePath}/put`) return null;
     const token = url.searchParams.get("token");
-    if (!token) return new Response("missing token", { status: 400 });
+    if (!(token !== null && token.length > 0)) return new Response("missing token", { status: 400 });
     const payload = signer.verify(token);
-    if (!payload || payload.op !== "put") {
+    if (!(payload !== null) || payload.op !== "put") {
       return new Response("invalid token", { status: 401 });
     }
-    if (!request.body) {
+    if (!(request.body !== null)) {
       return new Response("missing body", { status: 400 });
     }
     const contentType = payload.contentType

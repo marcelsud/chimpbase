@@ -499,7 +499,7 @@ export class ChimpbaseEngine {
     try {
       let invoke: () => Promise<unknown> = () => this.invokeActionByName(name, args);
       for (const span of handlerSpans) {
-        if (span.runInContext) {
+        if ((span.runInContext !== undefined)) {
           const prev = invoke;
           invoke = () => span.runInContext!(prev) as Promise<unknown>;
         }
@@ -538,7 +538,7 @@ export class ChimpbaseEngine {
           }
         }
 
-        if (!this.registry.httpHandler) {
+        if (!(this.registry.httpHandler !== null)) {
           return null;
         }
 
@@ -546,7 +546,7 @@ export class ChimpbaseEngine {
       });
 
       for (const span of handlerSpans) {
-        if (span.runInContext) {
+        if ((span.runInContext !== undefined)) {
           const prev = invoke;
           invoke = () => span.runInContext!(prev) as Promise<Response | null>;
         }
@@ -571,12 +571,12 @@ export class ChimpbaseEngine {
 
   async processNextCronSchedule(): Promise<ChimpbaseCronScheduleExecutionResult | null> {
     const claimed = await this.adapter.claimNextCronSchedule(this.worker.leaseMs);
-    if (!claimed) {
+    if (!(claimed !== null)) {
       return null;
     }
 
     const registration = this.registry.crons.get(claimed.schedule_name);
-    if (!registration) {
+    if (!(registration !== undefined)) {
       await this.adapter.releaseCronScheduleLease(claimed.schedule_name, claimed.lease_token);
       await this.adapter.deleteCronSchedule(claimed.schedule_name);
       return null;
@@ -643,7 +643,7 @@ export class ChimpbaseEngine {
 
     for (const [name, registration] of this.registry.crons) {
       const existing = persistedByName.get(name);
-      if (existing && existing.cron_expression === registration.schedule) {
+      if ((existing !== undefined) && existing.cron_expression === registration.schedule) {
         persistedByName.delete(name);
         continue;
       }
@@ -666,7 +666,7 @@ export class ChimpbaseEngine {
   async processNextQueueJobs(limit: number): Promise<ChimpbaseQueueExecutionResult[]> {
     const batchSize = Math.max(1, Math.floor(limit));
     const queueNames = this.getClaimableQueueNames();
-    const jobs = this.adapter.claimNextQueueJobs
+    const jobs = (this.adapter.claimNextQueueJobs !== undefined)
       ? await this.adapter.claimNextQueueJobs(this.worker.leaseMs, batchSize, queueNames)
       : [];
     const claimedJobs = jobs.length > 0
@@ -683,7 +683,7 @@ export class ChimpbaseEngine {
 
   private async claimSingleQueueJob(queueNames: readonly string[]): Promise<ChimpbaseQueueJobRecord[]> {
     const job = await this.adapter.claimNextQueueJob(this.worker.leaseMs, queueNames);
-    return job ? [job] : [];
+    return (job !== null) ? [job] : [];
   }
 
   private getClaimableQueueNames(): string[] {
@@ -711,7 +711,7 @@ export class ChimpbaseEngine {
   private async processClaimedQueueJob(job: ChimpbaseQueueJobRecord): Promise<ChimpbaseQueueExecutionResult> {
     const telemetryStart = this.telemetryRecords.length;
     const worker = this.registry.workers.get(job.queue_name);
-    if (!worker) {
+    if (!(worker !== undefined)) {
       await this.failQueueJob(job.id, job.queue_name, `queue handler not found: ${job.queue_name}`, job.attempt_count);
       throw new Error(`queue handler not found: ${job.queue_name}`);
     }
@@ -731,7 +731,7 @@ export class ChimpbaseEngine {
       };
 
       for (const span of handlerSpans) {
-        if (span.runInContext) {
+        if ((span.runInContext !== undefined)) {
           const prev = invoke;
           invoke = () => span.runInContext!(prev) as Promise<void>;
         }
@@ -834,14 +834,14 @@ export class ChimpbaseEngine {
 
       if (priority === "cron") {
         const scheduled = await this.processNextCronSchedule();
-        if (scheduled) {
+        if ((scheduled !== null)) {
           return { cronSchedules: 1, queueJobs: 0 };
         }
         continue;
       }
 
       const job = await this.processNextQueueJob();
-      if (job) {
+      if ((job !== null)) {
         return { cronSchedules: 0, queueJobs: 1 };
       }
     }
@@ -860,7 +860,7 @@ export class ChimpbaseEngine {
   }
 
   private async flushTelemetryToStreams(scope?: ChimpbaseExecutionScope, fromIndex = 0): Promise<void> {
-    const override = scope
+    const override = (scope !== undefined)
       ? this.registry.telemetryOverrides.get(`${scope.kind}:${scope.name}`)
       : undefined;
 
@@ -959,7 +959,7 @@ export class ChimpbaseEngine {
 
   private async processCronQueuePayload(payload: CronQueuePayload): Promise<void> {
     if (
-      !payload
+      !(payload !== null && payload !== undefined)
       || typeof payload.scheduleName !== "string"
       || payload.scheduleName.length === 0
       || !Number.isFinite(payload.fireAtMs)
@@ -968,7 +968,7 @@ export class ChimpbaseEngine {
     }
 
     const registration = this.registry.crons.get(payload.scheduleName);
-    if (!registration) {
+    if (!(registration !== undefined)) {
       throw new Error(`cron handler not found: ${payload.scheduleName}`);
     }
 
@@ -991,7 +991,7 @@ export class ChimpbaseEngine {
       };
 
       for (const span of handlerSpans) {
-        if (span.runInContext) {
+        if ((span.runInContext !== undefined)) {
           const prev = invoke;
           invoke = () => span.runInContext!(prev) as Promise<void>;
         }
@@ -1139,7 +1139,7 @@ export class ChimpbaseEngine {
         try {
           let invoke: () => TResult | Promise<TResult> = () => callback(span);
           for (const sinkSpan of sinkSpans) {
-            if (sinkSpan.runInContext) {
+            if ((sinkSpan.runInContext !== undefined)) {
               const prev = invoke;
               invoke = () => sinkSpan.runInContext!(prev) as TResult | Promise<TResult>;
             }
@@ -1184,13 +1184,13 @@ export class ChimpbaseEngine {
 
   private applyContextExtensions(context: ChimpbaseContext): ChimpbaseContext {
     const extensions = this.registry.contextExtensions;
-    if (!extensions || extensions.length === 0) {
+    if (!(extensions !== null && extensions !== undefined) || extensions.length === 0) {
       return context;
     }
 
     const target = context as ChimpbaseContext & Record<string, unknown>;
     for (const extension of extensions) {
-      if (!extension.context) {
+      if (!(extension.context !== undefined)) {
         continue;
       }
 
@@ -1202,13 +1202,13 @@ export class ChimpbaseEngine {
 
   private applyRouteEnvExtensions(env: ChimpbaseRouteEnv): ChimpbaseRouteEnv {
     const extensions = this.registry.contextExtensions;
-    if (!extensions || extensions.length === 0) {
+    if (!(extensions !== null && extensions !== undefined) || extensions.length === 0) {
       return env;
     }
 
     const target = env as ChimpbaseRouteEnv & Record<string, unknown>;
     for (const extension of extensions) {
-      if (!extension.routeEnv) {
+      if (!(extension.routeEnv !== undefined)) {
         continue;
       }
 
@@ -1272,7 +1272,7 @@ export class ChimpbaseEngine {
     payload: TPayload,
   ): Promise<void> {
     const instance = await this.loadWorkflowInstanceRow(workflowId);
-    if (!instance) {
+    if (!(instance !== null)) {
       throw new Error(`workflow not found: ${workflowId}`);
     }
 
@@ -1303,7 +1303,7 @@ export class ChimpbaseEngine {
     workflowId: string,
   ): Promise<ChimpbaseWorkflowInstance<TInput, TState> | null> {
     const row = await this.loadWorkflowInstanceRow(workflowId);
-    if (!row) {
+    if (!(row !== null)) {
       return null;
     }
 
@@ -1327,12 +1327,12 @@ export class ChimpbaseEngine {
   }
 
   private async processWorkflowQueuePayload(payload: WorkflowQueuePayload): Promise<void> {
-    if (!payload || typeof payload.workflowId !== "string" || payload.workflowId.length === 0) {
+    if (!(payload !== null && payload !== undefined) || typeof payload.workflowId !== "string" || payload.workflowId.length === 0) {
       throw new Error("workflow queue payload requires workflowId");
     }
 
     const leaseToken = await this.claimWorkflowLease(payload.workflowId);
-    if (!leaseToken) {
+    if (!(leaseToken !== null && leaseToken.length > 0)) {
       return;
     }
 
@@ -1350,7 +1350,7 @@ export class ChimpbaseEngine {
   private async runWorkflowInstanceUntilSuspended(workflowId: string): Promise<void> {
     for (let guard = 0; guard < 1_024; guard += 1) {
       const row = await this.loadWorkflowInstanceRow(workflowId);
-      if (!row) {
+      if (!(row !== null)) {
         return;
       }
 
@@ -1402,7 +1402,7 @@ export class ChimpbaseEngine {
 
       const step = definition.steps[row.current_step_index];
 
-      if (!step) {
+      if (!(step !== null && step !== undefined)) {
         await this.adapter.query(
           `
             UPDATE _chimpbase_workflow_instances
@@ -1425,14 +1425,14 @@ export class ChimpbaseEngine {
 
       switch (step.kind) {
         case "workflow_action": {
-          const args = step.args
+          const args = (step.args !== undefined)
             ? step.args({ input, state, workflowId })
             : [];
           const actionName = typeof step.action === "string"
             ? step.action
             : resolveChimpbaseActionRegistrationName(step.action);
           const result = await this.invokeActionByName(actionName, normalizeActionArgs(args));
-          const nextState = step.onResult
+          const nextState = (step.onResult !== undefined)
             ? step.onResult({ input, result, state, workflowId })
             : state;
 
@@ -1513,7 +1513,7 @@ export class ChimpbaseEngine {
 
         case "workflow_wait_for_signal": {
           const signal = await this.findPendingWorkflowSignal(workflowId, step.signal);
-          if (signal) {
+          if ((signal !== null)) {
             await this.adapter.query(
               `
                 UPDATE _chimpbase_workflow_signals
@@ -1524,7 +1524,7 @@ export class ChimpbaseEngine {
             );
 
             const payloadValue = JSON.parse(signal.payload_json) as unknown;
-            const nextState = step.onSignal
+            const nextState = (step.onSignal !== undefined)
               ? step.onSignal({
                 input,
                 payload: payloadValue,
@@ -1659,7 +1659,7 @@ export class ChimpbaseEngine {
     input: unknown,
     state: unknown,
   ): Promise<boolean> {
-    if (!directive || typeof directive !== "object" || !("kind" in directive)) {
+    if (!(directive !== null && directive !== undefined) || typeof directive !== "object" || !("kind" in directive)) {
       throw new Error(`workflow run must return a directive: ${workflowId}`);
     }
 
@@ -1791,7 +1791,7 @@ export class ChimpbaseEngine {
     state: unknown,
   ): Promise<boolean> {
     const signal = await this.findPendingWorkflowSignal(workflowId, directive.signal);
-    if (signal) {
+    if ((signal !== null)) {
       await this.adapter.query(
         `
           UPDATE _chimpbase_workflow_signals
@@ -1802,7 +1802,7 @@ export class ChimpbaseEngine {
       );
 
       const payloadValue = JSON.parse(signal.payload_json) as unknown;
-      const nextState = directive.onSignal
+      const nextState = (directive.onSignal !== undefined)
         ? directive.onSignal({
           input,
           payload: payloadValue,
@@ -2004,7 +2004,7 @@ export class ChimpbaseEngine {
   ): ChimpbaseWorkflowDefinition<TInput, TState> {
     if (typeof reference === "string") {
       const versions = this.registry.workflows.get(reference);
-      if (!versions || versions.size === 0) {
+      if (!(versions !== undefined) || versions.size === 0) {
         throw new Error(`workflow not found: ${reference}`);
       }
 
@@ -2026,7 +2026,7 @@ export class ChimpbaseEngine {
     const versions = this.registry.workflows.get(workflowName);
     const definition = versions?.get(workflowVersion);
 
-    if (!definition) {
+    if (!(definition !== undefined)) {
       throw new Error(`workflow definition not found: ${workflowName}@${workflowVersion}`);
     }
 
@@ -2057,7 +2057,7 @@ export class ChimpbaseEngine {
       [workflowId, leaseToken, leaseExpiresAtMs, now],
     );
 
-    return row ? leaseToken : null;
+    return (row !== null && row !== undefined) ? leaseToken : null;
   }
 
   private async releaseWorkflowLease(workflowId: string, leaseToken: string): Promise<void> {
@@ -2132,13 +2132,13 @@ export class ChimpbaseEngine {
     args: unknown[],
   ): Promise<TResult> {
     const registration = this.registry.actions.get(name);
-    if (!registration) {
+    if (!(registration !== undefined)) {
       throw new Error(`action not found: ${name}`);
     }
 
     return await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
       const context = this.createContext({ kind: "action", name });
-      if (registration.args) {
+      if ((registration.args !== undefined)) {
         if (args.length > 1) {
           throw new Error(`action ${name} expects a single argument`);
         }
@@ -2164,7 +2164,7 @@ export class ChimpbaseEngine {
         await this.runInTransaction(async () => {
           if (sub.idempotent && event.id !== undefined) {
             const key = `_chimpbase.sub.seen:${event.id}:${sub.name}`;
-            if (await this.adapter.kvGet<boolean>(key)) return;
+            if ((await this.adapter.kvGet<boolean>(key) === true)) return;
             await this.runWithActionInvoker(async () => {
               await sub.handler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
             });
@@ -2265,9 +2265,9 @@ export class ChimpbaseEngine {
     const dlqName = worker?.definition.dlq;
     const shouldDlq = typeof dlqName === "string" && attempts >= this.worker.maxAttempts;
 
-    if (shouldDlq && worker) {
+    if (shouldDlq && worker !== undefined) {
       const payloadJson = await this.adapter.getQueueJobPayload(jobId);
-      if (payloadJson) {
+      if ((payloadJson !== null && payloadJson.length > 0)) {
         const envelope: ChimpbaseDlqEnvelope = {
           attempts,
           error: errorMessage,
@@ -2320,7 +2320,7 @@ export class ChimpbaseEngine {
         "chimpbase blobs is not configured; pass `blobs: { driver }` to createChimpbase",
       );
     };
-    if (!config) {
+    if (!(config !== null)) {
       return {
         put: disabled,
         get: disabled,
@@ -2446,12 +2446,12 @@ export class ChimpbaseEngine {
       put: async (bucket, key, body, options) => {
         assertBucket(bucket);
         await ensureBuckets();
-        if (options?.ifMatch || options?.ifNoneMatch !== undefined) {
+        if ((options?.ifMatch !== undefined && options?.ifMatch.length > 0) || options?.ifNoneMatch !== undefined) {
           const existing = await adapter.blobGetMetadata(bucket, key);
-          if (options.ifNoneMatch === "*" && existing) {
+          if (Boolean(options.ifNoneMatch === "*" && existing)) {
             throw new ChimpbasePreconditionFailedError(`blob ${bucket}/${key} already exists`);
           }
-          if (options.ifMatch && (!existing || existing.etag !== options.ifMatch)) {
+          if ((options.ifMatch !== undefined && options.ifMatch.length > 0) && (!(existing !== null) || existing.etag !== options.ifMatch)) {
             throw new ChimpbasePreconditionFailedError(`blob ${bucket}/${key} etag mismatch`);
           }
         }
@@ -2475,12 +2475,12 @@ export class ChimpbaseEngine {
       get: async (bucket, key, options) => {
         assertBucket(bucket);
         const row = await adapter.blobGetMetadata(bucket, key);
-        if (!row) return null;
-        if (options?.ifNoneMatch && options.ifNoneMatch === row.etag) {
+        if (!(row !== null)) return null;
+        if ((options?.ifNoneMatch !== undefined && options?.ifNoneMatch.length > 0) && options.ifNoneMatch === row.etag) {
           throw new ChimpbaseNotModifiedError(`blob ${bucket}/${key} not modified`);
         }
         const payload = await driver.get(bucket, key, row.driverRef, options?.range);
-        if (!payload) return null;
+        if (!(payload !== null)) return null;
         return {
           ...toMetadata(row),
           size: payload.size,
@@ -2490,12 +2490,12 @@ export class ChimpbaseEngine {
       head: async (bucket, key) => {
         assertBucket(bucket);
         const row = await adapter.blobGetMetadata(bucket, key);
-        return row ? toMetadata(row) : null;
+        return (row !== null) ? toMetadata(row) : null;
       },
       delete: async (bucket, key) => {
         assertBucket(bucket);
         const row = await adapter.blobGetMetadata(bucket, key);
-        if (!row) return false;
+        if (!(row !== null)) return false;
         await driver.delete(bucket, key, row.driverRef);
         return await adapter.blobDeleteMetadata(bucket, key);
       },
@@ -2506,7 +2506,7 @@ export class ChimpbaseEngine {
         for (const key of keys) {
           try {
             const row = await adapter.blobGetMetadata(bucket, key);
-            if (!row) continue;
+            if (!(row !== null)) continue;
             await driver.delete(bucket, key, row.driverRef);
             await adapter.blobDeleteMetadata(bucket, key);
             deleted.push(key);
@@ -2523,7 +2523,7 @@ export class ChimpbaseEngine {
         assertBucket(src.bucket);
         assertBucket(dst.bucket);
         const row = await adapter.blobGetMetadata(src.bucket, src.key);
-        if (!row) {
+        if (!(row !== null)) {
           throw new Error(`source blob ${src.bucket}/${src.key} not found`);
         }
         const driverResult = await driver.copy(
@@ -2585,7 +2585,7 @@ export class ChimpbaseEngine {
       },
       resumeUpload: async (uploadId) => {
         const row = await adapter.blobGetUpload(uploadId);
-        if (!row) {
+        if (!(row !== null)) {
           throw new Error(`upload ${uploadId} not found`);
         }
         return buildUpload(row);
@@ -2606,7 +2606,7 @@ export class ChimpbaseEngine {
       },
       sign: (options) => {
         assertBucket(options.bucket);
-        if (!config.signer) {
+        if (!(config.signer !== undefined)) {
           throw new Error("blob signing secret not configured");
         }
         return config.signer.sign(options);
@@ -2660,7 +2660,7 @@ function normalizeActionReferenceArgs(
   reference: ChimpbaseActionRegistrationLike,
   args: unknown[],
 ): unknown[] {
-  if (!reference.args) {
+  if (!(reference.args !== undefined)) {
     return args;
   }
 

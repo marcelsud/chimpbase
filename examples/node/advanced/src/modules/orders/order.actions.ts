@@ -41,7 +41,7 @@ async function moveOrder(
   extra: Record<string, unknown> = {},
 ): Promise<OrderRecord> {
   const current = await getOrder(ctx, id);
-  if (!current) throw new Error(`order ${id} not found`);
+  if (!(current !== null)) throw new Error(`order ${id} not found`);
   assertTransition(current.status, target);
   const next = await updateOrderStatus(ctx, id, target, assignee);
   ctx.pubsub.publish(event, { ...next, ...extra });

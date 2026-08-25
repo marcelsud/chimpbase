@@ -58,7 +58,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
         strategy,
       });
 
-      if (!target) {
+      if (!(target !== null)) {
         throw new MeshNoAvailableNodeError(actionName);
       }
 
@@ -71,7 +71,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
         );
       }
 
-      if (!options.remoteDispatcher) {
+      if (!(options.remoteDispatcher !== null)) {
         throw new MeshCallError(
           actionName,
           target.peer.nodeId,
@@ -106,7 +106,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
       }
     }
 
-    if (callOpts.fallback) {
+    if ((callOpts.fallback !== undefined)) {
       return (await callOpts.fallback(lastError ?? new Error("mesh call failed"))) as TResult;
     }
 
@@ -120,7 +120,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
 
   let ctxSlot: ChimpbaseContext | null = null;
   const currentCtx = (): ChimpbaseContext => {
-    if (!ctxSlot) {
+    if (!(ctxSlot !== null)) {
       throw new MeshCallError("", null, "mesh dispatcher invoked without an active context");
     }
     return ctxSlot;
@@ -158,13 +158,13 @@ type PickResult =
 function pickTarget(args: PickTargetArgs): PickResult | null {
   const localAvailable = args.localActionNames.has(args.actionName);
 
-  if (args.pinnedNodeId) {
+  if ((args.pinnedNodeId !== undefined && args.pinnedNodeId.length > 0)) {
     if (args.pinnedNodeId === args.localNodeId) {
       return localAvailable ? { kind: "local", nodeId: args.localNodeId } : null;
     }
 
     const pinned = args.cache.get(args.pinnedNodeId);
-    if (!pinned) {
+    if (!(pinned !== null)) {
       return null;
     }
 
@@ -256,7 +256,7 @@ async function withTimeout<T>(
   try {
     return await Promise.race([promise, timeout]);
   } finally {
-    if (timer) {
+    if ((timer !== null)) {
       clearTimeout(timer);
     }
   }

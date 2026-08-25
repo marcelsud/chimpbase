@@ -396,7 +396,7 @@ function normalizeRegistrations(
 function normalizeHttpHandler(
   input: ChimpbaseRouteHandler | { fetch: ChimpbaseRouteHandler } | null | undefined,
 ): ChimpbaseRouteHandler | null {
-  if (!input) {
+  if (!(input !== null && input !== undefined)) {
     return null;
   }
 

@@ -84,7 +84,7 @@ export async function syncChimpbaseSchemaArtifacts(
     issues.push(`generated schema types are out of date: ${typesPath}`);
   }
 
-  if (options.check) {
+  if ((options.check === true)) {
     if (issues.length > 0) {
       throw new Error(issues.join("\n"));
     }
@@ -154,7 +154,7 @@ async function withIntrospectionDatabase<TResult>(
   options: ChimpbaseSchemaSyncOptions,
   callback: (databaseUrl: string) => Promise<TResult>,
 ): Promise<TResult> {
-  if (options.databaseUrl) {
+  if ((options.databaseUrl !== undefined && options.databaseUrl.length > 0)) {
     return await prepareSchemaDatabase(projectDir, options.databaseUrl, callback);
   }
 
@@ -197,7 +197,7 @@ async function prepareSchemaDatabase<TResult>(
 
 async function resolveProjectName(projectDir: string): Promise<string> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (!app) {
+  if (!(app !== null)) {
     throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
   }
 
@@ -362,7 +362,7 @@ function mapTypeReference(
   }
 
   const enumType = enumTypeNames.get(enumKey(dataTypeSchema ?? "public", dataType));
-  if (enumType) {
+  if ((enumType !== undefined && enumType.length > 0)) {
     return enumType;
   }
 
@@ -406,7 +406,7 @@ function mapTypeReference(
 }
 
 function databaseTableKey(table: SchemaTableSnapshot): string {
-  return table.schema && table.schema !== "public"
+  return (table.schema !== undefined && table.schema.length > 0) && table.schema !== "public"
     ? `${table.schema}.${table.name}`
     : table.name;
 }
@@ -420,7 +420,7 @@ function enumTypeName(entry: SchemaEnumSnapshot): string {
 }
 
 function schemaPrefix(schema: string | undefined): string {
-  return schema && schema !== "public" ? pascalCase(schema) : "";
+  return (schema !== undefined && schema.length > 0) && schema !== "public" ? pascalCase(schema) : "";
 }
 
 function enumKey(schema: string, name: string): string {

@@ -102,7 +102,7 @@ function parseTomlDocument(raw: string): TomlTable {
 
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = stripTomlComment(line).trim();
-    if (!trimmed) {
+    if (!(trimmed.length > 0)) {
       continue;
     }
 
@@ -251,5 +251,5 @@ function getTable(table: TomlTable | undefined, key: string): TomlTable | undefi
 }
 
 function isTomlTable(value: TomlPrimitive | TomlTable | undefined): value is TomlTable {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  return Boolean((value !== null && value !== undefined) && typeof value === "object" && !Array.isArray(value));
 }

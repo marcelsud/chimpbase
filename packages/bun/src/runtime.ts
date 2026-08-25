@@ -87,7 +87,7 @@ export const bunRuntimeShim: ChimpbaseRuntimeShim<Bun.Server<unknown>> = {
       ];
 
       if (config.storage.engine === "postgres") {
-        if (!config.storage.url) {
+        if (!(config.storage.url !== null && config.storage.url.length > 0)) {
           throw new Error("@chimpbase/bun requires storage.url for postgres storage");
         }
         const pool = openPostgresPool(config);
@@ -187,7 +187,7 @@ function buildConfigFromApp(app: ChimpbaseAppDefinition): ChimpbaseProjectConfig
 
 async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<ChimpbaseAppDefinition> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (!app) {
+  if (!(app !== null)) {
     throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
   }
 

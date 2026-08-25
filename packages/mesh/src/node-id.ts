@@ -4,7 +4,7 @@ import { MeshConfigurationError } from "./types.ts";
 
 export function generateNodeId(): string {
   const platformCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
-  if (platformCrypto?.randomUUID) {
+  if ((platformCrypto?.randomUUID !== undefined)) {
     return platformCrypto.randomUUID();
   }
 
@@ -23,20 +23,25 @@ export function resolveAdvertisedUrl(input: AdvertisedUrlInput): string | null {
   }
 
   const explicit = input.explicit?.trim();
-  if (explicit) {
+  if ((explicit !== undefined && explicit.length > 0)) {
     return explicit;
   }
 
   const envUrl = process.env.CHIMPBASE_MESH_ADVERTISED_URL?.trim();
-  if (envUrl) {
+  if ((envUrl !== undefined && envUrl.length > 0)) {
     return envUrl;
   }
 
-  const scheme = process.env.CHIMPBASE_MESH_SCHEME?.trim() || "http";
-  const host = process.env.HOSTNAME?.trim() || hostname() || "localhost";
-  const port = input.port ?? (process.env.PORT ? Number(process.env.PORT) : null);
+  const configuredScheme = process.env.CHIMPBASE_MESH_SCHEME?.trim();
+  const scheme = (configuredScheme ?? "").length > 0 ? configuredScheme : "http";
+  const configuredHost = process.env.HOSTNAME?.trim();
+  const fallbackHost = hostname();
+  const host = (configuredHost ?? "").length > 0
+    ? configuredHost
+    : fallbackHost.length > 0 ? fallbackHost : "localhost";
+  const port = input.port ?? ((process.env.PORT !== undefined && process.env.PORT.length > 0) ? Number(process.env.PORT) : null);
 
-  if (!port) {
+  if (!(port !== null && port > 0)) {
     return null;
   }
 
@@ -48,7 +53,7 @@ export function assertAdvertisedUrlSafeForPeers(url: string | null, transport: "
     return;
   }
 
-  if (!url) {
+  if (!(url !== null && url.length > 0)) {
     return;
   }
 
@@ -70,13 +75,13 @@ export function requireHttpTransportConfig(options: {
     return;
   }
 
-  if (!options.meshToken) {
+  if (!(options.meshToken !== undefined && options.meshToken.length > 0)) {
     throw new MeshConfigurationError(
       "chimpbaseMesh: transport: 'http' requires meshToken (name of a secret used to authenticate inbound RPC)",
     );
   }
 
-  if (!options.advertisedUrl) {
+  if (!(options.advertisedUrl !== null && options.advertisedUrl.length > 0)) {
     throw new MeshConfigurationError(
       "chimpbaseMesh: transport: 'http' requires an advertisedUrl (or CHIMPBASE_MESH_ADVERTISED_URL) so peers can reach this node",
     );

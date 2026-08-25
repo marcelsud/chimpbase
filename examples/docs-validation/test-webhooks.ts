@@ -25,7 +25,7 @@ const r1 = await chimpbase.executeRoute(new Request("http://test.local/_webhooks
 }));
 if (r1.response?.status !== 201) throw new Error("should register webhook");
 const webhook = await r1.response!.json() as { id: string; secret: string };
-if (!webhook.secret || webhook.secret.length !== 64) throw new Error("secret should be 64 chars");
+if (!(webhook.secret.length > 0) || webhook.secret.length !== 64) throw new Error("secret should be 64 chars");
 
 // List webhooks
 const r2 = await chimpbase.executeRoute(new Request("http://test.local/_webhooks"));

@@ -272,7 +272,7 @@ export class ChimpbaseHost<TServer> {
       await this.syncCronSchedulesIfNeeded();
       return await this.engine.processNextCronSchedule();
     });
-    if (outcome) {
+    if ((outcome !== null)) {
       this.debug("cron schedule processed", {
         fireAtMs: outcome.fireAtMs,
         nextFireAtMs: outcome.nextFireAtMs,
@@ -285,7 +285,7 @@ export class ChimpbaseHost<TServer> {
 
   async processNextQueueJob(): Promise<Awaited<ReturnType<ChimpbaseEngine["processNextQueueJob"]>>> {
     const outcome = await this.runEngineOperation(async () => await this.engine.processNextQueueJob());
-    if (outcome) {
+    if ((outcome !== null)) {
       this.debug("queue job processed", {
         emittedEvents: outcome.emittedEvents.length,
         jobId: outcome.jobId,
@@ -392,7 +392,7 @@ export class ChimpbaseHost<TServer> {
     handler: ChimpbaseActionHandler<unknown, unknown>,
     definition?: { args?: ChimpbaseValidator<unknown> },
   ): ChimpbaseActionHandler<unknown, unknown> {
-    const entry = definition?.args
+    const entry = (definition?.args !== undefined)
       ? createActionEntry({
           args: definition.args,
           handler: handler as ChimpbaseObjectActionHandler<unknown, unknown>,
@@ -556,7 +556,7 @@ export class ChimpbaseHost<TServer> {
         }
 
         const outcome = await this.executeRoute(request);
-        if (!outcome.response) {
+        if (!(outcome.response !== null)) {
           return new Response("route handler not found", { status: 404 });
         }
 
@@ -572,8 +572,8 @@ export class ChimpbaseHost<TServer> {
   }
 
   async start(options: { runWorker?: boolean; serve?: boolean } = {}): Promise<StartedHost<this, TServer>> {
-    const runServe = options.serve ?? !options.runWorker;
-    const runWorker = options.runWorker ?? !options.serve;
+    const runServe = options.serve ?? !(options.runWorker === true);
+    const runWorker = options.runWorker ?? !(options.serve === true);
     const worker = runWorker ? this.startWorker() : null;
     const server = runServe ? this.serve() : null;
     this.debug("runtime starting", {
@@ -600,7 +600,7 @@ export class ChimpbaseHost<TServer> {
             console.error(`onStop hook "${hook.name}" failed:`, err);
           }
         }
-        if (server) {
+        if ((server !== null)) {
           await this.runtime.server.stop(server);
         }
         await worker?.stop();
@@ -672,11 +672,11 @@ export class ChimpbaseHost<TServer> {
             const scheduled = await lane.engine.processNextCronSchedule();
             const queueJobs = await lane.engine.processNextQueueJobs(this.getWorkerQueueBatchSize());
             return {
-              cronSchedules: scheduled ? 1 : 0,
-              idle: !scheduled && queueJobs.length === 0,
+              cronSchedules: (scheduled !== null) ? 1 : 0,
+              idle: !(scheduled !== null) && queueJobs.length === 0,
               queueJobs: queueJobs.length,
-              runs: (scheduled ? 1 : 0) + queueJobs.length,
-              stopReason: !scheduled && queueJobs.length === 0 ? "idle" : "max_runs",
+              runs: ((scheduled !== null) ? 1 : 0) + queueJobs.length,
+              stopReason: !(scheduled !== null) && queueJobs.length === 0 ? "idle" : "max_runs",
             } satisfies DrainResult;
           });
           this.debug("worker drain completed", {
@@ -798,7 +798,7 @@ export class ChimpbaseHost<TServer> {
       return;
     }
 
-    if (details && Object.keys(details).length > 0) {
+    if ((details !== undefined) && Object.keys(details).length > 0) {
       console.debug(`[${this.runtime.debugNamespace}][debug]`, message, details);
       return;
     }
@@ -811,7 +811,7 @@ export class ChimpbaseHost<TServer> {
       return;
     }
 
-    if (this.cronSyncPromise) {
+    if ((this.cronSyncPromise !== null)) {
       await this.cronSyncPromise;
       return;
     }
@@ -851,7 +851,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     platform,
     listChimpbaseMigrationsForEngine(options.app?.migrations ?? options.migrations, options.config.storage.engine),
     options.migrationSource
-      ?? (options.app
+      ?? ((options.app !== undefined)
         ? createStaticMigrationSource([])
         : createLocalMigrationSource(projectDir, options.config, options.migrationsDir ?? null)),
     options.migrationsSql ?? [],
@@ -862,7 +862,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     secretsDirDefault: runtime.env.get("CHIMPBASE_SECRETS_DIR") ?? "/run/secrets",
   });
 
-  const blobsEngineConfig: ChimpbaseBlobsEngineConfig | undefined = options.blobs
+  const blobsEngineConfig: ChimpbaseBlobsEngineConfig | undefined = (options.blobs !== undefined)
     ? { driver: options.blobs.driver, buckets: options.blobs.buckets, signer: options.blobs.signer }
     : undefined;
   const createPrimaryEngine = () => new ChimpbaseEngine({
@@ -913,7 +913,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     supportsConcurrentWorkers: storageResources.supportsConcurrentWorkers,
   });
 
-  if (options.app) {
+  if ((options.app !== undefined)) {
     applyChimpbaseApp(host, options.app);
   }
 
@@ -928,7 +928,7 @@ export function getRouteKey(request: RouteRequestLike): string {
 
 export function inferServerPort(env: ChimpbaseRuntimeEnvironment): number {
   const value = env.get("CHIMPBASE_SERVER_PORT") ?? env.get("PORT");
-  const port = value ? Number(value) : NaN;
+  const port = (value !== undefined && value.length > 0) ? Number(value) : NaN;
   return Number.isFinite(port) ? port : 3000;
 }
 
@@ -936,7 +936,7 @@ export function inferStorageEngine(
   env: ChimpbaseRuntimeEnvironment,
   options: { storage?: { engine?: "memory" | "postgres" | "sqlite"; url?: string | null } },
 ): "memory" | "postgres" | "sqlite" {
-  if (options.storage?.engine) {
+  if ((options.storage?.engine !== undefined)) {
     return options.storage.engine;
   }
 
@@ -945,7 +945,12 @@ export function inferStorageEngine(
     return "memory";
   }
 
-  if (envEngine === "postgres" || options.storage?.url || env.get("CHIMPBASE_DATABASE_URL") || env.get("DATABASE_URL")) {
+  if (
+    envEngine === "postgres"
+    || (options.storage?.url ?? "").length > 0
+    || (env.get("CHIMPBASE_DATABASE_URL") ?? "").length > 0
+    || (env.get("DATABASE_URL") ?? "").length > 0
+  ) {
     return "postgres";
   }
 
@@ -958,7 +963,7 @@ export function inferStorageEngine(
 
 export function inferNumberEnv(env: ChimpbaseRuntimeEnvironment, name: string): number | undefined {
   const value = env.get(name);
-  if (!value) {
+  if (!(value !== undefined && value.length > 0)) {
     return undefined;
   }
 
@@ -986,7 +991,7 @@ export function inferMigrationsDir(
   configuredDir: string | undefined,
   options: { migrationsSql?: string[] },
 ): string | null {
-  if (configuredDir) {
+  if ((configuredDir !== undefined && configuredDir.length > 0)) {
     return resolve(projectDir, configuredDir);
   }
 
@@ -1130,7 +1135,7 @@ function normalizeReferenceInvocationArgs(
   reference: ChimpbaseActionRegistrationLike,
   args: unknown[],
 ): unknown[] {
-  if (reference.args) {
+  if ((reference.args !== undefined)) {
     if (args.length > 1) {
       throw new Error(`action ${reference.name} expects a single argument`);
     }
@@ -1160,7 +1165,7 @@ function parseDatabaseTimestampMs(value: unknown): number | null {
 }
 
 function isTruthyEnv(value: string | undefined): boolean {
-  if (!value) {
+  if (!(value !== undefined && value.length > 0)) {
     return false;
   }
 

@@ -20,7 +20,7 @@ export async function createAdvancedApp() {
   );
 
   const otelEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-  const sinks = otelEndpoint
+  const sinks = (otelEndpoint !== undefined && otelEndpoint.length > 0)
     ? [
         createOtelSink({
           endpoint: otelEndpoint,
