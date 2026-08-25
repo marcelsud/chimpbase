@@ -9,4 +9,4 @@ chimpbase.register(todoPlugin, featurePlugin, corePlugin, anotherPlugin); await 
 console.log("plugins (todo):", JSON.stringify((await chimpbase.executeAction("createTodoPlugin", { title: "Test" })).result));
 console.log("plugins (core):", JSON.stringify((await chimpbase.executeAction("coreAction", {})).result));
 console.log("plugins (feature):", JSON.stringify((await chimpbase.executeAction("featureAction", {})).result));
-console.log("plugins: OK"); chimpbase.close(); process.exit(0);
+console.log("plugins: OK"); await chimpbase.close(); process.exit(0);

@@ -61,7 +61,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       await hostA.executeAction("enqueueRestartJob", { id: "job-after-restart" });
     } finally {
       await startedA.stop();
-      hostA.close();
+      await hostA.close();
     }
 
     const hostB = await createChimpbase({
@@ -81,7 +81,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       expect(processed).toEqual(["job-after-restart"]);
     } finally {
       await startedB.stop();
-      hostB.close();
+      await hostB.close();
     }
   });
 
@@ -134,7 +134,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       });
     } finally {
       await started.stop();
-      host.close();
+      await host.close();
     }
   });
 
@@ -186,8 +186,8 @@ describeIfPg("PostgreSQL queue durability", () => {
     } finally {
       await startedA.stop();
       await startedB.stop();
-      hostA.close();
-      hostB.close();
+      await hostA.close();
+      await hostB.close();
     }
   });
 
@@ -222,7 +222,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       );
     } finally {
       await startedA.stop();
-      hostA.close();
+      await hostA.close();
     }
 
     const hostB = await createChimpbase({
@@ -248,7 +248,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       expect(result.rows[0]).toMatchObject({ attempt_count: 2, status: "completed" });
     } finally {
       await startedB.stop();
-      hostB.close();
+      await hostB.close();
     }
   });
 
@@ -296,7 +296,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       expect(waiting.status).toBe("waiting_signal");
     } finally {
       await startedA.stop();
-      hostA.close();
+      await hostA.close();
     }
 
     const hostB = await createChimpbase({
@@ -318,7 +318,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       expect(completed.state.phase).toBe("done");
     } finally {
       await startedB.stop();
-      hostB.close();
+      await hostB.close();
       await pool.query("DELETE FROM _chimpbase_workflow_signals WHERE workflow_id = $1", [workflowId]);
       await pool.query("DELETE FROM _chimpbase_workflow_instances WHERE workflow_id = $1", [workflowId]);
     }
@@ -368,8 +368,8 @@ describeIfPg("PostgreSQL queue durability", () => {
     } finally {
       await startedA.stop();
       await startedB.stop();
-      hostA.close();
-      hostB.close();
+      await hostA.close();
+      await hostB.close();
       await pool.query("DELETE FROM _chimpbase_cron_schedules WHERE schedule_name = $1", [scheduleName]);
     }
   });

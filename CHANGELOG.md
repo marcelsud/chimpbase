@@ -7,6 +7,10 @@
 - consolidated the public API into one `chimpbase` package with portable root and runtime exports, direct feature subpaths, and explicit `runtime/bun`, `runtime/node`, and `runtime/deno` adapter subpaths
 - made every `packages/*` workspace private; scoped workspace names remain internal development aliases and build output rewrites them to public `chimpbase` subpaths
 
+### Fixed
+
+- awaited server, telemetry sink, and storage cleanup during runtime shutdown
+
 ## 0.7.0 - 2026-07-11
 
 Stabilizes the multi-runtime release and makes durable job dispatch consistent with the other context primitives.

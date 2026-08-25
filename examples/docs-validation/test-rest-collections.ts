@@ -48,4 +48,4 @@ if (r5.response?.status !== 200) throw new Error("should update note");
 const r6 = await chimpbase.executeRoute(new Request(`http://test.local/api/notes/${note.id}`, { method: "DELETE" }));
 if (r6.response?.status !== 204) throw new Error("should delete note");
 
-console.log("rest-collections: OK"); chimpbase.close(); process.exit(0);
+console.log("rest-collections: OK"); await chimpbase.close(); process.exit(0);

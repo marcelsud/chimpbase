@@ -115,7 +115,7 @@ describe("@chimpbase/rest-collections", () => {
         error: `document not found: ${created.id}`,
       });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -171,7 +171,7 @@ describe("@chimpbase/rest-collections", () => {
         error: "invalid number value: abc",
       });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -327,7 +327,7 @@ describe("@chimpbase/rest-collections", () => {
         schemaVersion: 1,
       });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });

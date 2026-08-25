@@ -6,4 +6,4 @@ const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server:
 const dailyReport = cron("reports.daily", "0 9 * * *", async (ctx, invocation) => { ctx.log.info("report", { fireAt: invocation.fireAt }); });
 class ReportsModule { @Cron("reports.weekly", "0 0 * * 1") async weekly(_ctx: ChimpbaseContext, _inv: ChimpbaseCronInvocation) {} }
 chimpbase.register(dailyReport); chimpbase.register(...registrationsFrom(new ReportsModule()));
-await chimpbase.start(); console.log("cron: OK"); chimpbase.close(); process.exit(0);
+await chimpbase.start(); console.log("cron: OK"); await chimpbase.close(); process.exit(0);

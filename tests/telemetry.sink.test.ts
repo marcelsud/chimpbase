@@ -67,7 +67,7 @@ const cleanupDirs: string[] = [];
 
 afterEach(async () => {
   while (cleanupHosts.length > 0) {
-    cleanupHosts.pop()?.close();
+    await cleanupHosts.pop()?.close();
   }
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
@@ -93,6 +93,46 @@ async function createHostWithSink(sink: ChimpbaseTelemetrySink) {
   });
   cleanupHosts.push(host);
   return host;
+}
+
+async function createHostWithCleanup(
+  sink: ChimpbaseTelemetrySink,
+  storageClose: () => void | Promise<void>,
+) {
+  const dir = await mkdtemp(join(tmpdir(), "chimpbase-shutdown-test-"));
+  cleanupDirs.push(dir);
+  await writeFile(join(dir, "package.json"), "{}");
+
+  const runtime = {
+    ...bunRuntimeShim,
+    storage: {
+      async open(...args: Parameters<typeof bunRuntimeShim.storage.open>) {
+        const resources = await bunRuntimeShim.storage.open(...args);
+        return {
+          ...resources,
+          storage: {
+            async close() {
+              try {
+                await storageClose();
+              } finally {
+                await resources.storage.close();
+              }
+            },
+          },
+        };
+      },
+    },
+  };
+
+  return await createRuntimeHost(ChimpbaseBunHost, runtime, {
+    config: normalizeProjectConfig({
+      project: { name: "shutdown-test" },
+      storage: { engine: "memory" },
+    }),
+    projectDir: dir,
+    secrets: { get: () => null },
+    sinks: [sink],
+  });
 }
 
 describe("telemetry sink interface", () => {
@@ -421,5 +461,75 @@ describe("telemetry sink interface", () => {
 
     const scopes = handlerSpanCalls.map((c) => (c.args as [{ kind: string; name: string }])[0]);
     expect(scopes.some((s) => s.kind === "action" && s.name.includes("route:"))).toBe(true);
+  });
+});
+
+describe("runtime shutdown", () => {
+  test("waits for sink and storage cleanup", async () => {
+    let releaseSink!: () => void;
+    let releaseStorage!: () => void;
+    let sinkStarted = false;
+    let storageStarted = false;
+    const sinkCleanup = new Promise<void>((resolve) => {
+      releaseSink = resolve;
+    });
+    const storageCleanup = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const sink = createMockSink().sink;
+    sink.shutdown = () => {
+      sinkStarted = true;
+      return sinkCleanup;
+    };
+    const host = await createHostWithCleanup(sink, () => {
+      storageStarted = true;
+      return storageCleanup;
+    });
+
+    let closed = false;
+    const closing = host.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(sinkStarted).toBe(true);
+    expect(storageStarted).toBe(true);
+    expect(closed).toBe(false);
+
+    releaseSink();
+    await Promise.resolve();
+    expect(closed).toBe(false);
+
+    releaseStorage();
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  test("reports sink cleanup rejection after storage settles", async () => {
+    let releaseStorage!: () => void;
+    const storageCleanup = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const sink = createMockSink().sink;
+    sink.shutdown = () => Promise.reject(new Error("sink cleanup failed"));
+    const host = await createHostWithCleanup(sink, () => storageCleanup);
+
+    let rejected = false;
+    const closing = host.close().catch((error: unknown) => {
+      rejected = true;
+      throw error;
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(rejected).toBe(false);
+
+    releaseStorage();
+    await expect(closing).rejects.toThrow("sink cleanup failed");
+  });
+
+  test("reports storage cleanup rejection", async () => {
+    const host = await createHostWithCleanup(createMockSink().sink, () => {
+      return Promise.reject(new Error("storage cleanup failed"));
+    });
+
+    await expect(host.close()).rejects.toThrow("storage cleanup failed");
   });
 });

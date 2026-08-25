@@ -53,7 +53,7 @@ describe("plugin system", () => {
       const body = await readJsonResponse<{ userId: number; userName: string }>(outcome.response);
       expect(body).toEqual({ userId: 42, userName: "Alice" });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -78,7 +78,7 @@ describe("plugin system", () => {
       expect(await readJsonResponse<{ call: number }>(r1.response)).toEqual({ call: 1 });
       expect(await readJsonResponse<{ call: number }>(r2.response)).toEqual({ call: 2 });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -94,7 +94,7 @@ describe("plugin system", () => {
       const outcome = await host.executeRoute(new Request("http://test.local/any"));
       expect(await readJsonResponse<{ value: unknown }>(outcome.response)).toEqual({ value: null });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 
@@ -216,7 +216,7 @@ describe("plugin system", () => {
       const r2 = await host.executeRoute(new Request("http://test.local/any"));
       expect(await readJsonResponse<{ ok: boolean }>(r2.response)).toEqual({ ok: true });
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });

@@ -726,11 +726,23 @@ export class ChimpbaseHost<TServer> {
     return this.engine.drainTelemetryRecords();
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.engine.stopEventBus();
-    void this.engine.shutdownSinks();
+    const [sinkResult, storageResult] = await Promise.allSettled([
+      Promise.resolve().then(() => this.engine.shutdownSinks()),
+      Promise.resolve().then(() => this.storage.close()),
+    ]);
+
+    if (sinkResult.status === "rejected" && storageResult.status === "rejected") {
+      throw new AggregateError([sinkResult.reason as unknown, storageResult.reason as unknown], "runtime cleanup failed");
+    }
+    if (sinkResult.status === "rejected") {
+      throw sinkResult.reason as unknown;
+    }
+    if (storageResult.status === "rejected") {
+      throw storageResult.reason as unknown;
+    }
     this.debug("runtime closed");
-    void this.storage.close();
   }
 
   private async runEngineOperation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {

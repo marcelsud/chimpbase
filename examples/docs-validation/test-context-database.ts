@@ -7,4 +7,4 @@ const kyselyQuery = action({ name: "kyselyQuery", args: v.object({}), async hand
 chimpbase.register({ rawQuery, kyselyQuery }); await chimpbase.start();
 const r1 = await chimpbase.executeAction("rawQuery", {}); console.log("database (raw):", JSON.stringify(r1.result));
 const r2 = await chimpbase.executeAction("kyselyQuery", {}); console.log("database (kysely):", JSON.stringify(r2.result));
-console.log("database: OK"); chimpbase.close(); process.exit(0);
+console.log("database: OK"); await chimpbase.close(); process.exit(0);

@@ -26,4 +26,4 @@ const testKv = action({ name: "testKv", args: v.object({}), async handler(ctx) {
 } });
 chimpbase.register({ testKv }); await chimpbase.start();
 const r = await chimpbase.executeAction("testKv", {}); console.log("kv:", JSON.stringify(r.result));
-console.log("kv: OK"); chimpbase.close(); process.exit(0);
+console.log("kv: OK"); await chimpbase.close(); process.exit(0);

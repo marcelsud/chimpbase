@@ -138,7 +138,7 @@ describe("pact verification", () => {
 
       expect(result.failed).toBe(0);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });
@@ -340,7 +340,7 @@ describe("inventory service pact verification", () => {
       expect(result.failed).toBe(0);
       expect(result.passed).toBe(2);
     } finally {
-      host.close();
+      await host.close();
     }
   });
 });

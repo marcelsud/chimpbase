@@ -8,4 +8,4 @@ chimpbase.register({ testKv, testCollections, testStreams }); await chimpbase.st
 const r1 = await chimpbase.executeAction("testKv", {}); console.log("state (kv):", JSON.stringify(r1.result));
 const r2 = await chimpbase.executeAction("testCollections", {}); console.log("state (collections):", JSON.stringify(r2.result));
 const r3 = await chimpbase.executeAction("testStreams", {}); console.log("state (streams):", JSON.stringify(r3.result));
-console.log("state: OK"); chimpbase.close(); process.exit(0);
+console.log("state: OK"); await chimpbase.close(); process.exit(0);

@@ -11,4 +11,4 @@ const decoRegs = registrationsFrom(new TodoModule());
 chimpbase.register({ publishEvent, onTodoCreated, auditTodoCompleted, notifyTodoCompleted }); chimpbase.register(...decoRegs);
 await chimpbase.start();
 const result = await chimpbase.executeAction("publishEvent", { title: "Test" }); console.log("subscriptions:", JSON.stringify(result.result));
-await new Promise((r) => setTimeout(r, 1000)); console.log("subscriptions: OK"); chimpbase.close(); process.exit(0);
+await new Promise((r) => setTimeout(r, 1000)); console.log("subscriptions: OK"); await chimpbase.close(); process.exit(0);

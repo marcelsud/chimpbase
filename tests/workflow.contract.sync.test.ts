@@ -177,7 +177,7 @@ async function runContractSync(
   try {
     return synced;
   } finally {
-    synced.host.close();
+    await synced.host.close();
   }
 }
 

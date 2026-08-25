@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { readJsonResponse } from "./support/http.ts";
 import {
   action,
@@ -259,5 +260,38 @@ describe("bun runtime regression — inline fixtures", () => {
     } finally {
       await started.stop();
     }
+  });
+
+  test("waits for and reports Bun server cleanup", async () => {
+    let releaseCleanup!: () => void;
+    let stopForce: boolean | undefined;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const server = {
+      stop(force?: boolean) {
+        stopForce = force;
+        return cleanup;
+      },
+    } as unknown as Bun.Server<unknown>;
+
+    let stopped = false;
+    const stopping = bunRuntimeShim.server.stop(server).then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopForce).toBe(true);
+    expect(stopped).toBe(false);
+
+    releaseCleanup();
+    await stopping;
+    expect(stopped).toBe(true);
+
+    const rejectingServer = {
+      stop() {
+        return Promise.reject(new Error("server cleanup failed"));
+      },
+    } as unknown as Bun.Server<unknown>;
+    await expect(bunRuntimeShim.server.stop(rejectingServer)).rejects.toThrow("server cleanup failed");
   });
 });

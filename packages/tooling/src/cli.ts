@@ -6,7 +6,7 @@ import type { ChimpbaseSchemaSyncResult } from "./schema.ts";
 import type { WorkflowContractSyncResult } from "./workflow_contracts.ts";
 
 interface CliHost {
-  close(): void;
+  close(): Promise<void>;
   config: {
     project: {
       name: string;
@@ -80,7 +80,7 @@ export async function runChimpbaseCli(
       writeLine(`contracts directory ${result.contractsDir}`);
       return;
     } finally {
-      host.close();
+      await host.close();
     }
   }
 
@@ -119,7 +119,7 @@ export async function runChimpbaseCli(
     writeLine(`executed action ${args.action} for project ${host.config.project.name}`);
     writeLine(JSON.stringify(outcome.result, null, 2));
     writeLine(`emitted ${outcome.emittedEvents.length} event(s)`);
-    host.close();
+    await host.close();
     return;
   }
 

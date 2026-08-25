@@ -55,4 +55,4 @@ const r6 = await chimpbase.executeRoute(new Request("http://test.local/webhooks/
 }));
 if (r6.response?.status !== 401) throw new Error("unverified inbound should be 401");
 
-console.log("webhooks: OK"); chimpbase.close(); process.exit(0);
+console.log("webhooks: OK"); await chimpbase.close(); process.exit(0);

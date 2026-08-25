@@ -10,4 +10,4 @@ class SyncModule { @Worker("deco.sync") async syncDeco(_ctx: ChimpbaseContext, _
 chimpbase.register({ syncCustomer, syncCustomerDlq, noDlqWorker, triggerSync }); chimpbase.register(...registrationsFrom(new SyncModule()));
 await chimpbase.start();
 const result = await chimpbase.executeAction("triggerSync", { customerId: 1 }); console.log("workers:", JSON.stringify(result.result));
-await new Promise((r) => setTimeout(r, 1500)); console.log("workers: OK"); chimpbase.close(); process.exit(0);
+await new Promise((r) => setTimeout(r, 1500)); console.log("workers: OK"); await chimpbase.close(); process.exit(0);

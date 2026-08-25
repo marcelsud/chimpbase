@@ -52,4 +52,4 @@ const r8 = await chimpbase.executeRoute(new Request("http://test.local/some-path
 }));
 if (r8.response?.status !== 403) throw new Error("read key should not POST");
 
-console.log("auth: OK"); chimpbase.close(); process.exit(0);
+console.log("auth: OK"); await chimpbase.close(); process.exit(0);

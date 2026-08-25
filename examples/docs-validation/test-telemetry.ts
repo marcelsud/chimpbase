@@ -29,4 +29,4 @@ const testTelemetry = action({ name: "testTelemetry", args: v.object({}), async 
 } });
 chimpbase.register({ testTelemetry }); await chimpbase.start();
 const r = await chimpbase.executeAction("testTelemetry", {}); console.log("telemetry:", JSON.stringify(r.result));
-console.log("telemetry: OK"); chimpbase.close(); process.exit(0);
+console.log("telemetry: OK"); await chimpbase.close(); process.exit(0);

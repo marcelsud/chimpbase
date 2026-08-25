@@ -10,4 +10,4 @@ console.log("telemetry (logging):", JSON.stringify((await chimpbase.executeActio
 console.log("telemetry (metrics):", JSON.stringify((await chimpbase.executeAction("testMetrics", {})).result));
 console.log("telemetry (tracing):", JSON.stringify((await chimpbase.executeAction("testTracing", {})).result));
 console.log("telemetry (per-handler):", JSON.stringify((await chimpbase.executeAction("noisyAction", { id: "test" })).result));
-console.log("telemetry: OK"); chimpbase.close(); process.exit(0);
+console.log("telemetry: OK"); await chimpbase.close(); process.exit(0);
