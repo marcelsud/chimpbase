@@ -140,27 +140,27 @@ export function hmac(options: HmacOptions): InboundVerifyFn {
 
   return async (request: Request, body: string, secret: SecretAccessor): Promise<boolean> => {
     const headerValue = request.headers.get(options.signatureHeader);
-    if (!headerValue) {
+    if (!(headerValue !== null && headerValue.length > 0)) {
       return false;
     }
 
     const secretValue = secret(options.secretName);
-    if (!secretValue) {
+    if (!(secretValue !== null && secretValue.length > 0)) {
       return false;
     }
 
     let receivedSignature: string;
     let timestamp: string | undefined;
 
-    if (options.extractSignature) {
+    if ((options.extractSignature !== undefined)) {
       const extracted = options.extractSignature(headerValue);
       receivedSignature = extracted.signature;
       timestamp = extracted.timestamp;
     } else {
-      receivedSignature = prefix ? headerValue.replace(prefix, "") : headerValue;
+      receivedSignature = (prefix.length > 0) ? headerValue.replace(prefix, "") : headerValue;
     }
 
-    const payloadToSign = options.computePayload
+    const payloadToSign = (options.computePayload !== undefined)
       ? options.computePayload(body, timestamp)
       : body;
 
@@ -176,12 +176,12 @@ export function hmac(options: HmacOptions): InboundVerifyFn {
 export function basicAuth(options: BasicAuthOptions): InboundVerifyFn {
   return (_request: Request, _body: string, secret: SecretAccessor): boolean => {
     const authorization = _request.headers.get("authorization");
-    if (!authorization) {
+    if (!(authorization !== null && authorization.length > 0)) {
       return false;
     }
 
     const match = /^Basic\s+(.+)$/i.exec(authorization);
-    if (!match) {
+    if (!(match !== null)) {
       return false;
     }
 
@@ -201,7 +201,7 @@ export function basicAuth(options: BasicAuthOptions): InboundVerifyFn {
     const password = decoded.substring(colonIndex + 1);
 
     const expectedPassword = secret(options.passwordSecretName);
-    if (!expectedPassword) {
+    if (!(expectedPassword !== null && expectedPassword.length > 0)) {
       return false;
     }
 
@@ -217,14 +217,14 @@ export function bearerToken(options: BearerTokenOptions): InboundVerifyFn {
 
   return (_request: Request, _body: string, secret: SecretAccessor): boolean => {
     const headerValue = _request.headers.get(headerName);
-    if (!headerValue) {
+    if (!(headerValue !== null && headerValue.length > 0)) {
       return false;
     }
 
     let token: string;
     if (headerName.toLowerCase() === "authorization") {
       const match = /^Bearer\s+(.+)$/i.exec(headerValue);
-      if (!match) {
+      if (!(match !== null)) {
         return false;
       }
       token = match[1]!;
@@ -233,7 +233,7 @@ export function bearerToken(options: BearerTokenOptions): InboundVerifyFn {
     }
 
     const expectedToken = secret(options.secretName);
-    if (!expectedToken) {
+    if (!(expectedToken !== null && expectedToken.length > 0)) {
       return false;
     }
 
@@ -247,12 +247,12 @@ export function bearerToken(options: BearerTokenOptions): InboundVerifyFn {
 export function headerToken(options: HeaderTokenOptions): InboundVerifyFn {
   return (_request: Request, _body: string, secret: SecretAccessor): boolean => {
     const headerValue = _request.headers.get(options.header);
-    if (!headerValue) {
+    if (!(headerValue !== null && headerValue.length > 0)) {
       return false;
     }
 
     const expectedToken = secret(options.secretName);
-    if (!expectedToken) {
+    if (!(expectedToken !== null && expectedToken.length > 0)) {
       return false;
     }
 
@@ -337,11 +337,12 @@ function parseEvents(events: string): string[] {
 
 function normalizePath(path: string): string {
   const trimmed = path.trim();
-  if (!trimmed || trimmed === "/") {
+  if (!(trimmed.length > 0) || trimmed === "/") {
     return "/";
   }
   const withLeading = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return withLeading.replace(/\/+$/g, "") || "/";
+  const normalized = withLeading.replace(/\/+$/g, "");
+  return normalized.length > 0 ? normalized : "/";
 }
 
 function splitPath(path: string): string[] {
@@ -360,7 +361,7 @@ async function parseJsonBody(request: Request): Promise<Record<string, unknown>>
     throw new WebhooksRequestError(400, "request body must be valid JSON");
   }
 
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
+  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
     throw new WebhooksRequestError(400, "request body must be a JSON object");
   }
 
@@ -390,7 +391,7 @@ export function chimpbaseWebhooks(
 
   // ── Inbound webhook routes ──────────────────────────────────────────────
 
-  if (options.inbound) {
+  if ((options.inbound !== undefined)) {
     for (const [sourceName, definition] of Object.entries(options.inbound)) {
       const inboundSegments = splitPath(definition.path);
 
@@ -427,7 +428,7 @@ export function chimpbaseWebhooks(
           }
 
           let dedupKey: string | null = null;
-          if (definition.deduplicationKey) {
+          if ((definition.deduplicationKey !== undefined)) {
             dedupKey = await definition.deduplicationKey(request, body);
           }
 
@@ -453,10 +454,10 @@ export function chimpbaseWebhooks(
         action(
           `__chimpbase.webhooks.inbound.accept.${sourceName}`,
           async (ctx, payload: unknown, dedupKey: string | null) => {
-            if (dedupKey) {
+            if ((dedupKey !== null && dedupKey.length > 0)) {
               const kvKey = `__chimpbase.webhooks.dedup:${sourceName}:${dedupKey}`;
               const existing = await ctx.kv.get(kvKey);
-              if (existing) {
+              if ((existing !== null)) {
                 ctx.log.info("inbound webhook deduplicated", {
                   source: sourceName,
                   dedupKey,
@@ -525,7 +526,7 @@ export function chimpbaseWebhooks(
   entries.push(
     action("__chimpbase.webhooks.get", async (ctx, id: string) => {
       const record = await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, { id });
-      if (!record) {
+      if (!(record !== null)) {
         return null;
       }
       return {
@@ -544,7 +545,7 @@ export function chimpbaseWebhooks(
   entries.push(
     action("__chimpbase.webhooks.update", async (ctx, input: { id: string; url?: string; events?: string[]; active?: boolean; label?: string }) => {
       const existing = await ctx.collection.findOne<WebhookRegistration>(REGISTRATIONS_COLLECTION, { id: input.id });
-      if (!existing) {
+      if (!(existing !== null)) {
         return null;
       }
 
@@ -581,7 +582,7 @@ export function chimpbaseWebhooks(
           id: input.webhookId,
         });
 
-        if (!webhook || !webhook.active) {
+        if (!(webhook !== null) || !webhook.active) {
           ctx.log.warn("webhook not found or inactive, skipping delivery", {
             webhookId: input.webhookId,
             deliveryId: input.deliveryId,
@@ -800,7 +801,7 @@ export function chimpbaseWebhooks(
 
   // ── Build plugin ──────────────────────────────────────────────────────────
 
-  if (options.dependsOn || options.name) {
+  if (options.dependsOn !== undefined || (options.name ?? "").length > 0) {
     return plugin(
       {
         dependsOn: options.dependsOn,
@@ -831,7 +832,7 @@ function matchPrefixWithId(actual: string[], prefix: string[]): boolean {
 
 function requireString(body: Record<string, unknown>, field: string): string {
   const value = body[field];
-  if (typeof value !== "string" || !value) {
+  if (typeof value !== "string" || !(value.length > 0)) {
     throw new WebhooksRequestError(400, `"${field}" is required and must be a non-empty string`);
   }
   return value;

@@ -26,7 +26,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
       "SELECT MAX(id) AS max_id FROM _chimpbase_events",
     );
     const maxId = result.rows[0]?.max_id;
-    if (maxId) {
+    if ((maxId !== null && maxId.length > 0)) {
       this.lastSeenId = Math.max(this.lastSeenId, Number(maxId));
     }
   }
@@ -40,7 +40,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
   }
 
   stop(): void {
-    if (this.interval) {
+    if ((this.interval !== null)) {
       clearInterval(this.interval);
       this.interval = null;
     }
@@ -52,7 +52,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
         "SELECT MAX(id) AS max_id FROM _chimpbase_events",
       );
       const maxId = result.rows[0]?.max_id;
-      this.lastSeenId = maxId ? Number(maxId) : 0;
+      this.lastSeenId = (maxId !== null && maxId.length > 0) ? Number(maxId) : 0;
     } catch (error) {
       console.error("[@chimpbase/postgres][event-bus] failed to initialize high-water mark", error);
     }

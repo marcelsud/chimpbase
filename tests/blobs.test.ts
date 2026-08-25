@@ -16,7 +16,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) await rm(dir, { recursive: true, force: true });
+    if ((dir !== undefined && dir.length > 0)) await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -27,7 +27,7 @@ async function bootBlobsHost(options: {
   clock?: () => number;
   baseUrl?: string;
 } = {}) {
-  const driver = options.useFs
+  const driver = (options.useFs === true)
     ? fsBlobDriver({ root: options.root! })
     : memoryBlobDriver();
 
@@ -48,7 +48,7 @@ async function bootBlobsHost(options: {
     args: v.object({ bucket: v.string(), key: v.string() }),
     async handler(ctx, input) {
       const obj = await ctx.blobs.get(input.bucket, input.key);
-      if (!obj) return null;
+      if (!(obj !== null)) return null;
       const text = await new Response(obj.body).text();
       return { text, size: obj.size, etag: obj.etag, metadata: obj.metadata };
     },
@@ -130,7 +130,7 @@ async function bootBlobsHost(options: {
       const obj = await ctx.blobs.get(input.bucket, input.key, {
         range: { start: input.start, end: input.end },
       });
-      if (!obj) return null;
+      if (!(obj !== null)) return null;
       return { text: await new Response(obj.body).text(), size: obj.size };
     },
   });
@@ -181,9 +181,9 @@ async function bootBlobsHost(options: {
     },
   });
 
-  const started = await host.start(options.serve ? {} : { serve: false, runWorker: false });
+  const started = await host.start((options.serve === true) ? {} : { serve: false, runWorker: false });
   const port = started.server?.port;
-  const serverBaseUrl = port ? `http://127.0.0.1:${port}` : null;
+  const serverBaseUrl = (port !== undefined && port > 0) ? `http://127.0.0.1:${port}` : null;
   return { host, started, plugin, baseUrl: serverBaseUrl };
 }
 

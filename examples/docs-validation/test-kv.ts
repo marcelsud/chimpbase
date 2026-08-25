@@ -10,7 +10,7 @@ const testKv = action({ name: "testKv", args: v.object({}), async handler(ctx) {
   // Set with TTL
   await ctx.kv.set("session:abc", { userId: 42 }, { ttlMs: 3_600_000 });
   const session = await ctx.kv.get<{ userId: number }>("session:abc");
-  if (!session || session.userId !== 42) throw new Error("TTL key should be readable");
+  if (!(session !== null) || session.userId !== 42) throw new Error("TTL key should be readable");
 
   // List with prefix
   await ctx.kv.set("workspace.language", "en");

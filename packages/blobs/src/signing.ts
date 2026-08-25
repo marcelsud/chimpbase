@@ -47,7 +47,7 @@ export function createBlobSigner(options: CreateBlobSignerOptions): ChimpbaseBlo
   const { secret, baseUrl } = options;
   const routeBasePath = options.routeBasePath ?? "/_blobs";
   const clock = options.clock ?? (() => Date.now());
-  if (!secret) throw new Error("createBlobSigner requires secret");
+  if (!(secret.length > 0)) throw new Error("createBlobSigner requires secret");
 
   const sign = (input: ChimpbaseBlobSignOptions): string => {
     const payload: SignedTokenPayload = {
@@ -70,7 +70,7 @@ export function createBlobSigner(options: CreateBlobSignerOptions): ChimpbaseBlo
 
   const verify = (token: string): SignedTokenPayload | null => {
     const [encoded, signature] = token.split(".");
-    if (!encoded || !signature) return null;
+    if (!(encoded.length > 0) || !(signature.length > 0)) return null;
     const expected = createHmac("sha256", secret).update(encoded).digest();
     const received = base64UrlDecode(signature);
     if (expected.length !== received.length) return null;

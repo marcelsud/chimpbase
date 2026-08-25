@@ -12,7 +12,7 @@ import {
 } from "../packages/runtime/index.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
-const describeIfPg = PG_URL ? describe : describe.skip;
+const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
 
 function uniqueName(label: string): string {
   return `stability.${label}.${Date.now()}.${Math.floor(Math.random() * 1e6)}`;

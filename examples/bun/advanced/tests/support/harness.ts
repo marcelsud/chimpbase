@@ -23,7 +23,7 @@ export async function bootAdvanced(): Promise<{
   });
   const started = await host.start();
   const port = started.server?.port;
-  if (!port) throw new Error("server failed to bind a port");
+  if (!(port !== undefined && port > 0)) throw new Error("server failed to bind a port");
   return { host, started, baseUrl: `http://127.0.0.1:${port}` };
 }
 

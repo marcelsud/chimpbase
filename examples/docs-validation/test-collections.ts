@@ -4,7 +4,7 @@ const chimpbase = await createChimpbase({ storage: { engine: "memory" }, server:
 const testCollections = action({ name: "testCollections", args: v.object({}), async handler(ctx) {
   // Insert
   const id = await ctx.collection.insert("notes", { body: "First note", todoId: 42, createdAt: new Date().toISOString() });
-  if (!id) throw new Error("insert should return id");
+  if (!(id.length > 0)) throw new Error("insert should return id");
 
   // Find with filter
   const notes = await ctx.collection.find("notes", { todoId: 42 });
@@ -16,7 +16,7 @@ const testCollections = action({ name: "testCollections", args: v.object({}), as
 
   // Find one
   const note = await ctx.collection.findOne("notes", { id });
-  if (!note) throw new Error("findOne should return the note");
+  if (!(note !== null)) throw new Error("findOne should return the note");
 
   // Update
   const updated = await ctx.collection.update("notes", { id }, { body: "Updated note" });

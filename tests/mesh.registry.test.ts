@@ -11,7 +11,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) {
+    if ((dir !== undefined && dir.length > 0)) {
       await rm(dir, { recursive: true, force: true });
     }
   }
@@ -71,7 +71,7 @@ describe("@chimpbase/mesh registry", () => {
         },
         actions: {
           emitPaid: async (ctx) => {
-            if (!ctx.mesh) throw new Error("mesh missing");
+            if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
             await ctx.mesh.emit("order.paid", { id: "o1" }, { balanced: true });
           },
         },
@@ -105,7 +105,7 @@ describe("@chimpbase/mesh registry", () => {
         },
         actions: {
           publish: async (ctx, args: { title: string }) => {
-            if (!ctx.mesh) throw new Error("mesh missing");
+            if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
             await ctx.mesh.emit("news.published", args);
           },
         },

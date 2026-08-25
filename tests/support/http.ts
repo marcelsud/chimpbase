@@ -5,7 +5,7 @@
  * actual payload drift from what a test claims to assert on.
  */
 export async function readJsonResponse<TBody = unknown>(response: Response | null | undefined): Promise<TBody> {
-  if (!response) {
+  if (!(response !== null && response !== undefined)) {
     throw new Error("expected the route to produce a response");
   }
 

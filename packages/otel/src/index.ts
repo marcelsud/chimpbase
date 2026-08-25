@@ -96,7 +96,7 @@ export function createOtelSink(
     new BatchSpanProcessor(
       options.traceExporter ??
         new OTLPTraceExporter(
-          options.endpoint
+          (options.endpoint !== undefined && options.endpoint.length > 0)
             ? { url: `${options.endpoint}/v1/traces` }
             : undefined,
         ),
@@ -111,7 +111,7 @@ export function createOtelSink(
   const metricExporter =
     options.metricExporter ??
     new OTLPMetricExporter(
-      options.endpoint
+      (options.endpoint !== undefined && options.endpoint.length > 0)
         ? { url: `${options.endpoint}/v1/metrics` }
         : undefined,
     );
@@ -126,7 +126,7 @@ export function createOtelSink(
   const logExporter =
     options.logExporter ??
     new OTLPLogExporter(
-      options.endpoint
+      (options.endpoint !== undefined && options.endpoint.length > 0)
         ? { url: `${options.endpoint}/v1/logs` }
         : undefined,
     );
@@ -170,7 +170,7 @@ export function createOtelSink(
 
     onMetric(scope, name, value, labels) {
       let counter = counters.get(name);
-      if (!counter) {
+      if (!(counter !== undefined)) {
         counter = meter.createCounter(name);
         counters.set(name, counter);
       }

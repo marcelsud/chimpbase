@@ -36,9 +36,9 @@ const r5 = await chimpbase.executeRoute(new Request(`http://test.local/_auth/use
 }));
 if (r5.response?.status !== 201) throw new Error("should create key");
 const keyData = await r5.response!.json() as Record<string, unknown>;
-if (!keyData.key || (keyData.key as string).length !== 64) throw new Error("key should be 64 chars");
+if (!(typeof keyData.key === "string" && keyData.key.length > 0) || (keyData.key as string).length !== 64) throw new Error("key should be 64 chars");
 const scopes = keyData.scopes as string[] | undefined;
-if (!scopes || scopes[0] !== "read") throw new Error(`scopes should be [read,write], got: ${JSON.stringify(scopes)}`);
+if (!(scopes !== undefined) || scopes[0] !== "read") throw new Error(`scopes should be [read,write], got: ${JSON.stringify(scopes)}`);
 
 // Auth with generated key
 const r6 = await chimpbase.executeRoute(new Request("http://test.local/some-path", { headers: { "x-api-key": keyData.key as string } }));

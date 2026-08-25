@@ -20,7 +20,7 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (value) {
+      if ((value !== null && value !== undefined)) {
         chunks.push(value);
         total += value.byteLength;
       }
@@ -51,7 +51,7 @@ function streamFrom(bytes: Uint8Array): ReadableStream<Uint8Array> {
 }
 
 function sliceRange(bytes: Uint8Array, range?: ChimpbaseBlobDriverRange): Uint8Array {
-  if (!range) return bytes;
+  if (!(range !== undefined)) return bytes;
   const start = Math.max(0, Math.floor(range.start));
   const endExclusive = range.end === undefined ? bytes.byteLength : Math.min(bytes.byteLength, Math.floor(range.end) + 1);
   if (endExclusive <= start) return new Uint8Array(0);
@@ -75,7 +75,7 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     },
     async get(bucket, key_, _driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
       const record = blobs.get(key(bucket, key_));
-      if (!record) return null;
+      if (!(record !== undefined)) return null;
       const slice = sliceRange(record.bytes, range);
       return { body: streamFrom(slice), size: slice.byteLength };
     },
@@ -84,7 +84,7 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     },
     async copy(src, dst): Promise<ChimpbaseBlobDriverPutResult> {
       const record = blobs.get(key(src.bucket, src.key));
-      if (!record) {
+      if (!(record !== undefined)) {
         throw new Error(`memory driver copy missing source ${src.bucket}/${src.key}`);
       }
       const clone = new Uint8Array(record.bytes);
@@ -101,13 +101,13 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     },
     async assemble(uploadId, parts, finalBucket, finalKey) {
       const staged = uploads.get(uploadId);
-      if (!staged) throw new Error(`memory driver assemble missing upload ${uploadId}`);
+      if (!(staged !== undefined)) throw new Error(`memory driver assemble missing upload ${uploadId}`);
       const ordered = parts.slice().sort((a, b) => a.partNumber - b.partNumber);
       const buffers: Uint8Array[] = [];
       let total = 0;
       for (const part of ordered) {
         const record = staged.get(part.partNumber);
-        if (!record) throw new Error(`memory driver assemble missing part ${part.partNumber}`);
+        if (!(record !== undefined)) throw new Error(`memory driver assemble missing part ${part.partNumber}`);
         buffers.push(record.bytes);
         total += record.bytes.byteLength;
       }

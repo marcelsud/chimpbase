@@ -1209,11 +1209,11 @@ export function contextExtension<TActions extends ChimpbaseActionMap = Chimpbase
     routeEnv?: ChimpbaseRouteEnvExtensionFactory<TActions>;
   },
 ): ChimpbaseContextExtensionRegistration<TActions> {
-  if (!key) {
+  if (!(key.length > 0)) {
     throw new Error("context extension key cannot be empty");
   }
 
-  if (!factories.context && !factories.routeEnv) {
+  if (!(factories.context !== undefined) && !(factories.routeEnv !== undefined)) {
     throw new Error(`context extension "${key}" must provide at least one of context or routeEnv`);
   }
 
@@ -1361,7 +1361,7 @@ export function versionWorkflow<TInput = unknown, TState = unknown>(
 ): ChimpbaseVersionedWorkflow<TInput, TState> {
   const nextContract = buildWorkflowContractDraft(draft);
 
-  if (!previous) {
+  if (!(previous !== null && previous !== undefined)) {
     const contract = {
       ...nextContract,
       version: 1,
@@ -1484,7 +1484,7 @@ export function register(
         const actionName = resolveActionRegistrationName(entry);
         target.bindActionInvoker?.(entry);
         const actionHandler = entry.handler as ChimpbaseTupleActionHandler<unknown[], unknown>;
-        if (entry.args) {
+        if ((entry.args !== undefined)) {
           target.registerAction(actionName, entry.handler as ChimpbaseObjectActionHandler<unknown, unknown>, {
             args: entry.args,
           });
@@ -1517,7 +1517,7 @@ export function register(
         target.registerSubscription(
           entry.eventName,
           entry.handler as ChimpbaseSubscriptionHandler,
-          entry.idempotent
+          (entry.idempotent === true)
             ? { idempotent: true, name: entry.name }
             : { idempotent: entry.idempotent, name: entry.name },
         );
@@ -1714,7 +1714,7 @@ function resolvePluginDependency(
   }
 
   const resolved = state.pluginsByName.get(dependency);
-  if (!resolved) {
+  if (!(resolved !== undefined)) {
     throw new Error(
       `missing plugin dependency: ${formatPluginRegistrationName(pluginRegistration)} -> ${dependency}`,
     );
@@ -1746,7 +1746,7 @@ function registerPluginRegistrationName(
   }
 
   const existing = state.pluginsByName.get(value.name);
-  if (existing && existing !== value) {
+  if ((existing !== undefined) && existing !== value) {
     throw new Error(`duplicate plugin name: ${value.name}`);
   }
 
@@ -1958,7 +1958,7 @@ function createValidator<TValue>(
   options: ChimpbaseValidatorFactoryOptions<TValue>,
 ): ChimpbaseValidator<TValue> {
   const validator: ChimpbaseValidator<TValue> = {
-    ...(options.isOptional ? { isOptional: true as const } : {}),
+    ...((options.isOptional === true) ? { isOptional: true as const } : {}),
     schema: options.schema,
     array() {
       return createValidator<TValue[]>({
@@ -2263,7 +2263,7 @@ export function parseStringRecord(text: string, label = "value"): Record<string,
 
 export function isChimpbaseActionRegistration(value: unknown): value is ChimpbaseActionRegistrationLike {
   return Boolean(
-    value
+    (value !== null && value !== undefined)
       && (typeof value === "object" || typeof value === "function")
       && (value as { kind?: unknown }).kind === "action"
       && typeof (value as { name?: unknown }).name === "string"
@@ -2277,7 +2277,7 @@ function isDecoratorMethod(value: unknown): value is ChimpbaseDecoratorMethod {
 
 function isChimpbasePluginRegistration(value: unknown): value is ChimpbasePluginRegistration {
   return Boolean(
-    value
+    (value !== null && value !== undefined)
       && typeof value === "object"
       && (value as { kind?: unknown }).kind === "plugin"
       && typeof (value as { name?: unknown }).name === "string"
@@ -2287,7 +2287,7 @@ function isChimpbasePluginRegistration(value: unknown): value is ChimpbasePlugin
 
 function isChimpbaseRegistration(value: unknown): value is ChimpbaseRegistration {
   return Boolean(
-    value
+    (value !== null && value !== undefined)
       && (typeof value === "object" || typeof value === "function")
       && (
         (value as { kind?: unknown }).kind === "action"
@@ -2305,7 +2305,7 @@ function isChimpbaseRegistration(value: unknown): value is ChimpbaseRegistration
 }
 
 function isChimpbasePluginOptions(value: unknown): value is ChimpbasePluginOptions {
-  if (!value || typeof value !== "object" || isArrayValue(value) || "kind" in (value as object)) {
+  if (!(value !== null && value !== undefined) || typeof value !== "object" || isArrayValue(value) || "kind" in (value as object)) {
     return false;
   }
 
@@ -2325,7 +2325,7 @@ export function setChimpbaseActionRegistrationName(
   value: ChimpbaseActionRegistrationLike,
   name: string,
 ): void {
-  if (!name) {
+  if (!(name.length > 0)) {
     throw new Error("action registration name cannot be empty");
   }
 
@@ -2342,7 +2342,7 @@ function setChimpbasePluginRegistrationName(
   value: ChimpbasePluginRegistration,
   name: string,
 ): void {
-  if (!name) {
+  if (!(name.length > 0)) {
     throw new Error("plugin registration name cannot be empty");
   }
 
@@ -2360,7 +2360,7 @@ function getActionInvokerStorage(): AsyncLocalStorage<ChimpbaseActionInvoker> {
     [ACTION_INVOKER_STORAGE_KEY]?: AsyncLocalStorage<ChimpbaseActionInvoker>;
   };
 
-  if (!runtimeGlobals[ACTION_INVOKER_STORAGE_KEY]) {
+  if (!(runtimeGlobals[ACTION_INVOKER_STORAGE_KEY] !== undefined)) {
     runtimeGlobals[ACTION_INVOKER_STORAGE_KEY] = new AsyncLocalStorage<ChimpbaseActionInvoker>();
   }
 
@@ -2372,7 +2372,7 @@ function getBoundActionInvokers(): WeakMap<ChimpbaseActionRegistrationLike, Chim
     [ACTION_REFERENCE_INVOKERS_KEY]?: WeakMap<ChimpbaseActionRegistrationLike, ChimpbaseActionInvoker>;
   };
 
-  if (!runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY]) {
+  if (!(runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY] !== undefined)) {
     runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY] = new WeakMap();
   }
 
@@ -2394,7 +2394,7 @@ function createActionRegistration<
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions> {
   const callable = (async (...args: ChimpbaseActionCallArgs<TArgs>): Promise<TResult> => {
     const invoker = actionInvokerStorage.getStore() ?? getBoundActionInvokers().get(callable);
-    if (!invoker) {
+    if (!(invoker !== undefined)) {
       const actionName = formatActionRegistrationName(registration.name);
       throw new Error(
         `action ${actionName} requires an active chimpbase runtime context or a registered host binding; use ctx.action(${actionName}, ...) or host.executeAction(${actionName}, ...)`,
@@ -2432,7 +2432,7 @@ function resolveActionRegistrationName(
 }
 
 function formatActionRegistrationName(name: string | undefined): string {
-  return name && name.length > 0 ? name : "<unnamed action>";
+  return (name !== undefined && name.length > 0) && name.length > 0 ? name : "<unnamed action>";
 }
 
 function formatPluginRegistrationName(registration: ChimpbasePluginRegistration): string {
@@ -2594,7 +2594,7 @@ function compareWorkflowSteps(
     }
 
     const nextStep = next.find((candidate) => candidate.id === step.id);
-    if (!nextStep || nextStep.kind !== step.kind || nextStep.action !== step.action || nextStep.signal !== step.signal) {
+    if (!(nextStep !== undefined) || nextStep.kind !== step.kind || nextStep.action !== step.action || nextStep.signal !== step.signal) {
       return "breaking";
     }
   }
@@ -2691,8 +2691,8 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
       }
     }
 
-    if ((previous.type === "object" || previous.properties || previous.required)
-      && (next.type === "object" || next.properties || next.required)) {
+    if ((previous.type === "object" || Boolean(previous.properties) || Boolean(previous.required))
+      && (next.type === "object" || Boolean(next.properties) || Boolean(next.required))) {
       const previousProperties = isPlainObject(previous.properties) ? previous.properties : {};
       const nextProperties = isPlainObject(next.properties) ? next.properties : {};
       const previousRequired = new Set(isArrayValue(previous.required) ? previous.required : []);
@@ -2774,7 +2774,7 @@ function sortSerializableValue(value: unknown): unknown {
     return value.map((entry) => sortSerializableValue(entry));
   }
 
-  if (!value || typeof value !== "object") {
+  if (!(value !== null && value !== undefined) || typeof value !== "object") {
     return value;
   }
 
@@ -2787,7 +2787,7 @@ function sortSerializableValue(value: unknown): unknown {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !isArrayValue(value));
+  return Boolean((value !== null && value !== undefined) && typeof value === "object" && !isArrayValue(value));
 }
 
 function hasWorkflowSteps<TInput = unknown, TState = unknown>(
@@ -2816,7 +2816,7 @@ function collectLegacyDecoratedEntries(
   key: ChimpbaseDecoratedOwner | null,
   owner: object,
 ): ChimpbaseAnyRegistration[] {
-  if (!key) {
+  if (!(key !== null)) {
     return [];
   }
 

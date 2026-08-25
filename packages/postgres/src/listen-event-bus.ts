@@ -73,13 +73,13 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
   stop(): void {
     this.callback = null;
 
-    if (this.client && this.notificationHandler) {
+    if (this.client !== null && this.notificationHandler !== null) {
       this.client.removeListener("notification", this.notificationHandler);
     }
 
     this.notificationHandler = null;
 
-    if (this.client) {
+    if ((this.client !== null)) {
       const client = this.client;
       this.client = null;
       void (async () => {
@@ -98,7 +98,7 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
       this.client = client;
 
       const handler = (msg: { channel: string; payload?: string }) => {
-        if (msg.channel !== this.channel || !msg.payload) return;
+        if (msg.channel !== this.channel || !(msg.payload !== undefined && msg.payload.length > 0)) return;
         void this.dispatch(msg.payload);
       };
 
@@ -112,7 +112,7 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
 
   private async dispatch(payload: string): Promise<void> {
     const callback = this.callback;
-    if (!callback) return;
+    if (!(callback !== null)) return;
 
     let envelope: NotifyEnvelope;
     try {

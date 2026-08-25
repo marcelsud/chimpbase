@@ -88,8 +88,8 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
         throw error;
       }
       const total = statResult.size;
-      const start = range ? Math.max(0, Math.floor(range.start)) : 0;
-      const endExclusive = range && range.end !== undefined
+      const start = (range !== undefined) ? Math.max(0, Math.floor(range.start)) : 0;
+      const endExclusive = (range !== undefined) && range.end !== undefined
         ? Math.min(total, Math.floor(range.end) + 1)
         : total;
       if (endExclusive <= start) {

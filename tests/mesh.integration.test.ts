@@ -5,7 +5,7 @@ import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
-const describeIfPg = PG_URL ? describe : describe.skip;
+const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
 
 function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {

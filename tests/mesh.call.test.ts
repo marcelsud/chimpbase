@@ -16,7 +16,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) {
+    if ((dir !== undefined && dir.length > 0)) {
       await rm(dir, { recursive: true, force: true });
     }
   }
@@ -41,7 +41,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         name: "router",
         actions: {
           tryCall: async (ctx) => {
-            if (!ctx.mesh) throw new Error("mesh missing");
+            if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
             return await ctx.mesh.call<string>("v1.missing.thing", {}, {
               fallback: (error) => {
                 captured = error;
@@ -83,7 +83,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
         actions: {
           add: async (_ctx, args: { a: number; b: number }) => args.a + args.b,
           run: async (ctx) => {
-            if (!ctx.mesh) throw new Error("mesh missing");
+            if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
             return await ctx.mesh.call<number>("v1.calc.add", { a: 2, b: 3 });
           },
         },
@@ -123,7 +123,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
             return "ok";
           },
           run: async (ctx) => {
-            if (!ctx.mesh) throw new Error("mesh missing");
+            if (!(ctx.mesh !== undefined)) throw new Error("mesh missing");
             return await ctx.mesh.call<string>("v1.flaky.flaky", {}, {
               retry: { attempts: 3, delayMs: 1 },
             });

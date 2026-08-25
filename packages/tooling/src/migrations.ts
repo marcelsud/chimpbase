@@ -25,7 +25,7 @@ export async function resolveLocalMigrationsDir(
   migrationsDir: string | null,
   engine: ChimpbaseProjectConfig["storage"]["engine"],
 ): Promise<string | null> {
-  if (!migrationsDir) {
+  if (!(migrationsDir !== null && migrationsDir.length > 0)) {
     return null;
   }
 
@@ -45,7 +45,7 @@ export async function resolvePostgresMigrationsDir(projectDir: string): Promise<
 }
 
 export async function readSqlMigrations(migrationsDir: string | null): Promise<SqlMigration[]> {
-  if (!migrationsDir) {
+  if (!(migrationsDir !== null && migrationsDir.length > 0)) {
     return [];
   }
 
@@ -74,7 +74,7 @@ export async function loadProjectMigrations(
   options: { migrationsDir?: string | null } = {},
 ): Promise<SqlMigration[]> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (app) {
+  if ((app !== null)) {
     const appMigrations = [...listChimpbaseMigrationsForEngine(app.migrations, engine)];
     if (appMigrations.length > 0) {
       return appMigrations;
@@ -82,7 +82,7 @@ export async function loadProjectMigrations(
   }
 
   const definedMigrations = await loadProjectMigrationsDefinition(projectDir);
-  if (definedMigrations) {
+  if ((definedMigrations !== null)) {
     return [...listChimpbaseMigrationsForEngine(definedMigrations, engine)];
   }
 
@@ -97,7 +97,7 @@ export async function loadProjectPostgresMigrations(
   options: { migrationsDir?: string | null } = {},
 ): Promise<SqlMigration[]> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (app) {
+  if ((app !== null)) {
     const appMigrations = [...app.migrations.postgres];
     if (appMigrations.length > 0) {
       return appMigrations;
@@ -105,11 +105,11 @@ export async function loadProjectPostgresMigrations(
   }
 
   const definedMigrations = await loadProjectMigrationsDefinition(projectDir);
-  if (definedMigrations) {
+  if ((definedMigrations !== null)) {
     return [...definedMigrations.postgres];
   }
 
-  if (options.migrationsDir) {
+  if ((options.migrationsDir !== null && options.migrationsDir !== undefined && options.migrationsDir.length > 0)) {
     return await readSqlMigrations(await resolveLocalMigrationsDir(options.migrationsDir, "postgres"));
   }
 
@@ -120,7 +120,7 @@ export async function loadProjectMigrationsDefinition(
   projectDir: string,
 ): Promise<ChimpbaseMigrationsDefinition | null> {
   const modulePath = await resolveProjectMigrationsModulePath(projectDir);
-  if (!modulePath) {
+  if (!(modulePath !== null && modulePath.length > 0)) {
     return null;
   }
 
@@ -159,7 +159,7 @@ function coerceProjectMigrationsDefinition(
   modulePath: string,
 ): ChimpbaseMigrationsDefinition {
   const candidate = moduleExports.default ?? moduleExports.migrations;
-  if (!candidate || typeof candidate !== "object") {
+  if (!(candidate !== null && candidate !== undefined) || typeof candidate !== "object") {
     throw new Error(`project migrations module must export a default object or named "migrations": ${modulePath}`);
   }
 
@@ -192,7 +192,7 @@ function coerceMigration(
   engine: "postgres" | "sqlite",
   index: number,
 ): SqlMigration {
-  if (!value || typeof value !== "object") {
+  if (!(value !== null && value !== undefined) || typeof value !== "object") {
     throw new Error(`project migration ${engine}[${index}] must be an object: ${modulePath}`);
   }
 

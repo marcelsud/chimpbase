@@ -22,7 +22,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) await rm(dir, { recursive: true, force: true });
+    if ((dir !== undefined && dir.length > 0)) await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -179,7 +179,7 @@ async function bootInlineApp(overrides?: {
 
   const started = await host.start();
   const port = started.server?.port;
-  if (!port) throw new Error("server failed to bind a port");
+  if (!(port !== undefined && port > 0)) throw new Error("server failed to bind a port");
   return { host, started, baseUrl: `http://127.0.0.1:${port}` };
 }
 

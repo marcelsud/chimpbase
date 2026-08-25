@@ -11,7 +11,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) {
+    if ((dir !== undefined && dir.length > 0)) {
       await rm(dir, { recursive: true, force: true });
     }
   }
@@ -126,7 +126,7 @@ describe("@chimpbase/mesh service()", () => {
           add: async (_ctx, args: { a: number; b: number }) => args.a + args.b,
           double: async (ctx, args: { n: number }) => {
             const mesh = ctx.mesh;
-            if (!mesh) throw new Error("mesh missing");
+            if (!(mesh !== undefined)) throw new Error("mesh missing");
             const sum = await mesh.call<number>("v1.calc.add", { a: args.n, b: args.n });
             return sum;
           },

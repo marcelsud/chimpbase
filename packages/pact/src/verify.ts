@@ -107,7 +107,7 @@ async function setupStates(
 ): Promise<{ failure: PactVerificationFailure } | null> {
   for (const state of stateNames) {
     const handler = stateHandlers[state];
-    if (!handler) {
+    if (!(handler !== null && handler !== undefined)) {
       return { failure: { kind: "missing_state", state } };
     }
 
@@ -123,11 +123,11 @@ async function verifyActionInteraction(
   states: Record<string, PactStateSetupFn>,
 ): Promise<PactInteractionResult> {
   const stateError = await setupStates(host, interaction.states, states);
-  if (stateError) {
+  if ((stateError !== null)) {
     return { interaction, status: "failed", failure: stateError.failure };
   }
 
-  if (!interaction.example?.args) {
+  if (!(interaction.example?.args !== undefined)) {
     return {
       interaction,
       status: "failed",
@@ -150,7 +150,7 @@ async function verifyActionInteraction(
     };
   }
 
-  if (interaction.result) {
+  if ((interaction.result !== undefined)) {
     try {
       interaction.result.parse(outcome.result);
     } catch (error) {
@@ -193,7 +193,7 @@ async function verifyEventInteraction(
   };
 
   const stateError = await setupStates(collectingHost, interaction.states, states);
-  if (stateError) {
+  if ((stateError !== null)) {
     return { interaction, status: "failed", failure: stateError.failure };
   }
 
@@ -207,7 +207,7 @@ async function verifyEventInteraction(
     };
   }
 
-  if (interaction.payload) {
+  if ((interaction.payload !== undefined)) {
     const validator = interaction.payload;
     for (const event of matchingEvents) {
       try {
@@ -250,11 +250,11 @@ async function verifyWorkerInteraction(
   // against the validator if both are provided.
 
   const stateError = await setupStates(host, interaction.states, states);
-  if (stateError) {
+  if ((stateError !== null)) {
     return { interaction, status: "failed", failure: stateError.failure };
   }
 
-  if (interaction.payload && interaction.example !== undefined) {
+  if ((interaction.payload !== undefined) && interaction.example !== undefined) {
     try {
       interaction.payload.parse(interaction.example);
     } catch (error) {

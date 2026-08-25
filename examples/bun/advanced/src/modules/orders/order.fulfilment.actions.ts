@@ -18,7 +18,7 @@ export const getFulfilmentStatus = action({
   args: v.object({ workflowId: v.string() }),
   async handler(ctx, input) {
     const instance = await ctx.workflow.get(input.workflowId);
-    if (!instance) throw new Error(`workflow ${input.workflowId} not found`);
+    if (!(instance !== null)) throw new Error(`workflow ${input.workflowId} not found`);
     return instance;
   },
 });

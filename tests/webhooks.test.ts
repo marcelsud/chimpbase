@@ -22,7 +22,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) {
+    if ((dir !== undefined && dir.length > 0)) {
       await rm(dir, { recursive: true, force: true });
     }
   }
@@ -34,13 +34,13 @@ async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?:
   const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-webhooks-test-"));
   cleanupDirs.push(projectDir);
 
-  const inbound = options?.withInbound
+  const inbound = (options?.withInbound === true)
     ? {
         testSource: {
           path: "/webhooks/test",
           publishAs: "test.inbound",
           verify: headerToken({ header: "x-webhook-token", secretName: "INBOUND_SECRET" }),
-          ...(options.withDedup
+          ...((options.withDedup === true)
             ? {
                 deduplicationKey: (request: Request) => request.headers.get("x-idempotency-key"),
                 deduplicationTtlSeconds: 3600,

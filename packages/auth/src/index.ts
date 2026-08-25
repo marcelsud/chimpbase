@@ -94,14 +94,14 @@ function generateRawKey(): string {
 
 function extractApiKey(request: Request): string | null {
   const xApiKey = request.headers.get("x-api-key");
-  if (xApiKey) {
+  if ((xApiKey !== null && xApiKey.length > 0)) {
     return xApiKey;
   }
 
   const authorization = request.headers.get("authorization");
-  if (authorization) {
+  if ((authorization !== null && authorization.length > 0)) {
     const match = /^Bearer\s+(.+)$/i.exec(authorization);
-    if (match) {
+    if ((match !== null)) {
       return match[1]!;
     }
   }
@@ -111,12 +111,13 @@ function extractApiKey(request: Request): string | null {
 
 function normalizePath(path: string): string {
   const trimmed = path.trim();
-  if (!trimmed || trimmed === "/") {
+  if (!(trimmed.length > 0) || trimmed === "/") {
     return "/";
   }
 
   const withLeading = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return withLeading.replace(/\/+$/g, "") || "/";
+  const normalized = withLeading.replace(/\/+$/g, "");
+  return normalized.length > 0 ? normalized : "/";
 }
 
 function splitPath(path: string): string[] {
@@ -157,7 +158,7 @@ function resolveRequiredScopes(
   managementBasePath: string | null,
   webhooksManagementPaths: string[],
 ): AuthScope[] {
-  if (managementBasePath && pathStartsWith(pathname, [managementBasePath])) {
+  if ((managementBasePath !== null && managementBasePath.length > 0) && pathStartsWith(pathname, [managementBasePath])) {
     return ["admin", "auth:manage"];
   }
 
@@ -177,7 +178,7 @@ function hasRequiredScope(keyScopes: string[], requiredScopes: AuthScope[]): boo
 }
 
 function parseScopes(raw: string | undefined | null): string[] {
-  if (!raw) {
+  if (!(raw !== null && raw !== undefined && raw.length > 0)) {
     return DEFAULT_SCOPES;
   }
 
@@ -222,7 +223,7 @@ async function parseJsonBody(request: Request): Promise<Record<string, unknown>>
     throw new AuthRequestError(400, "request body must be valid JSON");
   }
 
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
+  if (!(body !== null && body !== undefined) || typeof body !== "object" || Array.isArray(body)) {
     throw new AuthRequestError(400, "request body must be a JSON object");
   }
 
@@ -261,24 +262,24 @@ export function chimpbaseAuth(
   entries.push(
     action("__chimpbase.auth.validateApiKey", async (ctx, rawKey: string) => {
       // Check bootstrap key first
-      if (bootstrapKeySecret) {
+      if ((bootstrapKeySecret !== null && bootstrapKeySecret.length > 0)) {
         const bootstrapKey = ctx.secret(bootstrapKeySecret);
-        if (bootstrapKey && timingSafeEqual(rawKey, bootstrapKey)) {
+        if ((bootstrapKey !== null && bootstrapKey.length > 0) && timingSafeEqual(rawKey, bootstrapKey)) {
           return { valid: true, userId: null, bootstrap: true, scopes: ["admin"] };
         }
       }
 
       const keyHash = await hashKey(rawKey);
       const record = await ctx.collection.findOne<AuthApiKey>(API_KEYS_COLLECTION, { keyHash });
-      if (!record) {
+      if (!(record !== null)) {
         return { valid: false };
       }
 
-      if (record.revokedAt) {
+      if ((record.revokedAt !== null && record.revokedAt.length > 0)) {
         return { valid: false, reason: "revoked" };
       }
 
-      if (record.expiresAt && new Date(record.expiresAt) < new Date()) {
+      if ((record.expiresAt !== null && record.expiresAt.length > 0) && new Date(record.expiresAt) < new Date()) {
         return { valid: false, reason: "expired" };
       }
 
@@ -293,7 +294,7 @@ export function chimpbaseAuth(
 
   // ── Rate limit action ─────────────────────────────────────────────────────
 
-  if (rateLimitConfig) {
+  if ((rateLimitConfig !== null)) {
     entries.push(
       action("__chimpbase.auth.rateLimit", async (ctx, input: { keyPrefix: string; outcome: "check" | "fail" | "success" }) => {
         const blockKey = `__chimpbase.auth.ratelimit:block:${input.keyPrefix}`;
@@ -301,7 +302,7 @@ export function chimpbaseAuth(
 
         if (input.outcome === "check") {
           const blocked = await ctx.kv.get<boolean>(blockKey);
-          return { blocked: !!blocked };
+          return { blocked: !!(blocked === true) };
         }
 
         if (input.outcome === "success") {
@@ -311,7 +312,7 @@ export function chimpbaseAuth(
 
         // outcome === "fail"
         const blocked = await ctx.kv.get<boolean>(blockKey);
-        if (blocked) {
+        if ((blocked === true)) {
           return { blocked: true };
         }
 
@@ -345,14 +346,14 @@ export function chimpbaseAuth(
       }
 
       const rawKey = extractApiKey(request);
-      if (!rawKey) {
+      if (!(rawKey !== null && rawKey.length > 0)) {
         return jsonError(401, "missing API key");
       }
 
       const keyPrefix = rawKey.substring(0, 8);
 
       // Rate limit: check if blocked
-      if (rateLimitConfig) {
+      if ((rateLimitConfig !== null)) {
         const rlCheck = await env.action("__chimpbase.auth.rateLimit", {
           keyPrefix,
           outcome: "check",
@@ -373,7 +374,7 @@ export function chimpbaseAuth(
 
       if (!result.valid) {
         // Rate limit: record failure
-        if (rateLimitConfig) {
+        if ((rateLimitConfig !== null)) {
           const rlFail = await env.action("__chimpbase.auth.rateLimit", {
             keyPrefix,
             outcome: "fail",
@@ -388,7 +389,7 @@ export function chimpbaseAuth(
       }
 
       // Rate limit: clear counter on success
-      if (rateLimitConfig) {
+      if ((rateLimitConfig !== null)) {
         await env.action("__chimpbase.auth.rateLimit", { keyPrefix, outcome: "success" });
       }
 
@@ -448,7 +449,7 @@ export function chimpbaseAuth(
       // Revoke all API keys for this user
       const keys = await ctx.collection.find<AuthApiKey>(API_KEYS_COLLECTION, { userId: id });
       for (const key of keys) {
-        if (!key.revokedAt) {
+        if (!(key.revokedAt !== null && key.revokedAt.length > 0)) {
           await ctx.collection.update(API_KEYS_COLLECTION, { id: key.id }, { revokedAt: nowIso() });
         }
       }
@@ -463,7 +464,7 @@ export function chimpbaseAuth(
     action("__chimpbase.auth.createApiKey", async (ctx, input: { userId: string; label?: string; expiresAt?: string; scopes?: string[] }) => {
       // Verify user exists
       const user = await ctx.collection.findOne<AuthUser>(USERS_COLLECTION, { id: input.userId });
-      if (!user) {
+      if (!(user !== null)) {
         throw new AuthRequestError(404, "user not found");
       }
 
@@ -518,11 +519,11 @@ export function chimpbaseAuth(
   entries.push(
     action("__chimpbase.auth.revokeApiKey", async (ctx, keyId: string) => {
       const key = await ctx.collection.findOne<AuthApiKey>(API_KEYS_COLLECTION, { id: keyId });
-      if (!key) {
+      if (!(key !== null)) {
         return 0;
       }
 
-      if (key.revokedAt) {
+      if ((key.revokedAt !== null && key.revokedAt.length > 0)) {
         return 0;
       }
 
@@ -621,7 +622,7 @@ export function chimpbaseAuth(
 
   // ── Build plugin ──────────────────────────────────────────────────────────
 
-  if (options.dependsOn || options.name) {
+  if (options.dependsOn !== undefined || (options.name ?? "").length > 0) {
     return plugin(
       {
         dependsOn: options.dependsOn,
@@ -662,7 +663,7 @@ function matchPrefixWithIdAndSuffix(actual: string[], prefix: string[], suffix: 
 
 function requireString(body: Record<string, unknown>, field: string): string {
   const value = body[field];
-  if (typeof value !== "string" || !value) {
+  if (typeof value !== "string" || !(value.length > 0)) {
     throw new AuthRequestError(400, `"${field}" is required and must be a non-empty string`);
   }
   return value;

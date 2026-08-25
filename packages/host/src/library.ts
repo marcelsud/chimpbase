@@ -355,7 +355,7 @@ function normalizeCreateChimpbaseOptions(
 
 async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<ChimpbaseAppDefinition> {
   const app = await loadProjectAppDefinition(projectDir);
-  if (!app) {
+  if (!(app !== null)) {
     throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
   }
 

@@ -18,7 +18,7 @@ export async function meshEmit(
   options: EmitOptions,
   registeredBalancedEvents: ReadonlySet<string>,
 ): Promise<void> {
-  if (options.balanced) {
+  if ((options.balanced === true)) {
     if (!registeredBalancedEvents.has(event)) {
       throw new Error(
         `mesh balanced emit requires a service event declared with balanced: true for "${event}"`,

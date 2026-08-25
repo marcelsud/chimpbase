@@ -164,14 +164,14 @@ async function reservePort(): Promise<number> {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (!address || typeof address === "string") {
+      if (address === null || typeof address === "string") {
         server.close(() => reject(new Error("failed to resolve ephemeral port")));
         return;
       }
 
       const { port } = address;
       server.close((error) => {
-        if (error) {
+        if ((error !== undefined)) {
           reject(error);
           return;
         }

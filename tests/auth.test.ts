@@ -21,7 +21,7 @@ const cleanupDirs: string[] = [];
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
-    if (dir) {
+    if ((dir !== undefined && dir.length > 0)) {
       await rm(dir, { recursive: true, force: true });
     }
   }

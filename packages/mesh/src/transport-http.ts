@@ -40,12 +40,12 @@ export function createHttpDispatcher(
     peer: NodeRecord;
   }): Promise<TResult> => {
     const { peer, actionName, args, deadlineMs } = params;
-    if (!peer.advertisedUrl) {
+    if (!(peer.advertisedUrl !== null && peer.advertisedUrl.length > 0)) {
       throw new MeshCallError(actionName, peer.nodeId, `peer ${peer.nodeId} has no advertised URL`);
     }
 
     const token = options.tokenProvider();
-    if (!token) {
+    if (!(token !== null && token.length > 0)) {
       throw new MeshCallError(actionName, peer.nodeId, "mesh token missing — cannot authenticate remote RPC");
     }
 
@@ -103,7 +103,7 @@ export function createHttpDispatcher(
 }
 
 export function compareTokens(expected: string | null, received: string | null): boolean {
-  if (!expected || !received) {
+  if (!(expected !== null && expected.length > 0) || !(received !== null && received.length > 0)) {
     return false;
   }
 
