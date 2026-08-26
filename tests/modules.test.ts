@@ -556,7 +556,7 @@ describe("business modules", () => {
           return true;
         },
         async startFlow(ctx) {
-          const started = await ctx.workflow.start(flow, {}, { workflowId: "one" });
+          const started = await ctx.workflow.start(flow, {});
           const loaded = await ctx.workflow.get(started.workflowId);
           if (loaded === null) throw new Error("started workflow was not found");
           return true;

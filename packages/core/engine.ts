@@ -1386,9 +1386,9 @@ export class ChimpbaseEngine {
               : "definition" in definition
                 ? { ...definition, definition: { ...definition.definition, name: qualify("workflow", definition.definition.name) } }
                 : { ...definition, name: qualify("workflow", definition.name) };
-          const scopedOptions = moduleName === null || options?.workflowId === undefined
+          const scopedOptions = moduleName === null
             ? options
-            : { ...options, workflowId: qualifyWorkflowId(options.workflowId) };
+            : { ...options, workflowId: qualifyWorkflowId(options?.workflowId ?? this.platform.randomUUID()) };
           return await this.startWorkflow(scopedDefinition, input, scopedOptions);
         },
       },
