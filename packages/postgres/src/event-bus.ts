@@ -10,6 +10,7 @@ export interface PostgresPollingEventBusOptions {
 const eventIdValidator = v.integer();
 
 export class PostgresPollingEventBus implements ChimpbaseEventBus {
+  readonly mode = "wake" as const;
   private readonly pollIntervalMs: number;
   private readonly pool: Pool;
   private interval: ReturnType<typeof setInterval> | null = null;

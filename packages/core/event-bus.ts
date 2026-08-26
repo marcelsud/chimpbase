@@ -6,6 +6,8 @@ export type ChimpbaseEventBusCallback = (
 ) => Promise<void>;
 
 export interface ChimpbaseEventBus {
+  /** `wake` buses only signal workers; persisted outbox jobs remain the delivery source. */
+  readonly mode?: "delivery" | "wake";
   /** Notify the bus that new events were committed. */
   publish(events: ChimpbaseEventRecord[]): Promise<void>;
 

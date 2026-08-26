@@ -23,6 +23,13 @@ import {
   type ChimpbaseMigrationsDefinition,
   type ChimpbaseMigrationsDefinitionInput,
 } from "./host.ts";
+import {
+  composeChimpbaseModuleMigrations,
+  validateChimpbaseModules,
+  type ChimpbaseModuleEventContract,
+  type ChimpbaseModuleImplementation,
+  type ChimpbaseModuleInterface,
+} from "./modules.ts";
 
 export type ChimpbaseTelemetryPersistOverride =
   | boolean
@@ -143,6 +150,7 @@ export interface ChimpbaseAppWorkflowConfigInput {
 export interface ChimpbaseAppDefinition {
   httpHandler: ChimpbaseRouteHandler | null;
   migrations: ChimpbaseMigrationsDefinition;
+  modules: readonly ChimpbaseModuleImplementation[];
   project: {
     name: string;
   };
@@ -157,6 +165,7 @@ export type ChimpbaseAppModule = ChimpbaseAppDefinition;
 export interface ChimpbaseAppDefinitionInput {
   httpHandler?: ChimpbaseRouteHandler | { fetch: ChimpbaseRouteHandler } | null;
   migrations?: ChimpbaseMigrationsDefinitionInput;
+  modules?: readonly ChimpbaseModuleImplementation[];
   project?: {
     name?: string;
   };
@@ -171,45 +180,53 @@ export type ChimpbaseAppModuleInput = ChimpbaseAppDefinitionInput;
 export interface ChimpbaseWorkerRegistration {
   definition: Required<ChimpbaseWorkerDefinition>;
   handler: ChimpbaseWorkerHandler<never, unknown>;
+  module?: string | null;
   name: string;
 }
 
 export interface ChimpbaseCronRegistration {
   handler: ChimpbaseCronHandler;
+  module?: string | null;
   name: string;
   schedule: string;
 }
 
 export interface ChimpbaseSubscriptionEntry {
   handler: ChimpbaseSubscriptionHandler<never, unknown>;
+  module?: string | null;
   idempotent: boolean;
   name: string;
 }
 
 export interface ChimpbaseRegistry {
+  actionOwnership: Map<string, { module: string; visibility: "internal" | "public" }>;
   actions: Map<string, ChimpbaseActionRegistrationLike>;
   contextExtensions: ChimpbaseContextExtensionRegistration[];
   crons: Map<string, ChimpbaseCronRegistration>;
+  eventContracts: Map<string, ChimpbaseModuleEventContract>;
   httpHandler: ChimpbaseRouteHandler | null;
-  onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; name: string }>;
-  onStopHooks: Array<{ handler: () => Promise<void> | void; name: string }>;
+  moduleInterfaces: Map<string, ChimpbaseModuleInterface>;
+  onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
+  onStopHooks: Array<{ handler: () => Promise<void> | void; module: string | null; name: string }>;
+  registrationOwnership: Map<string, string>;
   routes: ChimpbaseRouteRegistration[];
   subscriptions: Map<string, ChimpbaseSubscriptionEntry[]>;
   telemetryOverrides: Map<string, ChimpbaseTelemetryPersistOverride>;
   workers: Map<string, ChimpbaseWorkerRegistration>;
   workflows: Map<string, Map<number, ChimpbaseWorkflowDefinitionLike>>;
+  workflowOwnership: Map<string, string>;
 }
 
 export interface ChimpbaseEntrypointTarget {
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
     name: string,
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
-    definition?: { args?: undefined },
+    definition?: { args?: undefined; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseTupleActionHandler<TArgs, TResult>;
   registerAction<TArgs, TResult = unknown>(
     name: string,
     handler: ChimpbaseObjectActionHandler<TArgs, TResult>,
-    definition: { args: ChimpbaseValidator<TArgs> },
+    definition: { args: ChimpbaseValidator<TArgs>; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseObjectActionHandler<TArgs, TResult>;
   registerSubscription<TPayload = unknown, TResult = unknown>(
     eventName: string,
@@ -297,9 +314,16 @@ export function normalizeProjectConfig(
 export function defineChimpbaseApp(
   input: ChimpbaseAppDefinitionInput,
 ): ChimpbaseAppDefinition {
+  const modules = validateChimpbaseModules(input.modules ?? []);
+  const appMigrations = defineChimpbaseMigrations(input.migrations);
+  const moduleMigrations = composeChimpbaseModuleMigrations(modules);
   return {
     httpHandler: normalizeHttpHandler(input.httpHandler),
-    migrations: defineChimpbaseMigrations(input.migrations),
+    migrations: {
+      postgres: [...appMigrations.postgres, ...moduleMigrations.postgres],
+      sqlite: [...appMigrations.sqlite, ...moduleMigrations.sqlite],
+    },
+    modules,
     project: {
       name: input.project?.name ?? "chimpbase-app",
     },
@@ -324,19 +348,48 @@ export function defineChimpbaseApp(
 
 export function createChimpbaseRegistry(): ChimpbaseRegistry {
   return {
+    actionOwnership: new Map(),
     actions: new Map(),
     contextExtensions: [],
     crons: new Map(),
     httpHandler: null,
+    eventContracts: new Map(),
     onStartHooks: [],
+    moduleInterfaces: new Map(),
     onStopHooks: [],
+    registrationOwnership: new Map(),
     routes: [],
     subscriptions: new Map(),
     telemetryOverrides: new Map(),
     workers: new Map(),
     workflows: new Map(),
+    workflowOwnership: new Map(),
   };
 }
+
+export {
+  chimpbaseModuleResourceName,
+  chimpbaseModuleSchemaName,
+  composeChimpbaseModuleMigrations,
+  defineChimpbaseModuleImplementation,
+  defineChimpbaseModuleInterface,
+  defineChimpbaseModuleSubscription,
+  validateChimpbaseModules,
+  type ChimpbaseModuleCallContract,
+  type ChimpbaseModuleCallDefinition,
+  type ChimpbaseModuleCallHandlers,
+  type ChimpbaseModuleContext,
+  type ChimpbaseModuleEventContract,
+  type ChimpbaseModuleEventDefinition,
+  type ChimpbaseModuleImplementation,
+  type ChimpbaseModuleImplementationInput,
+  type ChimpbaseModuleInterface,
+  type ChimpbaseModuleInterfaceInput,
+  type ChimpbaseModuleResources,
+  type ChimpbaseModuleSubscription,
+} from "./modules.ts";
+
+export { registerChimpbaseModuleImplementations } from "./module-registration.ts";
 
 export {
   ChimpbaseEngine,

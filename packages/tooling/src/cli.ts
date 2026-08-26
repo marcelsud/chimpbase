@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { parseJson } from "@chimpbase/runtime";
 
 import type { ChimpbaseSchemaSyncResult } from "./schema.ts";
+import type { SyncChimpbaseModuleArtifactsResult } from "./modules.ts";
 import type { WorkflowContractSyncResult } from "./workflow_contracts.ts";
 
 interface CliHost {
@@ -33,6 +34,13 @@ export interface RunChimpbaseCliDependencies {
   startProject(
     options?: { projectDir?: string; runWorker?: boolean; serve?: boolean },
   ): Promise<StartedProject>;
+  syncModules(options?: {
+    artifactsDir?: string;
+    check?: boolean;
+    compositionRoot?: string;
+    modulesDir?: string;
+    projectDir?: string;
+  }): Promise<SyncChimpbaseModuleArtifactsResult>;
   syncSchema(options?: {
     check?: boolean;
     dockerImage?: string;
@@ -86,6 +94,24 @@ export async function runChimpbaseCli(
     } finally {
       await host.close();
     }
+  }
+
+  if (command === "modules") {
+    if (subcommand !== "sync" && subcommand !== "check") {
+      throw new Error("modules command expects `sync` or `check`");
+    }
+    const result = await dependencies.syncModules({
+      artifactsDir: typeof args["artifacts-dir"] === "string" ? args["artifacts-dir"] : undefined,
+      check: subcommand === "check",
+      compositionRoot: typeof args["composition-root"] === "string" ? args["composition-root"] : undefined,
+      modulesDir: typeof args["modules-dir"] === "string" ? args["modules-dir"] : undefined,
+      projectDir,
+    });
+    writeLine(subcommand === "check" ? "module architecture check passed" : `${result.status} module artifacts`);
+    writeLine(`module manifest ${result.paths.manifest}`);
+    writeLine(`module summary ${result.paths.summary}`);
+    writeLine(`module database types ${result.paths.databaseTypes}`);
+    return;
   }
 
   if (command === "schema") {

@@ -2,6 +2,7 @@ export * from "./app.ts";
 export * from "./cli.ts";
 export * from "./config.ts";
 export * from "./migrations.ts";
+export * from "./modules.ts";
 export * from "./postgres_docker.ts";
 export * from "./schema.ts";
 export * from "./secrets.ts";

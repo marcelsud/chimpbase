@@ -18,6 +18,7 @@
         "@opentelemetry/semantic-conventions": "^1.25.0",
         "@types/pg": "^8.15.6",
         "kysely": "^0.28.11",
+        "typescript": "^5.9.3",
         "pg": "^8.16.3",
       },
       "devDependencies": {
@@ -43,7 +44,6 @@
         "rxjs": "^7.8.2",
         "split2": "^4.2.0",
         "tslib": "^2.8.1",
-        "typescript": "^5.9.3",
         "vitepress": "^1.6.4",
         "vue": "3.5.32",
         "wrangler": "^4.82.1",
@@ -289,6 +289,7 @@
         "@chimpbase/runtime": "0.7.0",
         "kysely": "^0.28.11",
         "pg": "^8.16.3",
+        "typescript": "^5.9.3",
       },
     },
     "packages/webhooks": {

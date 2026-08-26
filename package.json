@@ -148,6 +148,11 @@
       "import": "./packages/tooling/dist/src/migrations.js",
       "default": "./packages/tooling/dist/src/migrations.js"
     },
+    "./tooling/modules": {
+      "types": "./packages/tooling/dist/src/modules.d.ts",
+      "import": "./packages/tooling/dist/src/modules.js",
+      "default": "./packages/tooling/dist/src/modules.js"
+    },
     "./tooling/postgres_docker": {
       "types": "./packages/tooling/dist/src/postgres_docker.d.ts",
       "import": "./packages/tooling/dist/src/postgres_docker.js",
@@ -177,8 +182,9 @@
   "scripts": {
     "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host deno node bun rest-collections otel auth blobs webhooks pact mesh",
     "build:check": "node ./scripts/build-package.mjs --check",
-    "ci:check": "bun run typecheck && bun run check:any && bun run test && bun run publish:dry-run",
+    "ci:check": "bun run modules:check && bun run typecheck && bun run check:any && bun run test && bun run publish:dry-run",
     "check:any": "node ./scripts/check-any.mjs",
+    "modules:check": "bun packages/bun/src/cli.ts modules check --project-dir examples/modular-monolith",
     "dev:bun:basic": "bun run --filter @chimpbase/example-bun-basic dev",
     "dev:bun:intermediate": "bun run --filter @chimpbase/example-bun-intermediate dev",
     "dev:bun:advanced": "bun run --filter @chimpbase/example-bun-advanced dev",
@@ -214,6 +220,7 @@
     "@opentelemetry/semantic-conventions": "^1.25.0",
     "@types/pg": "^8.15.6",
     "kysely": "^0.28.11",
+    "typescript": "^5.9.3",
     "pg": "^8.16.3"
   },
   "devDependencies": {
@@ -238,7 +245,6 @@
     "rxjs": "^7.8.2",
     "split2": "^4.2.0",
     "tslib": "^2.8.1",
-    "typescript": "^5.9.3",
     "vitepress": "^1.6.4",
     "vue": "3.5.32",
     "@vue/server-renderer": "3.5.32",

@@ -312,6 +312,9 @@ describe("@chimpbase/tooling", () => {
         starts.push(options ?? {});
         return { server: { port: 3000 }, async stop() {} };
       },
+      async syncModules() {
+        throw new Error("unexpected module sync");
+      },
       async syncSchema() {
         throw new Error("unexpected schema sync");
       },

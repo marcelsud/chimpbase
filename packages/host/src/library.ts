@@ -13,6 +13,11 @@ import type { ChimpbaseTelemetrySink } from "@chimpbase/runtime";
 import { loadProjectAppDefinition } from "@chimpbase/tooling/app";
 import type { ChimpbaseSchemaSyncOptions, ChimpbaseSchemaSyncResult } from "@chimpbase/tooling/schema";
 import { syncChimpbaseSchemaArtifacts } from "@chimpbase/tooling/schema";
+import {
+  syncChimpbaseModuleArtifacts,
+  type SyncChimpbaseModuleArtifactsOptions,
+  type SyncChimpbaseModuleArtifactsResult,
+} from "@chimpbase/tooling/modules";
 import type { WorkflowContractSyncOptions, WorkflowContractSyncResult } from "@chimpbase/tooling/workflow_contracts";
 
 import {
@@ -101,6 +106,10 @@ export interface SyncChimpbaseWorkflowContractsOptions extends WorkflowContractS
   projectDir?: string;
 }
 
+export interface SyncChimpbaseModulesOptions extends SyncChimpbaseModuleArtifactsOptions {
+  projectDir?: string;
+}
+
 export interface SyncChimpbaseSchemaOptions extends ChimpbaseSchemaSyncOptions {
   projectDir?: string;
 }
@@ -128,6 +137,7 @@ export interface ChimpbaseRuntimeLibrary<THost, TServer> {
     options: CreateChimpbaseFromAppOptions & Pick<StartChimpbaseProjectOptions, "serve" | "runWorker">,
   ): Promise<StartedChimpbaseProject<THost, TServer>>;
   startChimpbaseProject(options?: StartChimpbaseProjectOptions): Promise<StartedChimpbaseProject<THost, TServer>>;
+  syncChimpbaseModules(options?: SyncChimpbaseModulesOptions): Promise<SyncChimpbaseModuleArtifactsResult>;
   syncChimpbaseSchema(options?: SyncChimpbaseSchemaOptions): Promise<ChimpbaseSchemaSyncResult>;
   syncChimpbaseWorkflowContracts(
     options?: SyncChimpbaseWorkflowContractsOptions,
@@ -221,6 +231,14 @@ export function createChimpbaseRuntimeLibrary<
     options: SyncChimpbaseSchemaOptions = {},
   ): Promise<ChimpbaseSchemaSyncResult> {
     return await syncChimpbaseSchemaArtifacts(options.projectDir ?? ".", options);
+  }
+
+  async function syncChimpbaseModules(
+    options: SyncChimpbaseModulesOptions = {},
+  ): Promise<SyncChimpbaseModuleArtifactsResult> {
+    const projectDir = resolve(options.projectDir ?? ".");
+    const app = await loadProjectAppDefinitionOrThrow(projectDir);
+    return await syncChimpbaseModuleArtifacts(app, projectDir, options);
   }
 
   async function startChimpbaseApp(
@@ -317,6 +335,7 @@ export function createChimpbaseRuntimeLibrary<
     startChimpbaseApp,
     startChimpbaseProject,
     syncChimpbaseSchema,
+    syncChimpbaseModules,
     syncChimpbaseWorkflowContracts,
   };
 }
@@ -332,6 +351,7 @@ function normalizeCreateChimpbaseOptions(
     httpHandler,
     migrations,
     project,
+    modules,
     registrations,
     telemetry,
     worker,
@@ -345,6 +365,7 @@ function normalizeCreateChimpbaseOptions(
       httpHandler,
       migrations,
       project,
+      modules,
       registrations,
       telemetry,
       worker,

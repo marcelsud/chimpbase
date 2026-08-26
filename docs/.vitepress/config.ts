@@ -36,6 +36,7 @@ export default defineConfig({
           { text: "Workers & Queues", link: "/workers" },
           { text: "Cron", link: "/cron" },
           { text: "Workflows", link: "/workflows" },
+          { text: "Business Modules", link: "/modules" },
           { text: "HTTP Routes", link: "/routes" },
           { text: "Database", link: "/database" },
           { text: "Collections", link: "/collections" },

@@ -50,6 +50,11 @@
       "import": "./dist/src/migrations.js",
       "default": "./dist/src/migrations.js"
     },
+    "./modules": {
+      "types": "./dist/src/modules.d.ts",
+      "import": "./dist/src/modules.js",
+      "default": "./dist/src/modules.js"
+    },
     "./postgres_docker": {
       "types": "./dist/src/postgres_docker.d.ts",
       "import": "./dist/src/postgres_docker.js",
@@ -81,6 +86,7 @@
     "@chimpbase/core": "0.7.0",
     "@chimpbase/runtime": "0.7.0",
     "kysely": "^0.28.11",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "typescript": "^5.9.3"
   }
 }

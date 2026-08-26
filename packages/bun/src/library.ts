@@ -9,6 +9,7 @@ import {
   type StartChimpbaseProjectOptions,
   type StartedChimpbaseProject,
   type SyncChimpbaseSchemaOptions,
+  type SyncChimpbaseModulesOptions,
   type SyncChimpbaseWorkflowContractsOptions,
 } from "@chimpbase/host";
 import type { ChimpbaseAppDefinition, ChimpbaseAppDefinitionInput } from "@chimpbase/core";
@@ -27,6 +28,7 @@ export type {
   StartChimpbaseProjectOptions,
   StartedChimpbaseProject,
   SyncChimpbaseSchemaOptions,
+  SyncChimpbaseModulesOptions,
   SyncChimpbaseWorkflowContractsOptions,
 };
 
@@ -37,6 +39,7 @@ export const runChimpbaseAction = runtimeLibrary.runChimpbaseAction;
 export const runChimpbaseAppAction = runtimeLibrary.runChimpbaseAppAction;
 export const startChimpbaseApp = runtimeLibrary.startChimpbaseApp;
 export const startChimpbaseProject = runtimeLibrary.startChimpbaseProject;
+export const syncChimpbaseModules = runtimeLibrary.syncChimpbaseModules;
 export const syncChimpbaseSchema = runtimeLibrary.syncChimpbaseSchema;
 export const syncChimpbaseWorkflowContracts = runtimeLibrary.syncChimpbaseWorkflowContracts;
 

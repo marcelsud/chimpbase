@@ -636,6 +636,25 @@ export function createSqliteEngineAdapter(
     },
     async commitTransaction(events: ChimpbaseEventRecord[]) {
       persistEvents(db, events);
+      const availableAtMs = platform.now();
+      const statement = db.query(
+        `INSERT INTO _chimpbase_queue_jobs (
+          queue_name, payload_json, status, available_at_ms, attempt_count
+        ) VALUES (?1, ?2, 'pending', ?3, 0)`,
+      );
+      for (const event of events) {
+        if (event.dispatch !== true || event.id === undefined) continue;
+        statement.run(
+          "__chimpbase.subscription.run",
+          JSON.stringify({
+            eventId: event.id,
+            eventName: event.name,
+            payload: event.payload,
+            payloadJson: event.payloadJson,
+          }),
+          availableAtMs,
+        );
+      }
       db.exec("COMMIT");
     },
     async completeQueueJob(jobId: number) {

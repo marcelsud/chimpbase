@@ -13,6 +13,7 @@ export type ChimpbaseMigrationEngine = Exclude<ChimpbaseStorageEngine, "memory">
 
 export interface ChimpbaseMigration {
   name: string;
+  owner?: string;
   sql: string;
 }
 
@@ -68,6 +69,7 @@ export function createDefaultChimpbasePlatformShim(): ChimpbasePlatformShim {
 export function defineChimpbaseMigration(migration: ChimpbaseMigration): ChimpbaseMigration {
   return {
     name: migration.name,
+    owner: migration.owner ?? "framework",
     sql: migration.sql,
   };
 }
