@@ -207,7 +207,7 @@ export interface ChimpbaseRegistry {
   httpHandler: ChimpbaseRouteHandler | null;
   moduleInterfaces: Map<string, ChimpbaseModuleInterface>;
   onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
-  onStopHooks: Array<{ handler: () => Promise<void> | void; module: string | null; name: string }>;
+  onStopHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
   registrationOwnership: Map<string, string>;
   routes: ChimpbaseRouteRegistration[];
   subscriptions: Map<string, ChimpbaseSubscriptionEntry[]>;
@@ -317,11 +317,18 @@ export function defineChimpbaseApp(
   const modules = validateChimpbaseModules(input.modules ?? []);
   const appMigrations = defineChimpbaseMigrations(input.migrations);
   const moduleMigrations = composeChimpbaseModuleMigrations(modules);
+  const moduleNames = new Set(modules.map((implementation) => implementation.interface.name));
+  const frameworkPostgresMigrations = appMigrations.postgres.filter((migration) =>
+    !moduleNames.has(migration.owner ?? "framework")
+  );
+  const frameworkSqliteMigrations = appMigrations.sqlite.filter((migration) =>
+    !moduleNames.has(migration.owner ?? "framework")
+  );
   return {
     httpHandler: normalizeHttpHandler(input.httpHandler),
     migrations: {
-      postgres: [...appMigrations.postgres, ...moduleMigrations.postgres],
-      sqlite: [...appMigrations.sqlite, ...moduleMigrations.sqlite],
+      postgres: [...frameworkPostgresMigrations, ...moduleMigrations.postgres],
+      sqlite: [...frameworkSqliteMigrations, ...moduleMigrations.sqlite],
     },
     modules,
     project: {
@@ -369,6 +376,7 @@ export function createChimpbaseRegistry(): ChimpbaseRegistry {
 
 export {
   chimpbaseModuleResourceName,
+  chimpbaseModuleResourcePrefix,
   chimpbaseModuleSchemaName,
   composeChimpbaseModuleMigrations,
   defineChimpbaseModuleImplementation,
@@ -392,9 +400,16 @@ export {
 export { registerChimpbaseModuleImplementations } from "./module-registration.ts";
 
 export {
+  assertChimpbaseModuleCompiledSql,
+  assertChimpbaseModuleMigrationSql,
+  assertChimpbaseModuleRuntimeSql,
+} from "./sql-ownership.ts";
+
+export {
   ChimpbaseEngine,
   ChimpbaseNotModifiedError,
   ChimpbasePreconditionFailedError,
+  createChimpbaseEventDeliveryPayloads,
   type ChimpbaseActionExecutionResult,
   type ChimpbaseBlobDriver,
   type ChimpbaseBlobDriverGetResult,
@@ -410,6 +425,7 @@ export {
   type ChimpbaseCronScheduleExecutionResult,
   type ChimpbaseEngineAdapter,
   type ChimpbaseEngineOptions,
+  type ChimpbaseEventDeliveryPayload,
   type ChimpbaseEventRecord,
   type ChimpbaseExecutionScope,
   type ChimpbaseQueueExecutionResult,

@@ -17,6 +17,7 @@ import {
   type ChimpbaseMigrationsDefinition,
   type ChimpbaseMigrationsDefinitionInput,
 } from "./host.ts";
+import { assertChimpbaseModuleMigrationSql } from "./sql-ownership.ts";
 
 export interface ChimpbaseModuleCallDefinition<TInput = unknown, TOutput = unknown> {
   readonly errors?: readonly string[];
@@ -301,11 +302,15 @@ export function chimpbaseModuleSchemaName(moduleName: string): string {
   return `chimpbase_${moduleName.replaceAll("-", "_")}`;
 }
 
-export function chimpbaseModuleResourceName(moduleName: string, kind: string, name: string): string {
+export function chimpbaseModuleResourcePrefix(moduleName: string, kind: string): string {
   assertModuleName(moduleName);
   assertContractName(kind, "module resource kind");
+  return `module:${moduleName}:${kind}:`;
+}
+
+export function chimpbaseModuleResourceName(moduleName: string, kind: string, name: string): string {
   if (name.length === 0 || name.includes("\0")) throw new Error("module resource name must not be empty");
-  return `module:${moduleName}:${kind}:${name}`;
+  return `${chimpbaseModuleResourcePrefix(moduleName, kind)}${name}`;
 }
 
 function composeMigrationsForEngine(
@@ -329,7 +334,9 @@ function composeMigrationsForEngine(
       const name = `${owner}:${migration.name}`;
       if (seen.has(name)) throw new Error(`duplicate module migration identity: ${name}`);
       seen.add(name);
-      if (engine === "postgres") assertPostgresMigrationOwnership(owner, migration.sql);
+      if (engine === "postgres") {
+        assertChimpbaseModuleMigrationSql(owner, chimpbaseModuleSchemaName(owner), migration.sql);
+      }
       migrations.push({ name, owner, sql: migration.sql });
     }
   }
@@ -362,22 +369,6 @@ function topologicallySortModules(
   return ordered;
 }
 
-function assertPostgresMigrationOwnership(owner: string, sql: string): void {
-  const ownSchema = chimpbaseModuleSchemaName(owner);
-  for (const match of sql.matchAll(
-    /\b(?:ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|REFERENCES)\s+"?([a-z_][a-z0-9_]*)"?(?:\s*\.\s*"?([a-z_][a-z0-9_]*)"?)?/gi,
-  )) {
-    const schema = match[1]?.toLowerCase();
-    const table = match[2]?.toLowerCase();
-    if (schema === undefined) continue;
-    if (table === undefined) {
-      throw new Error(`module ${owner} migration must qualify owned tables with schema ${ownSchema}`);
-    }
-    if (schema !== ownSchema) {
-      throw new Error(`module ${owner} migration references foreign schema ${schema}`);
-    }
-  }
-}
 
 function assertModuleName(name: string): void {
   if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) {

@@ -66,7 +66,12 @@ import {
   type ChimpbasePlatformShim,
   type ChimpbaseSecretsSource,
 } from "./host.ts";
-import { chimpbaseModuleResourceName, chimpbaseModuleSchemaName } from "./modules.ts";
+import {
+  chimpbaseModuleResourceName,
+  chimpbaseModuleResourcePrefix,
+  chimpbaseModuleSchemaName,
+} from "./modules.ts";
+import { assertChimpbaseModuleRuntimeSql } from "./sql-ownership.ts";
 import type { ChimpbaseRegistry, ChimpbaseTelemetryPersistOverride } from "./index.ts";
 
 export interface ChimpbaseExecutionScope {
@@ -78,9 +83,41 @@ export interface ChimpbaseExecutionScope {
 export interface ChimpbaseEventRecord {
   id?: number;
   dispatch?: boolean;
+  deliverySubscriptions?: readonly string[];
   name: string;
   payload: unknown;
   payloadJson: string;
+}
+
+export interface ChimpbaseEventDeliveryPayload {
+  eventId: number;
+  eventName: string;
+  payload: unknown;
+  payloadJson: string;
+  subscriptionName?: string;
+}
+
+export function createChimpbaseEventDeliveryPayloads(
+  event: ChimpbaseEventRecord,
+): ChimpbaseEventDeliveryPayload[] {
+  if (event.id === undefined) return [];
+  if ((event.deliverySubscriptions?.length ?? 0) > 0) {
+    return event.deliverySubscriptions?.map((subscriptionName) => ({
+      eventId: event.id as number,
+      eventName: event.name,
+      payload: event.payload,
+      payloadJson: event.payloadJson,
+      subscriptionName,
+    })) ?? [];
+  }
+  return event.dispatch === true
+    ? [{
+        eventId: event.id,
+        eventName: event.name,
+        payload: event.payload,
+        payloadJson: event.payloadJson,
+      }]
+    : [];
 }
 
 export interface ChimpbaseQueueJobRecord {
@@ -190,6 +227,7 @@ interface SubscriptionQueuePayload {
   eventName: string;
   payload: unknown;
   payloadJson: string;
+  subscriptionName?: string;
 }
 
 type WorkflowRunDirective = ChimpbaseWorkflowRunResult<unknown, unknown>;
@@ -202,6 +240,7 @@ const subscriptionQueuePayloadValidator = v.object({
   eventName: v.string(),
   payload: v.unknown().optional(),
   payloadJson: v.string(),
+  subscriptionName: v.string().optional(),
 });
 const workflowQueuePayloadValidator = v.object({
   workflowId: v.string(),
@@ -528,7 +567,7 @@ export class ChimpbaseEngine {
             payload: message.payload,
             payloadJson: message.payloadJson,
           },
-        ]);
+        ], message.subscriptionName);
       },
       module: null,
       name: INTERNAL_SUBSCRIPTION_QUEUE_NAME,
@@ -1151,6 +1190,11 @@ export class ChimpbaseEngine {
     const schema = moduleName === null ? null : chimpbaseModuleSchemaName(moduleName);
     const qualify = (kind: string, name: string): string =>
       moduleName === null ? name : chimpbaseModuleResourceName(moduleName, kind, name);
+    const qualifyWorkflowId = (workflowId: string): string => {
+      if (moduleName === null) return workflowId;
+      const namespace = chimpbaseModuleResourcePrefix(moduleName, "workflow-instance");
+      return workflowId.startsWith(namespace) ? workflowId : `${namespace}${workflowId}`;
+    };
     const enqueue = async <TPayload = unknown>(
       name: string,
       payload: TPayload,
@@ -1168,7 +1212,9 @@ export class ChimpbaseEngine {
       params: readonly unknown[] = [],
       validator?: ChimpbaseValidator<T>,
     ): Promise<T[] | Record<string, unknown>[]> {
-      if (moduleName !== null) assertModuleSqlAccess(moduleName, sql);
+      if (moduleName !== null && schema !== null) {
+        assertChimpbaseModuleRuntimeSql(moduleName, schema, sql);
+      }
       return validator === undefined
         ? await adapter.query(sql, params, databaseRowValidator)
         : await adapter.query(sql, params, validator);
@@ -1281,7 +1327,7 @@ export class ChimpbaseEngine {
           const prefix = qualify("kv", options?.prefix ?? "");
           const keys = await this.adapter.kvList({ prefix });
           if (moduleName === null) return keys;
-          const namespace = qualify("kv", "");
+          const namespace = chimpbaseModuleResourcePrefix(moduleName, "kv");
           return keys.map((key) => key.slice(namespace.length));
         },
         set: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) =>
@@ -1297,7 +1343,7 @@ export class ChimpbaseEngine {
         list: async (): Promise<string[]> => {
           const names = await this.adapter.collectionList();
           if (moduleName === null) return names;
-          const namespace = qualify("collection", "");
+          const namespace = chimpbaseModuleResourcePrefix(moduleName, "collection");
           return names.filter((name) => name.startsWith(namespace)).map((name) => name.slice(namespace.length));
         },
         update: async (name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> =>
@@ -1317,13 +1363,13 @@ export class ChimpbaseEngine {
         get: async <TInput = unknown, TState = unknown>(
           workflowId: string,
         ): Promise<ChimpbaseWorkflowInstance<TInput, TState> | null> =>
-          await this.getWorkflowInstance<TInput, TState>(qualify("workflow-instance", workflowId)),
+          await this.getWorkflowInstance<TInput, TState>(qualifyWorkflowId(workflowId)),
         signal: async <TPayload = unknown>(
           workflowId: string,
           signalName: string,
           payload: TPayload,
         ): Promise<void> => {
-          await this.signalWorkflow(qualify("workflow-instance", workflowId), signalName, payload);
+          await this.signalWorkflow(qualifyWorkflowId(workflowId), signalName, payload);
         },
         start: async <TInput = unknown, TState = unknown>(
           definition:
@@ -1342,7 +1388,7 @@ export class ChimpbaseEngine {
                 : { ...definition, name: qualify("workflow", definition.name) };
           const scopedOptions = moduleName === null || options?.workflowId === undefined
             ? options
-            : { ...options, workflowId: qualify("workflow-instance", options.workflowId) };
+            : { ...options, workflowId: qualifyWorkflowId(options.workflowId) };
           return await this.startWorkflow(scopedDefinition, input, scopedOptions);
         },
       },
@@ -2543,22 +2589,28 @@ export class ChimpbaseEngine {
         `module event denied: caller ${callerModule ?? "<app>"}, target ${contract.module}, contract ${contract.id}, rule undeclared event`,
       );
     }
-    if (callerModule !== contract.module) {
+    if (callerModule !== declared.module) {
       throw new Error(
-        `module event denied: caller ${callerModule ?? "<app>"}, target ${contract.module}, contract ${contract.id}, rule publisher does not own event`,
+        `module event denied: caller ${callerModule ?? "<app>"}, target ${declared.module}, contract ${declared.id}, rule publisher does not own event`,
       );
     }
-    const parsedPayload = contract.payload.parse(payload, `module event ${contract.id} payload`);
-    this.recordEvent(contract.id, parsedPayload, true);
+    const parsedPayload = declared.payload.parse(payload, `module event ${declared.id} payload`);
+    this.recordEvent(declared.id, parsedPayload, true);
   }
 
   private recordEvent(name: string, payload: unknown, moduleEvent: boolean): void {
     if (moduleEvent && this.transactionDepth === 0) {
       throw new Error(`module event ${name} must be published inside a runtime transaction`);
     }
-    const hasSubscriptions = (this.registry.subscriptions.get(name) ?? []).length > 0;
+    const subscriptions = this.registry.subscriptions.get(name) ?? [];
+    const deliverySubscriptions = moduleEvent
+      ? subscriptions.filter((entry) => entry.module != null).map((entry) => entry.name)
+      : [];
     const event: ChimpbaseEventRecord = {
-      dispatch: hasSubscriptions && (moduleEvent || this.subscriptionsConfig.dispatch === "async"),
+      deliverySubscriptions,
+      dispatch: !moduleEvent
+        && this.subscriptionsConfig.dispatch === "async"
+        && subscriptions.length > 0,
       name,
       payload,
       payloadJson: JSON.stringify(payload ?? null),
@@ -2570,13 +2622,17 @@ export class ChimpbaseEngine {
     }
   }
 
-  private async dispatchSubscriptions(events: ChimpbaseEventRecord[]): Promise<void> {
+  private async dispatchSubscriptions(
+    events: ChimpbaseEventRecord[],
+    subscriptionName?: string,
+  ): Promise<void> {
     for (const event of events) {
       const contract = this.registry.eventContracts.get(event.name);
       const payload = contract === undefined
         ? event.payload
         : contract.payload.parse(event.payload, `module event ${event.name} payload`);
-      const subscriptions = this.registry.subscriptions.get(event.name) ?? [];
+      const subscriptions = (this.registry.subscriptions.get(event.name) ?? [])
+        .filter((entry) => subscriptionName === undefined || entry.name === subscriptionName);
       for (const sub of subscriptions) {
         const subscriptionHandler: unknown = sub.handler;
         if (!isSubscriptionHandler(subscriptionHandler)) {
@@ -2631,7 +2687,9 @@ export class ChimpbaseEngine {
       return [];
     }
 
-    await this.dispatchSubscriptions(emittedEvents.filter((event) => event.dispatch !== true));
+    await this.dispatchSubscriptions(emittedEvents.filter((event) =>
+      event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
+    ));
     const cascadedEvents = this.takeCommittedEvents();
     await this.flushTelemetryToStreams(scope, telemetryStart);
     return cascadedEvents;
@@ -3071,31 +3129,6 @@ export class ChimpbaseNotModifiedError extends Error {
   }
 }
 
-function assertModuleSqlAccess(moduleName: string, sql: string): void {
-  const ownSchema = chimpbaseModuleSchemaName(moduleName);
-  const cteNames = new Set(
-    [...sql.matchAll(/\b(?:WITH|,)\s*"?([a-z][a-z0-9_]*)"?\s+AS\s*\(/gi)]
-      .map((match) => match[1]?.toLowerCase())
-      .filter((name): name is string => name !== undefined),
-  );
-  for (const match of sql.matchAll(
-    /\b(?:ALTER\s+TABLE|CREATE\s+TABLE|DELETE\s+FROM|DROP\s+TABLE|FROM|INSERT\s+INTO|JOIN|UPDATE)\s+"?([a-z_][a-z0-9_]*)"?(?:\s*\.\s*"?([a-z_][a-z0-9_]*)"?)?/gi,
-  )) {
-    const first = match[1]?.toLowerCase();
-    const second = match[2]?.toLowerCase();
-    if (first === undefined || (second === undefined && cteNames.has(first))) continue;
-    if (second === undefined) {
-      throw new Error(
-        `module ${moduleName} raw SQL must qualify owned tables with schema ${ownSchema}`,
-      );
-    }
-    if (first !== ownSchema) {
-      throw new Error(
-        `module ${moduleName} raw SQL cannot access schema ${first}; owned schema is ${ownSchema}`,
-      );
-    }
-  }
-}
 async function hashPartEtags(etags: readonly string[]): Promise<string> {
   const bytes = new TextEncoder().encode(etags.join(""));
   const digest = await crypto.subtle.digest("SHA-256", bytes);

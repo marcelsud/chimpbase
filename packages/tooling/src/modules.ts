@@ -135,7 +135,20 @@ export async function checkChimpbaseModuleArchitecture(
       if (resolvedImport === undefined) continue;
       const targetFile = normalizeResolvedFile(resolvedImport);
       const targetModule = moduleForFile(modulesDir, targetFile, interfacesByName);
-      if (targetModule === null || targetModule === sourceModule) continue;
+      if (targetModule === null) continue;
+      if (targetModule === sourceModule) {
+        const sourceIsInterface = resolve(file) === join(modulesDir, sourceModule, "interface.ts");
+        if (sourceIsInterface && resolve(targetFile) !== resolve(file)) {
+          diagnostics.push({
+            file: relative(projectDir, file),
+            rule: "deep-import",
+            sourceModule,
+            target: imported.fileName,
+            targetModule,
+          });
+        }
+        continue;
+      }
 
       const isCompositionRoot = resolve(file) === compositionRoot;
       if (isCompositionRoot) continue;
@@ -292,17 +305,17 @@ export function compareChimpbaseModuleManifests(
       if (!schemaAccepts(previousCall.inputSchema, nextCall.inputSchema)) {
         diagnostics.push(breaking(moduleName, previousCall.id, previousCall.inputSchema, nextCall.inputSchema, "widen accepted input or version the call"));
       }
-      if (!schemaAccepts(nextCall.outputSchema, previousCall.outputSchema)) {
+      if (!schemaPreserves(previousCall.outputSchema, nextCall.outputSchema)) {
         diagnostics.push(breaking(moduleName, previousCall.id, previousCall.outputSchema, nextCall.outputSchema, "preserve the previous output shape or version the call"));
       }
-      if (!previousCall.errors.every((error) => nextCall.errors.includes(error))) {
+      if (nextCall.errors.some((error) => !previousCall.errors.includes(error))) {
         diagnostics.push({
           classification: "migration-required",
           contract: previousCall.id,
           module: moduleName,
           next: nextCall.errors,
           previous: previousCall.errors,
-          remediation: "document the error migration and increment the module version",
+          remediation: "document the new error and increment the module version",
         });
       }
     }
@@ -503,6 +516,30 @@ function schemaAccepts(previous: unknown, next: unknown): boolean {
     return true;
   }
   return false;
+}
+
+function schemaPreserves(previous: unknown, next: unknown): boolean {
+  if (deepEqual(previous, next)) return true;
+  if (!isRecord(previous) || !isRecord(next)) return false;
+  if (previous.type !== "object" || next.type !== "object") return false;
+  const previousProperties = isRecord(previous.properties) ? previous.properties : {};
+  const nextProperties = isRecord(next.properties) ? next.properties : {};
+  const previousRequired = new Set(
+    Array.isArray(previous.required)
+      ? previous.required.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  const nextRequired = new Set(
+    Array.isArray(next.required)
+      ? next.required.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  for (const [name, schema] of Object.entries(previousProperties)) {
+    const nextSchema = nextProperties[name];
+    if (nextSchema === undefined || !schemaPreserves(schema, nextSchema)) return false;
+    if (previousRequired.has(name) && !nextRequired.has(name)) return false;
+  }
+  return true;
 }
 
 function breaking(

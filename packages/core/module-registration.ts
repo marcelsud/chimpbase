@@ -57,11 +57,18 @@ export function registerChimpbaseModuleImplementations(
 
     const ownedTarget = createOwnedRegistrationTarget(target, registry, moduleName);
     for (const entry of implementation.registrations) register(ownedTarget, entry);
-    for (const entry of implementation.subscriptions) {
-      register(ownedTarget, subscription(entry.event.id, entry.handler, {
+    for (const contractSubscription of implementation.subscriptions) {
+      const eventName = contractSubscription.event.id;
+      const subscriptionName = `${moduleName}/${contractSubscription.name}`;
+      const before = registry.subscriptions.get(eventName)?.length ?? 0;
+      target.registerSubscription(eventName, contractSubscription.handler, {
         idempotent: true,
-        name: `${moduleName}/${entry.name}`,
-      }));
+        name: subscriptionName,
+      });
+      const entry = registry.subscriptions.get(eventName)?.[before];
+      if (entry === undefined) throw new Error(`subscription registration failed: ${eventName}`);
+      entry.module = moduleName;
+      registry.registrationOwnership.set(`subscription:${eventName}:${subscriptionName}`, moduleName);
     }
   }
 }
@@ -95,16 +102,12 @@ function createOwnedRegistrationTarget(
     },
     registerSubscription<TPayload = unknown, TResult = unknown>(
       eventName: string,
-      handler: ChimpbaseSubscriptionHandler<TPayload, TResult>,
-      options?: ChimpbaseSubscriptionOptions,
+      _handler: ChimpbaseSubscriptionHandler<TPayload, TResult>,
+      _options?: ChimpbaseSubscriptionOptions,
     ): ChimpbaseSubscriptionHandler<TPayload, TResult> {
-      const before = registry.subscriptions.get(eventName)?.length ?? 0;
-      const registered = target.registerSubscription(eventName, handler, options);
-      const entry = registry.subscriptions.get(eventName)?.[before];
-      if (entry === undefined) throw new Error(`subscription registration failed: ${eventName}`);
-      entry.module = moduleName;
-      registry.registrationOwnership.set(`subscription:${eventName}:${entry.name}`, moduleName);
-      return registered;
+      throw new Error(
+        `module ${moduleName} cannot register raw subscription ${eventName}; use defineChimpbaseModuleSubscription`,
+      );
     },
     registerWorker<TPayload = unknown, TResult = unknown>(
       name: string,
@@ -152,7 +155,7 @@ function createOwnedRegistrationTarget(
       entry.module = moduleName;
       registry.registrationOwnership.set(`onStart:${name}`, moduleName);
     },
-    registerOnStop(name: string, handler: () => Promise<void> | void): void {
+    registerOnStop(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void {
       if (target.registerOnStop === undefined) throw new Error(`registration target does not support onStop entries: ${name}`);
       ensureRegistrationAvailable(registry, "onStop", name, moduleName);
       target.registerOnStop(name, handler);

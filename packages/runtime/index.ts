@@ -874,7 +874,7 @@ export interface ChimpbaseRegistrationTarget {
   ): ChimpbaseCronHandler<TResult>;
   registerRoute?(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler;
   registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
-  registerOnStop?(name: string, handler: () => Promise<void> | void): void;
+  registerOnStop?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
   registerContextExtension?(registration: ChimpbaseContextExtensionRegistration): void;
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
@@ -963,8 +963,10 @@ export interface ChimpbaseOnStartRegistration<
   name: string;
 }
 
-export interface ChimpbaseOnStopRegistration {
-  handler: () => Promise<void> | void;
+export interface ChimpbaseOnStopRegistration<
+  TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+> {
+  handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void;
   kind: "onStop";
   name: string;
 }
@@ -1305,10 +1307,10 @@ export function onStart<TActions extends ChimpbaseActionMap = ChimpbaseActionReg
   return { handler, kind: "onStart", name };
 }
 
-export function onStop(
+export function onStop<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
   name: string,
-  handler: () => Promise<void> | void,
-): ChimpbaseOnStopRegistration {
+  handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void,
+): ChimpbaseOnStopRegistration<TActions> {
   return { handler, kind: "onStop", name };
 }
 

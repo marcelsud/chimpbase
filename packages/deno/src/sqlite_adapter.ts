@@ -15,6 +15,7 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
+import { createChimpbaseEventDeliveryPayloads } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -660,17 +661,13 @@ export function createSqliteEngineAdapter(
         ) VALUES (?1, ?2, 'pending', ?3, 0)`,
       );
       for (const event of events) {
-        if (event.dispatch !== true || event.id === undefined) continue;
-        statement.run(
-          "__chimpbase.subscription.run",
-          JSON.stringify({
-            eventId: event.id,
-            eventName: event.name,
-            payload: event.payload,
-            payloadJson: event.payloadJson,
-          }),
-          availableAtMs,
-        );
+        for (const payload of createChimpbaseEventDeliveryPayloads(event)) {
+          statement.run(
+            "__chimpbase.subscription.run",
+            JSON.stringify(payload),
+            availableAtMs,
+          );
+        }
       }
       db.exec("COMMIT");
     },

@@ -13,6 +13,10 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
+import {
+  assertChimpbaseModuleCompiledSql,
+  createChimpbaseEventDeliveryPayloads,
+} from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -567,22 +571,18 @@ export function createPostgresEngineAdapter(
       await persistEvents(connection, events);
       const availableAtMs = platform.now();
       for (const event of events) {
-        if (event.dispatch !== true || event.id === undefined) continue;
-        await connection.query(
-          `INSERT INTO _chimpbase_queue_jobs (
-            queue_name, payload_json, status, available_at_ms, attempt_count
-          ) VALUES ($1, $2::jsonb, 'pending', $3, 0)`,
-          [
-            "__chimpbase.subscription.run",
-            JSON.stringify({
-              eventId: event.id,
-              eventName: event.name,
-              payload: event.payload,
-              payloadJson: event.payloadJson,
-            }),
-            availableAtMs,
-          ],
-        );
+        for (const payload of createChimpbaseEventDeliveryPayloads(event)) {
+          await connection.query(
+            `INSERT INTO _chimpbase_queue_jobs (
+              queue_name, payload_json, status, available_at_ms, attempt_count
+            ) VALUES ($1, $2::jsonb, 'pending', $3, 0)`,
+            [
+              "__chimpbase.subscription.run",
+              JSON.stringify(payload),
+              availableAtMs,
+            ],
+          );
+        }
       }
       if ((transactionClient !== null)) {
         await transactionClient.query("COMMIT");
@@ -711,7 +711,7 @@ export function createPostgresEngineAdapter(
     createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase> {
       const database = createPostgresKysely<TDatabase>({
         async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
-          if (schema !== undefined) assertPostgresModuleSql(schema, compiledQuery.sql);
+          if (schema !== undefined) assertChimpbaseModuleCompiledSql(schema, compiledQuery.sql);
           const result = await queryable().query<Record<string, unknown>>(
             compiledQuery.sql,
             [...compiledQuery.parameters],
@@ -1201,18 +1201,6 @@ function sliceBlobList(
   };
 }
 
-function assertPostgresModuleSql(schema: string, sql: string): void {
-  for (const match of sql.matchAll(
-    /\b(?:ALTER\s+TABLE|CREATE\s+TABLE|DELETE\s+FROM|DROP\s+TABLE|FROM|INSERT\s+INTO|JOIN|UPDATE)\s+"?([a-z_][a-z0-9_]*)"?(?:\s*\.\s*"?([a-z_][a-z0-9_]*)"?)?/gi,
-  )) {
-    const first = match[1]?.toLowerCase();
-    const second = match[2]?.toLowerCase();
-    if (first === undefined) continue;
-    if (second === undefined || first !== schema) {
-      throw new Error(`module database for schema ${schema} cannot access ${second === undefined ? first : `${first}.${second}`}`);
-    }
-  }
-}
 function normalizePostgresSql(sql: string): string {
   return sql.replace(/\?(\d+)/g, (_match: string, index: string) => `$${index}`);
 }

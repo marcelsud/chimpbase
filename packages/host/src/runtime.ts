@@ -408,6 +408,10 @@ export class ChimpbaseHost<TServer> {
     handler: ChimpbaseActionHandler<unknown, unknown>,
     definition?: { args?: ChimpbaseValidator<unknown>; result?: ChimpbaseValidator<unknown> },
   ): ChimpbaseActionHandler<unknown, unknown> {
+    const ownership = this.registry.actionOwnership.get(name);
+    if (ownership !== undefined) {
+      throw new Error(`action ${name} is owned by module ${ownership.module} and cannot be replaced`);
+    }
     const entry = (definition?.args !== undefined)
       ? createActionEntry({
           args: definition.args,
@@ -513,7 +517,7 @@ export class ChimpbaseHost<TServer> {
 
   registerOnStop(
     name: string,
-    handler: () => Promise<void> | void,
+    handler: (ctx: ChimpbaseContext) => Promise<void> | void,
   ): void {
     this.registry.onStopHooks.push({ handler, module: null, name });
   }
@@ -628,7 +632,7 @@ export class ChimpbaseHost<TServer> {
       stop: async () => {
         for (const hook of this.registry.onStopHooks) {
           try {
-            await hook.handler();
+            await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
           } catch (err) {
             console.error(`onStop hook "${hook.name}" failed:`, err);
           }
@@ -1036,12 +1040,12 @@ export function inferMigrationsDir(
 }
 
 function applyChimpbaseApp<TServer>(host: ChimpbaseHost<TServer>, app: ChimpbaseAppDefinition): void {
-  if (app.modules.length > 0) {
-    registerChimpbaseModuleImplementations(host, host.registry, app.modules);
-  }
-
   if (app.registrations.length > 0) {
     host.register(app.registrations);
+  }
+
+  if (app.modules.length > 0) {
+    registerChimpbaseModuleImplementations(host, host.registry, app.modules);
   }
 
   host.setHttpHandler(app.httpHandler);

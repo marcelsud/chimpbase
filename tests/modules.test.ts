@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import {
   chimpbaseModuleResourceName,
+  assertChimpbaseModuleMigrationSql,
+  assertChimpbaseModuleRuntimeSql,
   composeChimpbaseModuleMigrations,
   defineChimpbaseApp,
   defineChimpbaseModuleImplementation,
@@ -15,9 +17,11 @@ import {
 import {
   action,
   cron,
+  onStop,
   onStart,
   route,
   v,
+  subscription,
   worker,
   workflow,
   workflowActionStep,
@@ -170,7 +174,7 @@ describe("business modules", () => {
         },
       }),
       implementationB,
-    ])).toThrow("module storage-a migration references foreign schema chimpbase_storage_b");
+    ])).toThrow("module storage-a migration cannot access schema chimpbase_storage_b");
 
     expect(() => composeChimpbaseModuleMigrations([
       defineChimpbaseModuleImplementation({
@@ -184,6 +188,49 @@ describe("business modules", () => {
         },
       }),
     ])).toThrow("duplicate module migration identity: storage-b:duplicate");
+
+    const once = defineChimpbaseApp({
+      migrations: { sqlite: [{ name: "framework", sql: "SELECT 1" }] },
+      modules: [implementationA, implementationB],
+    });
+    const twice = defineChimpbaseApp(once);
+    expect(twice.migrations).toEqual(once.migrations);
+    expect(twice.migrations.sqlite[0]?.owner).toBe("framework");
+  });
+
+  test("rejects app call collisions and raw module subscriptions", async () => {
+    const guarded = defineChimpbaseModuleInterface({
+      name: "guarded",
+      version: 1,
+      calls: {
+        run: { input: v.object({}), output: v.boolean(), errors: [], guarantees: [] },
+      },
+      events: {
+        happened: { payload: v.object({ id: v.string() }), version: 1 },
+      },
+    });
+    const implementation = defineChimpbaseModuleImplementation({
+      interface: guarded,
+      calls: { run: () => true },
+    });
+    await expect(createChimpbase({
+      app: defineChimpbaseApp({
+        modules: [implementation],
+        registrations: [action(guarded.calls.run.id, async () => false)],
+      }),
+      storage: { engine: "memory" },
+    })).rejects.toThrow("already owned by app-global infrastructure");
+
+    await expect(createChimpbase({
+      app: defineChimpbaseApp({
+        modules: [defineChimpbaseModuleImplementation({
+          interface: guarded,
+          calls: { run: () => true },
+          registrations: [subscription(guarded.events.happened.id, async () => {})],
+        })],
+      }),
+      storage: { engine: "memory" },
+    })).rejects.toThrow("use defineChimpbaseModuleSubscription");
   });
 
   test("Postgres Kysely scope rejects attempts to select another module schema", async () => {
@@ -196,12 +243,32 @@ describe("business modules", () => {
     } as unknown as Parameters<typeof createPostgresEngineAdapter>[0];
     const adapter = createPostgresEngineAdapter(pool, createDefaultChimpbasePlatformShim());
     const database = adapter.createKysely<{ items: { id: string } }>("chimpbase_left");
+    expect(() => assertChimpbaseModuleRuntimeSql(
+      "left",
+      "chimpbase_left",
+      "TABLE chimpbase_right.secrets",
+    )).toThrow("allows one SELECT, INSERT, UPDATE, DELETE, or WITH statement");
+    expect(() => assertChimpbaseModuleRuntimeSql(
+      "left",
+      "chimpbase_left",
+      "TRUNCATE chimpbase_right.orders",
+    )).toThrow("allows one SELECT, INSERT, UPDATE, DELETE, or WITH statement");
+    expect(() => assertChimpbaseModuleMigrationSql(
+      "left",
+      "chimpbase_left",
+      "CREATE INDEX chimpbase_left.stolen ON chimpbase_right.orders(id)",
+    )).toThrow("cannot access schema chimpbase_right");
 
     await database.selectFrom("items").select("id").execute();
     expect(queries[0]).toContain('from "chimpbase_left"."items"');
+    await database
+      .with("active", (builder) => builder.selectFrom("items").select("id"))
+      .selectFrom("active")
+      .select("id")
+      .execute();
     await expect(
       database.withSchema("chimpbase_right").selectFrom("items").select("id").execute(),
-    ).rejects.toThrow("module database for schema chimpbase_left cannot access chimpbase_right.items");
+    ).rejects.toThrow("cannot access schema chimpbase_right");
     await database.destroy();
   });
 
@@ -396,7 +463,10 @@ describe("business modules", () => {
           interface: invalidEvent,
           calls: {
             run(ctx) {
-              ctx.publish(invalidEvent.events.happened, { id: "bad" } as never);
+              ctx.publish(
+                { ...invalidEvent.events.happened, payload: v.unknown() },
+                { id: "bad" },
+              );
               return true;
             },
           },
@@ -486,7 +556,9 @@ describe("business modules", () => {
           return true;
         },
         async startFlow(ctx) {
-          await ctx.workflow.start(flow, {}, { workflowId: "one" });
+          const started = await ctx.workflow.start(flow, {}, { workflowId: "one" });
+          const loaded = await ctx.workflow.get(started.workflowId);
+          if (loaded === null) throw new Error("started workflow was not found");
           return true;
         },
         async write(ctx, input) {
@@ -500,6 +572,7 @@ describe("business modules", () => {
         route("owner", (_request, env) => new Response(env.module?.name ?? "none")),
         worker("job", async (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
         onStart("boot", (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
+        onStop("shutdown", (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
         privateStep,
         flow,
         badFlow,
@@ -552,7 +625,7 @@ describe("business modules", () => {
       await host.processNextQueueJob();
       const started = await host.start({ runWorker: false, serve: false });
       await started.stop();
-      expect(seenModules).toEqual(["left", "left", "left", "left"]);
+      expect(seenModules).toEqual(["left", "left", "left", "left", "left"]);
       await expect(host.executeAction(left.calls.rawSql.id, {})).rejects.toThrow(
         "module left raw SQL cannot access schema chimpbase_right",
       );
@@ -577,6 +650,7 @@ describe("business modules", () => {
       name: "projector",
       version: 1,
       calls: {
+        audited: { input: v.object({ id: v.string() }), output: v.boolean(), errors: [], guarantees: [] },
         seen: { input: v.object({ id: v.string() }), output: v.boolean(), errors: [], guarantees: [] },
       },
       events: {},
@@ -609,6 +683,9 @@ describe("business modules", () => {
         defineChimpbaseModuleImplementation({
           interface: projector,
           calls: {
+            async audited(ctx, input) {
+              return await ctx.kv.get(`audited:${input.id}`, v.boolean()) ?? false;
+            },
             async seen(ctx, input) {
               return await ctx.kv.get(`seen:${input.id}`, v.boolean()) ?? false;
             },
@@ -619,6 +696,9 @@ describe("business modules", () => {
               await ctx.kv.set(`seen:${event.id}`, true);
               if (event.id === "poison") throw new Error("poison event");
               if (attempts === 1) throw new Error("retry me");
+            }),
+            defineChimpbaseModuleSubscription(facts.events.committed, "audit", async (ctx, event) => {
+              await ctx.kv.set(`audited:${event.id}`, true);
             }),
           ],
         }),
@@ -647,11 +727,18 @@ describe("business modules", () => {
       await expect(restarted.processNextQueueJob()).rejects.toThrow("retry me");
       expect((await restarted.executeAction(projector.calls.seen.id, { id: "f1" })).result).toBe(false);
       await restarted.processNextQueueJob();
+      await restarted.processNextQueueJob();
       expect((await restarted.executeAction(projector.calls.seen.id, { id: "f1" })).result).toBe(true);
+      expect((await restarted.executeAction(projector.calls.audited.id, { id: "f1" })).result).toBe(true);
       expect(attempts).toBe(2);
       await restarted.executeAction(facts.calls.emit.id, { id: "poison" });
       await expect(restarted.processNextQueueJob()).rejects.toThrow("poison event");
-      await expect(restarted.processNextQueueJob()).rejects.toThrow("poison event");
+      const poisonOutcomes: Array<PromiseSettledResult<unknown>> = [];
+      for (let run = 0; run < 2; run += 1) {
+        poisonOutcomes.push(...await Promise.allSettled([restarted.processNextQueueJob()]));
+      }
+      expect(poisonOutcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+      expect((await restarted.executeAction(projector.calls.audited.id, { id: "poison" })).result).toBe(true);
       expect((await restarted.executeAction(inspectDeadLetters.name, {})).result).toBe(1);
     } finally {
       await restarted.close();
@@ -677,7 +764,10 @@ describe("module architecture tooling", () => {
     await writeFile(join(projectDir, "src/modules/alpha/legal.ts"), "import '../beta/interface.ts';\n");
     await writeFile(join(projectDir, "src/modules/alpha/alias.ts"), "import '@mods/beta/implementation';\n");
     await writeFile(join(projectDir, "src/modules/alpha/reexport.ts"), "export * from '../beta/implementation.ts';\n");
-    await writeFile(join(projectDir, "src/modules/beta/interface.ts"), "export const beta = true;\n");
+    await writeFile(
+      join(projectDir, "src/modules/beta/interface.ts"),
+      "export const beta = true;\nexport * from './implementation.ts';\n",
+    );
     await writeFile(join(projectDir, "src/modules/beta/implementation.ts"), "export const privateValue = true;\n");
     await writeFile(join(projectDir, "src/modules/gamma/interface.ts"), "export const gamma = true;\n");
     await writeFile(join(projectDir, "src/modules/gamma/illegal.ts"), "import '../beta/interface.ts';\n");
@@ -697,6 +787,7 @@ describe("module architecture tooling", () => {
     expect(diagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({ file: "src/modules/alpha/alias.ts", rule: "deep-import", sourceModule: "alpha", targetModule: "beta" }),
       expect.objectContaining({ file: "src/modules/alpha/reexport.ts", rule: "deep-import", sourceModule: "alpha", targetModule: "beta" }),
+      expect.objectContaining({ file: "src/modules/beta/interface.ts", rule: "deep-import", sourceModule: "beta", targetModule: "beta" }),
       expect.objectContaining({ file: "src/modules/gamma/illegal.ts", rule: "undeclared-dependency", sourceModule: "gamma", targetModule: "beta" }),
       expect.objectContaining({ file: "src/outside.ts", rule: "composition-root-only", sourceModule: null, targetModule: "beta" }),
     ]));
@@ -750,7 +841,16 @@ describe("module architecture tooling", () => {
       name: "contracts",
       version: 1,
       calls: {
-        fetch: previousInterface.calls.fetch,
+        fetch: {
+          input: v.object({ id: v.string() }),
+          output: v.object({
+            description: v.string().optional(),
+            id: v.string(),
+            label: v.string(),
+          }),
+          errors: ["not_found"],
+          guarantees: [],
+        },
         list: {
           input: v.object({}),
           output: v.string().array(),
@@ -766,11 +866,32 @@ describe("module architecture tooling", () => {
     const additive = generateChimpbaseModuleManifest([defineChimpbaseModuleImplementation({
       interface: additiveInterface,
       calls: {
-        fetch: () => ({ id: "1", label: "one" }),
+        fetch: () => ({ description: "new", id: "1", label: "one" }),
         list: () => [],
       },
     })]);
     expect(compareChimpbaseModuleManifests(previous, additive).classification).toBe("compatible");
+
+    const newErrorInterface = defineChimpbaseModuleInterface({
+      name: "contracts",
+      version: 1,
+      calls: {
+        fetch: {
+          input: v.object({ id: v.string() }),
+          output: v.object({ id: v.string(), label: v.string() }),
+          errors: ["not_found", "rate_limited"],
+          guarantees: [],
+        },
+      },
+      events: { changed: { payload: v.object({ id: v.string() }), version: 1 } },
+    });
+    const newErrorManifest = generateChimpbaseModuleManifest([
+      defineChimpbaseModuleImplementation({
+        interface: newErrorInterface,
+        calls: { fetch: () => ({ id: "1", label: "one" }) },
+      }),
+    ]);
+    expect(compareChimpbaseModuleManifests(previous, newErrorManifest).classification).toBe("migration-required");
 
     const breakingInterface = defineChimpbaseModuleInterface({
       name: "contracts",

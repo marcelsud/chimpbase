@@ -77,7 +77,7 @@ Framework tables remain framework-owned. Business modules use framework services
 
 ## Durable event delivery
 
-Module events use the persisted event log and an outbox queue entry committed in the publisher transaction. PostgreSQL LISTEN/NOTIFY and polling buses are wake-up optimizations, not delivery sources.
+Module events use the persisted event log and one outbox queue entry per stable subscription, all committed in the publisher transaction. PostgreSQL LISTEN/NOTIFY and polling buses are wake-up optimizations, not delivery sources.
 
 Delivery is asynchronous and at least once:
 
