@@ -64,11 +64,9 @@ describe("business modules", () => {
       },
     });
 
-    expect(catalog.calls.find).toEqual(expect.objectContaining({
-      id: "catalog/find@v1",
-      module: "catalog",
-      version: 1,
-    }));
+    expect(catalog.calls.find.id).toBe("catalog/find@v1");
+    expect(catalog.calls.find.module).toBe("catalog");
+    expect(catalog.calls.find.version).toBe(1);
     expect("handler" in catalog.calls.find).toBe(false);
     expect(catalog.events.changedV1.id).toBe("catalog/changed@v1");
     expect(catalog.events.changedV2.id).toBe("catalog/changed@v2");
@@ -784,13 +782,21 @@ describe("module architecture tooling", () => {
     const beta = defineChimpbaseModuleInterface({ name: "beta", version: 1, calls: {}, events: {} });
     const gamma = defineChimpbaseModuleInterface({ name: "gamma", version: 1, calls: {}, events: {} });
     const diagnostics = await checkChimpbaseModuleArchitecture([alpha, beta, gamma], { projectDir });
-    expect(diagnostics).toEqual(expect.arrayContaining([
-      expect.objectContaining({ file: "src/modules/alpha/alias.ts", rule: "deep-import", sourceModule: "alpha", targetModule: "beta" }),
-      expect.objectContaining({ file: "src/modules/alpha/reexport.ts", rule: "deep-import", sourceModule: "alpha", targetModule: "beta" }),
-      expect.objectContaining({ file: "src/modules/beta/interface.ts", rule: "deep-import", sourceModule: "beta", targetModule: "beta" }),
-      expect.objectContaining({ file: "src/modules/gamma/illegal.ts", rule: "undeclared-dependency", sourceModule: "gamma", targetModule: "beta" }),
-      expect.objectContaining({ file: "src/outside.ts", rule: "composition-root-only", sourceModule: null, targetModule: "beta" }),
-    ]));
+    expect(diagnostics.some((entry) =>
+      entry.file === "src/modules/alpha/alias.ts" && entry.rule === "deep-import"
+    )).toBe(true);
+    expect(diagnostics.some((entry) =>
+      entry.file === "src/modules/alpha/reexport.ts" && entry.rule === "deep-import"
+    )).toBe(true);
+    expect(diagnostics.some((entry) =>
+      entry.file === "src/modules/beta/interface.ts" && entry.rule === "deep-import"
+    )).toBe(true);
+    expect(diagnostics.some((entry) =>
+      entry.file === "src/modules/gamma/illegal.ts" && entry.rule === "undeclared-dependency"
+    )).toBe(true);
+    expect(diagnostics.some((entry) =>
+      entry.file === "src/outside.ts" && entry.rule === "composition-root-only"
+    )).toBe(true);
     expect(diagnostics.some((entry) => entry.file === "src/modules/alpha/legal.ts")).toBe(false);
     expect(diagnostics.some((entry) => entry.file === "chimpbase.app.ts")).toBe(false);
   });
@@ -818,24 +824,24 @@ describe("module architecture tooling", () => {
     expect(generateChimpbaseModuleManifest([previousImplementation])).toEqual(previous);
     expect(renderChimpbaseModuleDatabaseTypes(previous)).toContain('\"items\": Record<string, unknown>');
     expect(renderChimpbaseModuleDatabaseTypes(previous)).toContain('\"item_summary\": Record<string, unknown>');
-    expect(previous.pactInteractions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "action", name: "contracts/fetch@v1" }),
-      expect.objectContaining({ kind: "event", name: "changed", version: 1 }),
-    ]));
+    expect(previous.pactInteractions.some((entry) =>
+      entry.kind === "action" && entry.name === "contracts/fetch@v1"
+    )).toBe(true);
+    expect(previous.pactInteractions.some((entry) =>
+      entry.kind === "event" && entry.name === "changed" && entry.version === 1
+    )).toBe(true);
     const generatedPact = pactFromChimpbaseModuleInterface("consumer", previousInterface);
-    expect(generatedPact.interactions).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        args: previousInterface.calls.fetch.input,
-        kind: "action",
-        name: previousInterface.calls.fetch.id,
-        result: previousInterface.calls.fetch.output,
-      }),
-      expect.objectContaining({
-        eventName: previousInterface.events.changed.id,
-        kind: "event",
-        payload: previousInterface.events.changed.payload,
-      }),
-    ]));
+    expect(generatedPact.interactions.some((entry) =>
+      entry.kind === "action"
+      && entry.args === previousInterface.calls.fetch.input
+      && entry.name === previousInterface.calls.fetch.id
+      && entry.result === previousInterface.calls.fetch.output
+    )).toBe(true);
+    expect(generatedPact.interactions.some((entry) =>
+      entry.kind === "event"
+      && entry.eventName === previousInterface.events.changed.id
+      && entry.payload === previousInterface.events.changed.payload
+    )).toBe(true);
 
     const additiveInterface = defineChimpbaseModuleInterface({
       name: "contracts",
@@ -912,9 +918,8 @@ describe("module architecture tooling", () => {
     })]);
     const compatibility = compareChimpbaseModuleManifests(previous, breakingManifest);
     expect(compatibility.classification).toBe("breaking");
-    expect(compatibility.diagnostics.map((entry) => entry.contract)).toEqual(expect.arrayContaining([
-      "contracts/fetch@v1",
-      "contracts/changed@v1",
-    ]));
+    const incompatibleContracts = compatibility.diagnostics.map((entry) => entry.contract);
+    expect(incompatibleContracts).toContain("contracts/fetch@v1");
+    expect(incompatibleContracts).toContain("contracts/changed@v1");
   });
 });

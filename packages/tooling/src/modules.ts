@@ -8,6 +8,12 @@ import type {
   ChimpbaseModuleImplementation,
   ChimpbaseModuleInterface,
 } from "@chimpbase/core";
+import { isArrayValue } from "@chimpbase/runtime";
+
+const readTypeScriptConfigFile: (
+  fileName: string,
+  readFile: (path: string) => string | undefined,
+) => { config?: unknown; error?: ts.Diagnostic } = ts.readConfigFile;
 
 export type ChimpbaseModuleCompatibility = "breaking" | "compatible" | "migration-required";
 
@@ -437,8 +443,9 @@ function readCompilerOptions(projectDir: string): ts.CompilerOptions {
   if (configPath === undefined) {
     return { allowImportingTsExtensions: true, moduleResolution: ts.ModuleResolutionKind.Bundler };
   }
-  const config = ts.readConfigFile(configPath, ts.sys.readFile);
+  const config = readTypeScriptConfigFile(configPath, ts.sys.readFile);
   if (config.error !== undefined) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, "\n"));
+  if (config.config === undefined) throw new Error(`TypeScript config ${configPath} has no configuration`);
   return ts.parseJsonConfigFileContent(config.config, ts.sys, dirname(configPath)).options;
 }
 
@@ -492,9 +499,18 @@ function findDependencyCycleDiagnostics(
 }
 
 function normalizeResources(resources: ChimpbaseModuleImplementation["resources"]): Record<string, readonly string[]> {
-  const entries: Array<[string, readonly string[]]> = Object.entries(resources)
-    .filter((entry): entry is [string, readonly string[]] => Array.isArray(entry[1]))
-    .map(([key, values]) => [key, [...values].sort()]);
+  const valuesByKey: Record<string, readonly string[] | undefined> = {
+    collections: resources.collections,
+    kvPrefixes: resources.kvPrefixes,
+    projections: resources.projections,
+    queues: resources.queues,
+    streams: resources.streams,
+    tables: resources.tables,
+    workflows: resources.workflows,
+  };
+  const entries = Object.entries(valuesByKey)
+    .filter((entry): entry is [string, readonly string[]] => entry[1] !== undefined)
+    .map(([key, values]): [string, readonly string[]] => [key, [...values].sort()]);
   entries.sort((left, right) => left[0].localeCompare(right[0]));
   return Object.fromEntries(entries);
 }
@@ -505,7 +521,7 @@ function schemaAccepts(previous: unknown, next: unknown): boolean {
   if (previous.type === "object" && next.type === "object") {
     const previousProperties = isRecord(previous.properties) ? previous.properties : {};
     const nextProperties = isRecord(next.properties) ? next.properties : {};
-    const nextRequired = new Set(Array.isArray(next.required) ? next.required.filter((value): value is string => typeof value === "string") : []);
+    const nextRequired = new Set(readStringValues(next.required));
     for (const [name, schema] of Object.entries(previousProperties)) {
       const nextSchema = nextProperties[name];
       if (nextSchema === undefined || !schemaAccepts(schema, nextSchema)) return false;
@@ -524,16 +540,8 @@ function schemaPreserves(previous: unknown, next: unknown): boolean {
   if (previous.type !== "object" || next.type !== "object") return false;
   const previousProperties = isRecord(previous.properties) ? previous.properties : {};
   const nextProperties = isRecord(next.properties) ? next.properties : {};
-  const previousRequired = new Set(
-    Array.isArray(previous.required)
-      ? previous.required.filter((value): value is string => typeof value === "string")
-      : [],
-  );
-  const nextRequired = new Set(
-    Array.isArray(next.required)
-      ? next.required.filter((value): value is string => typeof value === "string")
-      : [],
-  );
+  const previousRequired = new Set(readStringValues(previous.required));
+  const nextRequired = new Set(readStringValues(next.required));
   for (const [name, schema] of Object.entries(previousProperties)) {
     const nextSchema = nextProperties[name];
     if (nextSchema === undefined || !schemaPreserves(schema, nextSchema)) return false;
@@ -600,11 +608,17 @@ function stableSerialize(value: unknown): string {
 }
 
 function sortSerializableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => sortSerializableValue(entry));
+  if (isArrayValue(value)) return value.map((entry) => sortSerializableValue(entry));
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => [key, sortSerializableValue(entry)]));
+}
+
+function readStringValues(value: unknown): string[] {
+  return isArrayValue(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
