@@ -31,6 +31,7 @@ const expectedExports = {
   "./tooling/cli": "./packages/tooling/dist/src/cli.js",
   "./tooling/config": "./packages/tooling/dist/src/config.js",
   "./tooling/migrations": "./packages/tooling/dist/src/migrations.js",
+  "./tooling/modules": "./packages/tooling/dist/src/modules.js",
   "./tooling/postgres_docker": "./packages/tooling/dist/src/postgres_docker.js",
   "./tooling/schema": "./packages/tooling/dist/src/schema.js",
   "./tooling/secrets": "./packages/tooling/dist/src/secrets.js",
@@ -73,6 +74,7 @@ const expectedDependencies = {
   "@types/pg": "^8.15.6",
   kysely: "^0.28.11",
   pg: "^8.16.3",
+  typescript: "^5.9.3",
 };
 const expectedScripts = {
   "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host deno node bun rest-collections otel auth blobs webhooks pact mesh",
@@ -205,7 +207,7 @@ async function validateStagedPackage(exports) {
     for (const [exportName, command, commandArgs] of [
       ["./runtime/node/cli", process.execPath, []],
       ["./runtime/bun/cli", "bun", []],
-      ["./runtime/deno/cli", "deno", ["run"]],
+      ["./runtime/deno/cli", "deno", ["run", "--allow-env"]],
     ]) {
       const target = resolve(stageRoot, exports[exportName].default);
       await runExpectedFailure(

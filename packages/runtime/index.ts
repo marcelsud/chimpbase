@@ -22,6 +22,25 @@ export interface ChimpbaseValidator<TValue = unknown> {
   parse(value: unknown, path?: string): TValue;
 }
 
+export interface ChimpbaseModuleCallReference<TInput = unknown, TOutput = unknown> {
+  readonly id: string;
+  readonly input: ChimpbaseValidator<TInput>;
+  readonly kind: "module-call";
+  readonly module: string;
+  readonly name: string;
+  readonly output: ChimpbaseValidator<TOutput>;
+  readonly version: number;
+}
+
+export interface ChimpbaseModuleEventReference<TPayload = unknown> {
+  readonly id: string;
+  readonly kind: "module-event";
+  readonly module: string;
+  readonly name: string;
+  readonly payload: ChimpbaseValidator<TPayload>;
+  readonly version: number;
+}
+
 /**
  * A validator whose value may be absent. `isOptional` is required here so that
  * object shapes can tell optional keys from required ones at the type level.
@@ -56,6 +75,7 @@ type ChimpbaseAnyHandler = (ctx: never, ...args: never[]) => unknown;
  */
 export interface ChimpbaseActionRegistrationLike {
   args?: ChimpbaseValidator<unknown>;
+  result?: ChimpbaseValidator<unknown>;
   /** Widened because argument tuples are invariant; re-apply the concrete handler type to call it. */
   handler: unknown;
   kind: "action";
@@ -308,6 +328,11 @@ export type ChimpbaseWorkflowRunResult<TInput = unknown, TState = unknown> =
 
 export interface ChimpbaseWorkflowRunContext<TInput = unknown, TState = unknown>
   extends ChimpbaseWorkflowRuntimeState<TInput, TState> {
+  call<TCallInput, TOutput>(
+    contract: ChimpbaseModuleCallReference<TCallInput, TOutput>,
+    input: TCallInput,
+  ): Promise<TOutput>;
+  readonly module: { readonly name: string } | null;
   action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
@@ -656,6 +681,7 @@ export interface ChimpbaseLogger {
 }
 
 export interface ChimpbaseDbClient {
+  readonly schema: string | null;
   query(sql: string, params?: readonly unknown[]): Promise<ChimpbaseQueryResult<ChimpbaseRow>>;
   query<T>(
     sql: string,
@@ -666,8 +692,14 @@ export interface ChimpbaseDbClient {
 }
 
 export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> {
+  call<TInput, TOutput>(
+    contract: ChimpbaseModuleCallReference<TInput, TOutput>,
+    input: TInput,
+  ): Promise<TOutput>;
   db: ChimpbaseDbClient;
   pubsub: ChimpbasePubSubClient;
+  readonly module: { readonly name: string } | null;
+  publish<TPayload>(contract: ChimpbaseModuleEventReference<TPayload>, payload: TPayload): void;
   secret(name: string): string | null;
   kv: ChimpbaseKvClient;
   collection: ChimpbaseCollectionClient;
@@ -707,6 +739,10 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
 }
 
 export interface ChimpbaseRouteEnv<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> {
+  call<TInput, TOutput>(
+    contract: ChimpbaseModuleCallReference<TInput, TOutput>,
+    input: TInput,
+  ): Promise<TOutput>;
   action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
     ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
@@ -720,6 +756,8 @@ export interface ChimpbaseRouteEnv<TActions extends ChimpbaseActionMap = Chimpba
     ...args: TArgs
   ): Promise<TResult>;
   blobs: ChimpbaseBlobsClient;
+  readonly module: { readonly name: string } | null;
+  publish<TPayload>(contract: ChimpbaseModuleEventReference<TPayload>, payload: TPayload): void;
   get(key: string): unknown;
   get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
   set(key: string, value: unknown): void;
@@ -812,12 +850,12 @@ export interface ChimpbaseRegistrationTarget {
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
     name: string,
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
-    definition?: { args?: undefined },
+    definition?: { args?: undefined; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseTupleActionHandler<TArgs, TResult>;
   registerAction<TArgs, TResult = unknown>(
     name: string,
     handler: ChimpbaseObjectActionHandler<TArgs, TResult>,
-    definition: { args: ChimpbaseValidator<TArgs> },
+    definition: { args: ChimpbaseValidator<TArgs>; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseObjectActionHandler<TArgs, TResult>;
   registerSubscription<TPayload = unknown, TResult = unknown>(
     eventName: string,
@@ -836,7 +874,7 @@ export interface ChimpbaseRegistrationTarget {
   ): ChimpbaseCronHandler<TResult>;
   registerRoute?(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler;
   registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
-  registerOnStop?(name: string, handler: () => Promise<void> | void): void;
+  registerOnStop?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
   registerContextExtension?(registration: ChimpbaseContextExtensionRegistration): void;
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
@@ -860,6 +898,7 @@ export interface ChimpbaseActionRegistration<
 > {
   (...args: ChimpbaseActionCallArgs<TArgs>): Promise<TResult>;
   args?: ChimpbaseValidator<TArgs>;
+  result?: ChimpbaseValidator<TResult>;
   kind: "action";
   handler: ChimpbaseActionHandler<TArgs, TResult, TActions>;
   name: string;
@@ -924,8 +963,10 @@ export interface ChimpbaseOnStartRegistration<
   name: string;
 }
 
-export interface ChimpbaseOnStopRegistration {
-  handler: () => Promise<void> | void;
+export interface ChimpbaseOnStopRegistration<
+  TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+> {
+  handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void;
   kind: "onStop";
   name: string;
 }
@@ -1057,7 +1098,8 @@ type RuntimeGlobals = typeof globalThis & {
   ) => ChimpbaseWorkflowDefinition<TInput, TState>;
 };
 
-interface ChimpbaseActionOptions {
+interface ChimpbaseActionOptions<TResult = unknown> {
+  result?: ChimpbaseValidator<TResult>;
   telemetry?: ChimpbaseTelemetryPersistOption;
 }
 
@@ -1090,7 +1132,7 @@ interface ChimpbaseActionDefinitionInput<
   TArgs,
   TResult,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
-> extends ChimpbaseActionOptions {
+> extends ChimpbaseActionOptions<TResult> {
   args: ChimpbaseValidator<TArgs>;
   handler: ChimpbaseObjectActionHandler<TArgs, TResult, TActions>;
   name?: string;
@@ -1099,7 +1141,7 @@ interface ChimpbaseActionDefinitionInput<
 interface ChimpbaseActionWithoutArgsInput<
   TResult,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
-> extends ChimpbaseActionOptions {
+> extends ChimpbaseActionOptions<TResult> {
   handler: ChimpbaseTupleActionHandler<[], TResult, TActions>;
   name?: string;
 }
@@ -1111,7 +1153,7 @@ export function action<
 >(
   name: string,
   handler: ChimpbaseTupleActionHandler<TArgs, TResult, TActions>,
-  options?: ChimpbaseActionOptions,
+  options?: ChimpbaseActionOptions<TResult>,
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions>;
 export function action<
   TArgs,
@@ -1145,6 +1187,7 @@ export function action<
         handler: inputOrName.handler,
         kind: "action",
         name: inputOrName.name ?? "",
+        result: inputOrName.result,
         telemetry: inputOrName.telemetry,
       });
     }
@@ -1152,6 +1195,7 @@ export function action<
       handler: inputOrName.handler,
       kind: "action",
       name: inputOrName.name ?? "",
+      result: inputOrName.result,
       telemetry: inputOrName.telemetry,
     });
   }
@@ -1165,6 +1209,7 @@ export function action<
       handler: handler.handler,
       kind: "action",
       name: inputOrName,
+      result: options?.result ?? handler.result,
       telemetry: options?.telemetry ?? handler.telemetry,
     });
   }
@@ -1176,6 +1221,7 @@ export function action<
     handler,
     kind: "action",
     name: inputOrName,
+    result: options?.result,
     telemetry: options?.telemetry,
   });
 }
@@ -1261,10 +1307,10 @@ export function onStart<TActions extends ChimpbaseActionMap = ChimpbaseActionReg
   return { handler, kind: "onStart", name };
 }
 
-export function onStop(
+export function onStop<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
   name: string,
-  handler: () => Promise<void> | void,
-): ChimpbaseOnStopRegistration {
+  handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void,
+): ChimpbaseOnStopRegistration<TActions> {
   return { handler, kind: "onStop", name };
 }
 
@@ -1595,12 +1641,12 @@ export function register(
           if (!isObjectRegistrationHandler(entry.handler)) {
             throw new TypeError(`action ${actionName} has an invalid object handler`);
           }
-          target.registerAction(actionName, entry.handler, { args: entry.args });
+          target.registerAction(actionName, entry.handler, { args: entry.args, result: entry.result });
         } else {
           if (!isTupleRegistrationHandler(entry.handler)) {
             throw new TypeError(`action ${actionName} has an invalid tuple handler`);
           }
-          target.registerAction(actionName, entry.handler);
+          target.registerAction(actionName, entry.handler, { result: entry.result });
         }
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`action:${actionName}`, entry.telemetry);
@@ -2615,6 +2661,7 @@ function createActionRegistration<
     handler: unknown;
     kind: "action";
     name?: string;
+    result?: ChimpbaseValidator<TResult>;
     telemetry?: ChimpbaseTelemetryPersistOption;
   },
 ): ChimpbaseActionRegistration<TArgs, TResult, TActions> {
@@ -2640,6 +2687,10 @@ function createActionRegistration<
 
   if (registration.args !== undefined) {
     defineRegistrationProperty(callable, "args", registration.args);
+  }
+
+  if (registration.result !== undefined) {
+    defineRegistrationProperty(callable, "result", registration.result);
   }
 
   if (registration.telemetry !== undefined) {

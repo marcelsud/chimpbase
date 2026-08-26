@@ -13,6 +13,10 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
+import {
+  assertChimpbaseModuleCompiledSql,
+  createChimpbaseEventDeliveryPayloads,
+} from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -563,7 +567,23 @@ export function createPostgresEngineAdapter(
       return matched.length;
     },
     async commitTransaction(events: ChimpbaseEventRecord[]) {
-      await persistEvents(queryable(), events);
+      const connection = queryable();
+      await persistEvents(connection, events);
+      const availableAtMs = platform.now();
+      for (const event of events) {
+        for (const payload of createChimpbaseEventDeliveryPayloads(event)) {
+          await connection.query(
+            `INSERT INTO _chimpbase_queue_jobs (
+              queue_name, payload_json, status, available_at_ms, attempt_count
+            ) VALUES ($1, $2::jsonb, 'pending', $3, 0)`,
+            [
+              "__chimpbase.subscription.run",
+              JSON.stringify(payload),
+              availableAtMs,
+            ],
+          );
+        }
+      }
       if ((transactionClient !== null)) {
         await transactionClient.query("COMMIT");
         transactionClient.release();
@@ -688,9 +708,10 @@ export function createPostgresEngineAdapter(
         [status, nextAvailableAtMs, errorMessage, jobId],
       );
     },
-    createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      return createPostgresKysely<TDatabase>({
+    createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase> {
+      const database = createPostgresKysely<TDatabase>({
         async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+          if (schema !== undefined) assertChimpbaseModuleCompiledSql(schema, compiledQuery.sql);
           const result = await queryable().query<Record<string, unknown>>(
             compiledQuery.sql,
             [...compiledQuery.parameters],
@@ -702,6 +723,7 @@ export function createPostgresEngineAdapter(
           };
         },
       });
+      return schema === undefined ? database : database.withSchema(schema);
     },
     async query<T>(
       sql: string,
@@ -1157,6 +1179,7 @@ function sliceBlobList(
     if (entries.length + commonPrefixes.size >= limit) {
       nextCursor = entries.length > 0 ? entries[entries.length - 1].key : row.key;
       break;
+
     }
     if ((delimiter !== null && delimiter.length > 0)) {
       const after = row.key.slice(prefix.length);

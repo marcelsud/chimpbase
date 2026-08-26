@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- added business-module interfaces and private implementations with validated calls, versioned events, declared dependencies, runtime ownership guards, scoped state and migrations, durable outbox delivery, and generated architecture/compatibility/Pact artifacts
+- added `chimpbase modules sync` and `chimpbase modules check`, plus a representative modular-monolith application
+
 ### Changed
 
 - consolidated the public API into one `chimpbase` package with portable root and runtime exports, direct feature subpaths, and explicit `runtime/bun`, `runtime/node`, and `runtime/deno` adapter subpaths

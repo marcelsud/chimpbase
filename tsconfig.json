@@ -33,6 +33,7 @@
       "chimpbase/tooling/cli": ["./packages/tooling/src/cli.ts"],
       "chimpbase/tooling/config": ["./packages/tooling/src/config.ts"],
       "chimpbase/tooling/migrations": ["./packages/tooling/src/migrations.ts"],
+      "chimpbase/tooling/modules": ["./packages/tooling/src/modules.ts"],
       "chimpbase/tooling/postgres_docker": ["./packages/tooling/src/postgres_docker.ts"],
       "chimpbase/tooling/schema": ["./packages/tooling/src/schema.ts"],
       "chimpbase/tooling/secrets": ["./packages/tooling/src/secrets.ts"],

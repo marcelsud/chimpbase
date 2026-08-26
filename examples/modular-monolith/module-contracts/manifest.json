@@ -1,0 +1,306 @@
+{
+  "eventGraph": [
+    {
+      "consumer": "notifications",
+      "event": "accounts/created@v1",
+      "publisher": "accounts",
+      "subscription": "record-welcome"
+    }
+  ],
+  "modules": [
+    {
+      "calls": [
+        {
+          "errors": [
+            "account_already_exists"
+          ],
+          "guarantees": [
+            "account is persisted before AccountCreated is published"
+          ],
+          "id": "accounts/create@v1",
+          "inputSchema": {
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "email",
+              "id"
+            ],
+            "type": "object"
+          },
+          "name": "create",
+          "outputSchema": {
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "email",
+              "id"
+            ],
+            "type": "object"
+          },
+          "version": 1
+        },
+        {
+          "errors": [],
+          "guarantees": [
+            "reads committed account state"
+          ],
+          "id": "accounts/get@v1",
+          "inputSchema": {
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "name": "get",
+          "outputSchema": {
+            "anyOf": [
+              {
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": 1
+        }
+      ],
+      "dependencies": [],
+      "events": [
+        {
+          "id": "accounts/created@v1",
+          "name": "created",
+          "payloadSchema": {
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "email",
+              "id"
+            ],
+            "type": "object"
+          },
+          "version": 1
+        }
+      ],
+      "migrations": {
+        "postgres": [],
+        "sqlite": []
+      },
+      "name": "accounts",
+      "resources": {
+        "collections": [
+          "accounts"
+        ]
+      },
+      "subscriptions": [],
+      "version": 1
+    },
+    {
+      "calls": [
+        {
+          "errors": [
+            "account_not_found"
+          ],
+          "guarantees": [
+            "message reflects committed account data"
+          ],
+          "id": "notifications/welcomeMessage@v1",
+          "inputSchema": {
+            "properties": {
+              "accountId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "accountId"
+            ],
+            "type": "object"
+          },
+          "name": "welcomeMessage",
+          "outputSchema": {
+            "type": "string"
+          },
+          "version": 1
+        }
+      ],
+      "dependencies": [
+        "accounts"
+      ],
+      "events": [],
+      "migrations": {
+        "postgres": [],
+        "sqlite": []
+      },
+      "name": "notifications",
+      "resources": {
+        "kvPrefixes": [
+          "welcomed:"
+        ]
+      },
+      "subscriptions": [
+        {
+          "event": "accounts/created@v1",
+          "name": "record-welcome"
+        }
+      ],
+      "version": 1
+    }
+  ],
+  "pactInteractions": [
+    {
+      "inputSchema": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "id"
+        ],
+        "type": "object"
+      },
+      "kind": "action",
+      "name": "accounts/create@v1",
+      "outputSchema": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "id"
+        ],
+        "type": "object"
+      },
+      "provider": "accounts"
+    },
+    {
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "kind": "action",
+      "name": "accounts/get@v1",
+      "outputSchema": {
+        "anyOf": [
+          {
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "email",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "provider": "accounts"
+    },
+    {
+      "kind": "event",
+      "name": "created",
+      "payloadSchema": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "id"
+        ],
+        "type": "object"
+      },
+      "provider": "accounts",
+      "version": 1
+    },
+    {
+      "inputSchema": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "kind": "action",
+      "name": "notifications/welcomeMessage@v1",
+      "outputSchema": {
+        "type": "string"
+      },
+      "provider": "notifications"
+    }
+  ],
+  "schemaVersion": 1,
+  "synchronousGraph": [
+    {
+      "source": "notifications",
+      "target": "accounts"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
+import { createChimpbaseEventDeliveryPayloads } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -636,6 +637,21 @@ export function createSqliteEngineAdapter(
     },
     async commitTransaction(events: ChimpbaseEventRecord[]) {
       persistEvents(db, events);
+      const availableAtMs = platform.now();
+      const statement = db.query(
+        `INSERT INTO _chimpbase_queue_jobs (
+          queue_name, payload_json, status, available_at_ms, attempt_count
+        ) VALUES (?1, ?2, 'pending', ?3, 0)`,
+      );
+      for (const event of events) {
+        for (const payload of createChimpbaseEventDeliveryPayloads(event)) {
+          statement.run(
+            "__chimpbase.subscription.run",
+            JSON.stringify(payload),
+            availableAtMs,
+          );
+        }
+      }
       db.exec("COMMIT");
     },
     async completeQueueJob(jobId: number) {

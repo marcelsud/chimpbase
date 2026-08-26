@@ -17,6 +17,8 @@ export {
   type SerializedPactWorkerInteraction,
 } from "./contract.ts";
 
+export { pactFromChimpbaseModuleInterface } from "./modules.ts";
+
 export {
   verifyPact,
   type PactVerificationHost,

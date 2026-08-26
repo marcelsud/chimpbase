@@ -1,0 +1,11 @@
+Chimpbase module architecture
+
+accounts v1
+  depends: none
+  call: accounts/create@v1
+  call: accounts/get@v1
+  event: accounts/created@v1
+notifications v1
+  depends: accounts
+  call: notifications/welcomeMessage@v1
+  consumes: accounts/created@v1 as record-welcome

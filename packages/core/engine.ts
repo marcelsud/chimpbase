@@ -24,6 +24,8 @@ import type {
   ChimpbaseCollectionPatch,
   ChimpbaseValidator,
   ChimpbaseContext,
+  ChimpbaseModuleCallReference,
+  ChimpbaseModuleEventReference,
   ChimpbaseCronInvocation,
   ChimpbaseDlqEnvelope,
   ChimpbaseKvListOptions,
@@ -64,18 +66,58 @@ import {
   type ChimpbasePlatformShim,
   type ChimpbaseSecretsSource,
 } from "./host.ts";
+import {
+  chimpbaseModuleResourceName,
+  chimpbaseModuleResourcePrefix,
+  chimpbaseModuleSchemaName,
+} from "./modules.ts";
+import { assertChimpbaseModuleRuntimeSql } from "./sql-ownership.ts";
 import type { ChimpbaseRegistry, ChimpbaseTelemetryPersistOverride } from "./index.ts";
 
 export interface ChimpbaseExecutionScope {
-  kind: "action" | "cron" | "queue" | "subscription";
+  kind: "action" | "cron" | "lifecycle" | "queue" | "route" | "subscription" | "workflow";
+  module: string | null;
   name: string;
 }
 
 export interface ChimpbaseEventRecord {
   id?: number;
+  dispatch?: boolean;
+  deliverySubscriptions?: readonly string[];
   name: string;
   payload: unknown;
   payloadJson: string;
+}
+
+export interface ChimpbaseEventDeliveryPayload {
+  eventId: number;
+  eventName: string;
+  payload: unknown;
+  payloadJson: string;
+  subscriptionName?: string;
+}
+
+export function createChimpbaseEventDeliveryPayloads(
+  event: ChimpbaseEventRecord,
+): ChimpbaseEventDeliveryPayload[] {
+  if (event.id === undefined) return [];
+  if ((event.deliverySubscriptions?.length ?? 0) > 0) {
+    return event.deliverySubscriptions?.map((subscriptionName) => ({
+      eventId: event.id as number,
+      eventName: event.name,
+      payload: event.payload,
+      payloadJson: event.payloadJson,
+      subscriptionName,
+    })) ?? [];
+  }
+  return event.dispatch === true
+    ? [{
+        eventId: event.id,
+        eventName: event.name,
+        payload: event.payload,
+        payloadJson: event.payloadJson,
+      }]
+    : [];
 }
 
 export interface ChimpbaseQueueJobRecord {
@@ -185,6 +227,7 @@ interface SubscriptionQueuePayload {
   eventName: string;
   payload: unknown;
   payloadJson: string;
+  subscriptionName?: string;
 }
 
 type WorkflowRunDirective = ChimpbaseWorkflowRunResult<unknown, unknown>;
@@ -197,6 +240,7 @@ const subscriptionQueuePayloadValidator = v.object({
   eventName: v.string(),
   payload: v.unknown().optional(),
   payloadJson: v.string(),
+  subscriptionName: v.string().optional(),
 });
 const workflowQueuePayloadValidator = v.object({
   workflowId: v.string(),
@@ -307,7 +351,7 @@ export interface ChimpbaseEngineAdapter {
     nextAvailableAtMs: number,
     errorMessage: string,
   ): Promise<void>;
-  createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase>;
+  createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase>;
   query<T>(sql: string, params: readonly unknown[], validator: ChimpbaseValidator<T>): Promise<T[]>;
   queueEnqueue<TPayload = unknown>(
     name: string,
@@ -499,6 +543,7 @@ export class ChimpbaseEngine {
     }
 
     this.registry.workers.set(INTERNAL_CRON_QUEUE_NAME, {
+      module: null,
       definition: { dlq: false },
       handler: async (_ctx, payload) => {
         const message = cronQueuePayloadValidator.parse(payload, "cron queue payload");
@@ -512,7 +557,7 @@ export class ChimpbaseEngine {
     }
 
     this.registry.workers.set(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
-      definition: { dlq: false },
+      definition: { dlq: `${INTERNAL_SUBSCRIPTION_QUEUE_NAME}.dlq` },
       handler: async (_ctx, payload) => {
         const message = subscriptionQueuePayloadValidator.parse(payload, "subscription queue payload");
         await this.dispatchSubscriptions([
@@ -522,8 +567,9 @@ export class ChimpbaseEngine {
             payload: message.payload,
             payloadJson: message.payloadJson,
           },
-        ]);
+        ], message.subscriptionName);
       },
+      module: null,
       name: INTERNAL_SUBSCRIPTION_QUEUE_NAME,
     });
 
@@ -532,6 +578,7 @@ export class ChimpbaseEngine {
     }
 
     this.registry.workers.set(INTERNAL_WORKFLOW_QUEUE_NAME, {
+      module: null,
       definition: { dlq: false },
       handler: async (_ctx, payload) => {
         const message = workflowQueuePayloadValidator.parse(payload, "workflow queue payload");
@@ -543,10 +590,11 @@ export class ChimpbaseEngine {
 
   startEventBus(): void {
     this.eventBus.start(async (events, ack) => {
+      const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
       if (this.subscriptionsConfig.dispatch === "async") {
-        await this.enqueueSubscriptionDispatchJobs(events);
+        await this.enqueueSubscriptionDispatchJobs(legacyEvents);
       } else {
-        await this.dispatchSubscriptions(events);
+        await this.dispatchSubscriptions(legacyEvents);
       }
       await ack?.();
     });
@@ -558,7 +606,17 @@ export class ChimpbaseEngine {
 
   async executeAction(name: string, args: unknown[] = []): Promise<ChimpbaseActionExecutionResult> {
     const telemetryStart = this.telemetryRecords.length;
-    const scope: ChimpbaseExecutionScope = { kind: "action", name };
+    const ownership = this.registry.actionOwnership.get(name);
+    if (ownership?.visibility === "internal") {
+      throw new Error(
+        `module call denied: caller <app>, target ${ownership.module}, contract ${name}, rule internal operation`,
+      );
+    }
+    const scope: ChimpbaseExecutionScope = {
+      kind: "action",
+      module: ownership?.module ?? null,
+      name,
+    };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
@@ -591,14 +649,23 @@ export class ChimpbaseEngine {
   async executeRoute(request: Request): Promise<ChimpbaseRouteExecutionResult> {
     const telemetryStart = this.telemetryRecords.length;
     const url = new URL(request.url, "http://localhost");
-    const scope: ChimpbaseExecutionScope = { kind: "action", name: `route:${request.method} ${url.pathname}` };
+    const scope: ChimpbaseExecutionScope = {
+      kind: "route",
+      module: null,
+      name: `route:${request.method} ${url.pathname}`,
+    };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
-      const routeEnv = this.createRouteEnv();
-      let invoke = async () => await this.runWithActionInvoker(async () => {
+      const routeContext = new Map<string, unknown>();
+      let invoke = async () => {
         for (const route of this.registry.routes) {
-          const matched = await route.handler(request, routeEnv);
+          const moduleName = this.registry.registrationOwnership.get(`route:${route.name}`) ?? null;
+          const routeEnv = this.createRouteEnv(moduleName, routeContext);
+          const matched = await this.runInTransaction(async () => await this.runWithActionInvoker(
+            async () => await route.handler(request, routeEnv),
+            moduleName,
+          ));
           if (matched !== null && matched !== undefined) {
             return matched;
           }
@@ -608,8 +675,11 @@ export class ChimpbaseEngine {
           return null;
         }
 
-        return await this.registry.httpHandler(request, routeEnv);
-      });
+        return await this.runInTransaction(async () => await this.runWithActionInvoker(
+          async () => await this.registry.httpHandler?.(request, this.createRouteEnv(null, routeContext)) ?? null,
+          null,
+        ));
+      };
 
       for (const span of handlerSpans) {
         const runInContext = span.runInContext?.bind(span);
@@ -764,7 +834,12 @@ export class ChimpbaseEngine {
       queueNames.push(INTERNAL_CRON_QUEUE_NAME);
     }
 
-    if (this.subscriptionsConfig.dispatch === "async" && this.registry.subscriptions.size > 0) {
+    const hasModuleSubscriptions = [...this.registry.subscriptions.values()]
+      .some((entries) => entries.some((entry) => entry.module != null));
+    if (
+      this.registry.subscriptions.size > 0
+      && (this.subscriptionsConfig.dispatch === "async" || hasModuleSubscriptions)
+    ) {
       queueNames.push(INTERNAL_SUBSCRIPTION_QUEUE_NAME);
     }
 
@@ -784,7 +859,11 @@ export class ChimpbaseEngine {
     }
 
 
-    const scope: ChimpbaseExecutionScope = { kind: "queue", name: job.queue_name };
+    const scope: ChimpbaseExecutionScope = {
+      kind: "queue",
+      module: worker.module ?? null,
+      name: job.queue_name,
+    };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
@@ -1002,8 +1081,10 @@ export class ChimpbaseEngine {
     };
   }
 
-  createRouteEnv(): ChimpbaseRouteEnv {
-    const contextMap = new Map<string, unknown>();
+  createRouteEnv(
+    moduleName: string | null = null,
+    contextMap = new Map<string, unknown>(),
+  ): ChimpbaseRouteEnv {
     const blobsClient = this.createBlobsClient();
     function get(key: string): unknown;
     function get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
@@ -1014,11 +1095,19 @@ export class ChimpbaseEngine {
         : validator.parse(value, `route context ${key}`);
     }
     const env: ChimpbaseRouteEnv = {
+      call: async <TInput, TOutput>(
+        contract: ChimpbaseModuleCallReference<TInput, TOutput>,
+        input: TInput,
+      ): Promise<TOutput> => await this.invokeModuleCall(contract, input, moduleName),
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
         nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
-      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
+      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, moduleName),
       blobs: blobsClient,
+      module: moduleName === null ? null : { name: moduleName },
+      publish: <TPayload>(contract: ChimpbaseModuleEventReference<TPayload>, payload: TPayload): void => {
+        this.publishModuleEvent(contract, payload, moduleName);
+      },
       get,
       set(key: string, value: unknown): void {
         contextMap.set(key, value);
@@ -1029,11 +1118,13 @@ export class ChimpbaseEngine {
 
   async executeLifecycleHook(
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+    moduleName: string | null = null,
+    name = "__lifecycle",
   ): Promise<void> {
-    await this.runWithActionInvoker(async () => {
-      const ctx = this.createContext({ kind: "action", name: "__lifecycle" });
+    await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
+      const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name });
       await handler(ctx);
-    });
+    }, moduleName));
   }
 
   private async processCronQueuePayload(payload: CronQueuePayload): Promise<void> {
@@ -1058,7 +1149,11 @@ export class ChimpbaseEngine {
       schedule: registration.schedule,
     };
 
-    const scope: ChimpbaseExecutionScope = { kind: "cron", name: payload.scheduleName };
+    const scope: ChimpbaseExecutionScope = {
+      kind: "cron",
+      module: registration.module ?? null,
+      name: payload.scheduleName,
+    };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
@@ -1087,25 +1182,20 @@ export class ChimpbaseEngine {
   }
 
   private createContext(scope: ChimpbaseExecutionScope): ChimpbaseContext {
-    const publishEvent = (topic: string, payload: unknown) => {
-      const event = {
-        name: topic,
-        payload,
-        payloadJson: JSON.stringify(payload ?? null),
-      };
-
-      if (this.transactionDepth > 0) {
-        this.pendingEvents.push(event);
-      } else {
-        this.committedEvents.push(event);
-      }
+    const moduleName = scope.module;
+    const schema = moduleName === null ? null : chimpbaseModuleSchemaName(moduleName);
+    const qualify = (kind: string, name: string): string =>
+      moduleName === null ? name : chimpbaseModuleResourceName(moduleName, kind, name);
+    const qualifyWorkflowId = (workflowId: string): string => {
+      if (moduleName === null) return workflowId;
+      const namespace = chimpbaseModuleResourcePrefix(moduleName, "workflow-instance");
+      return workflowId.startsWith(namespace) ? workflowId : `${namespace}${workflowId}`;
     };
-
     const enqueue = async <TPayload = unknown>(
       name: string,
       payload: TPayload,
       options?: ChimpbaseQueueEnqueueOptions,
-    ): Promise<void> => await this.adapter.queueEnqueue(name, payload, options);
+    ): Promise<void> => await this.adapter.queueEnqueue(qualify("queue", name), payload, options);
     const adapter = this.adapter;
     async function query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
     async function query<T>(
@@ -1118,6 +1208,9 @@ export class ChimpbaseEngine {
       params: readonly unknown[] = [],
       validator?: ChimpbaseValidator<T>,
     ): Promise<T[] | Record<string, unknown>[]> {
+      if (moduleName !== null && schema !== null) {
+        assertChimpbaseModuleRuntimeSql(moduleName, schema, sql);
+      }
       return validator === undefined
         ? await adapter.query(sql, params, databaseRowValidator)
         : await adapter.query(sql, params, validator);
@@ -1132,9 +1225,10 @@ export class ChimpbaseEngine {
       key: string,
       validator?: ChimpbaseValidator<TValue>,
     ): Promise<TValue | unknown | null> {
+      const namespacedKey = qualify("kv", key);
       return validator === undefined
-        ? await adapter.kvGet(key, v.unknown())
-        : await adapter.kvGet(key, validator);
+        ? await adapter.kvGet(namespacedKey, v.unknown())
+        : await adapter.kvGet(namespacedKey, validator);
     }
 
     async function findDocuments(
@@ -1154,9 +1248,10 @@ export class ChimpbaseEngine {
       options?: ChimpbaseCollectionFindOptions,
       validator?: ChimpbaseValidator<TDocument>,
     ): Promise<TDocument[] | Record<string, unknown>[]> {
+      const collectionName = qualify("collection", name);
       return validator === undefined
-        ? await adapter.collectionFind(name, filter, options, databaseRowValidator)
-        : await adapter.collectionFind(name, filter, options, validator);
+        ? await adapter.collectionFind(collectionName, filter, options, databaseRowValidator)
+        : await adapter.collectionFind(collectionName, filter, options, validator);
     }
 
     async function findOneDocument(
@@ -1173,9 +1268,10 @@ export class ChimpbaseEngine {
       filter: ChimpbaseCollectionFilter,
       validator?: ChimpbaseValidator<TDocument>,
     ): Promise<TDocument | Record<string, unknown> | null> {
+      const collectionName = qualify("collection", name);
       return validator === undefined
-        ? await adapter.collectionFindOne(name, filter, databaseRowValidator)
-        : await adapter.collectionFindOne(name, filter, validator);
+        ? await adapter.collectionFindOne(collectionName, filter, databaseRowValidator)
+        : await adapter.collectionFindOne(collectionName, filter, validator);
     }
 
     async function readStream(
@@ -1192,44 +1288,66 @@ export class ChimpbaseEngine {
       options?: ChimpbaseStreamReadOptions,
       validator?: ChimpbaseValidator<TPayload>,
     ): Promise<ChimpbaseStreamEvent<TPayload | unknown>[]> {
+      const streamName = qualify("stream", stream);
       return validator === undefined
-        ? await adapter.streamRead(stream, options, v.unknown())
-        : await adapter.streamRead(stream, options, validator);
+        ? await adapter.streamRead(streamName, options, v.unknown())
+        : await adapter.streamRead(streamName, options, validator);
     }
 
 
     const context: ChimpbaseContext = {
+      call: async <TInput, TOutput>(
+        contract: ChimpbaseModuleCallReference<TInput, TOutput>,
+        input: TInput,
+      ): Promise<TOutput> => await this.invokeModuleCall(contract, input, moduleName),
       db: {
+        schema,
         query,
         kysely: <TDatabase = Record<string, never>>() =>
-          this.adapter.createKysely<TDatabase>(),
+          this.adapter.createKysely<TDatabase>(schema ?? undefined),
       },
       pubsub: {
         publish: (topic: string, payload: unknown) => {
-          publishEvent(topic, payload);
+          this.publishRawEvent(topic, payload, moduleName);
         },
+      },
+      module: moduleName === null ? null : { name: moduleName },
+      publish: <TPayload>(contract: ChimpbaseModuleEventReference<TPayload>, payload: TPayload): void => {
+        this.publishModuleEvent(contract, payload, moduleName);
       },
       secret: (name: string) => this.secrets.get(name),
       kv: {
-        delete: async (key: string) => await this.adapter.kvDelete(key),
+        delete: async (key: string) => await this.adapter.kvDelete(qualify("kv", key)),
         get: getKv,
-        list: async (options?: ChimpbaseKvListOptions): Promise<string[]> => await this.adapter.kvList(options),
-        set: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) => await this.adapter.kvSet(key, value, options?.ttlMs),
+        list: async (options?: ChimpbaseKvListOptions): Promise<string[]> => {
+          const prefix = qualify("kv", options?.prefix ?? "");
+          const keys = await this.adapter.kvList({ prefix });
+          if (moduleName === null) return keys;
+          const namespace = chimpbaseModuleResourcePrefix(moduleName, "kv");
+          return keys.map((key) => key.slice(namespace.length));
+        },
+        set: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) =>
+          await this.adapter.kvSet(qualify("kv", key), value, options?.ttlMs),
       },
       collection: {
         delete: async (name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> =>
-          await this.adapter.collectionDelete(name, filter),
+          await this.adapter.collectionDelete(qualify("collection", name), filter),
         find: findDocuments,
         findOne: findOneDocument,
         insert: async <TDocument extends Record<string, unknown>>(name: string, document: TDocument): Promise<string> =>
-          await this.adapter.collectionInsert(name, document),
-        list: async (): Promise<string[]> => await this.adapter.collectionList(),
+          await this.adapter.collectionInsert(qualify("collection", name), document),
+        list: async (): Promise<string[]> => {
+          const names = await this.adapter.collectionList();
+          if (moduleName === null) return names;
+          const namespace = chimpbaseModuleResourcePrefix(moduleName, "collection");
+          return names.filter((name) => name.startsWith(namespace)).map((name) => name.slice(namespace.length));
+        },
         update: async (name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> =>
-          await this.adapter.collectionUpdate(name, filter, patch),
+          await this.adapter.collectionUpdate(qualify("collection", name), filter, patch),
       },
       stream: {
         append: async <TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number> =>
-          await this.adapter.streamAppend(stream, event, payload),
+          await this.adapter.streamAppend(qualify("stream", stream), event, payload),
         read: readStream,
       },
       blobs: this.createBlobsClient(),
@@ -1241,13 +1359,13 @@ export class ChimpbaseEngine {
         get: async <TInput = unknown, TState = unknown>(
           workflowId: string,
         ): Promise<ChimpbaseWorkflowInstance<TInput, TState> | null> =>
-          await this.getWorkflowInstance<TInput, TState>(workflowId),
+          await this.getWorkflowInstance<TInput, TState>(qualifyWorkflowId(workflowId)),
         signal: async <TPayload = unknown>(
           workflowId: string,
           signalName: string,
           payload: TPayload,
         ): Promise<void> => {
-          await this.signalWorkflow(workflowId, signalName, payload);
+          await this.signalWorkflow(qualifyWorkflowId(workflowId), signalName, payload);
         },
         start: async <TInput = unknown, TState = unknown>(
           definition:
@@ -1256,8 +1374,19 @@ export class ChimpbaseEngine {
             | ChimpbaseWorkflowRegistration<TInput, TState>,
           input: TInput,
           options?: ChimpbaseWorkflowStartOptions,
-        ): Promise<ChimpbaseWorkflowStartResult> =>
-          await this.startWorkflow(definition, input, options),
+        ): Promise<ChimpbaseWorkflowStartResult> => {
+          const scopedDefinition = moduleName === null
+            ? definition
+            : typeof definition === "string"
+              ? qualify("workflow", definition)
+              : "definition" in definition
+                ? { ...definition, definition: { ...definition.definition, name: qualify("workflow", definition.definition.name) } }
+                : { ...definition, name: qualify("workflow", definition.name) };
+          const scopedOptions = moduleName === null
+            ? options
+            : { ...options, workflowId: qualifyWorkflowId(options?.workflowId ?? this.platform.randomUUID()) };
+          return await this.startWorkflow(scopedDefinition, input, scopedOptions);
+        },
       },
       log: createLogger((level, message, attributes) => {
         this.recordLog(scope, level, message, attributes);
@@ -1338,7 +1467,7 @@ export class ChimpbaseEngine {
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
         nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
-      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
+      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, moduleName),
     };
     return this.applyContextExtensions(context);
   }
@@ -1350,6 +1479,8 @@ export class ChimpbaseEngine {
     }
 
     for (const extension of extensions) {
+      const owner = this.registry.registrationOwnership.get(`contextExtension:${extension.key}`);
+      if (owner !== undefined && owner !== context.module?.name) continue;
       if (!(extension.context !== undefined)) {
         continue;
       }
@@ -1372,6 +1503,8 @@ export class ChimpbaseEngine {
     }
 
     for (const extension of extensions) {
+      const owner = this.registry.registrationOwnership.get(`contextExtension:${extension.key}`);
+      if (owner !== undefined && owner !== env.module?.name) continue;
       if (!(extension.routeEnv !== undefined)) {
         continue;
       }
@@ -1553,6 +1686,7 @@ export class ChimpbaseEngine {
         row.workflow_name,
         row.workflow_version,
       );
+      const workflowModule = this.registry.workflowOwnership.get(row.workflow_name) ?? null;
       const input = JSON.parse(row.input_json) as unknown;
       const state = JSON.parse(row.state_json) as unknown;
 
@@ -1562,8 +1696,8 @@ export class ChimpbaseEngine {
             input,
             state,
             workflowId,
-          }),
-        ));
+          }, workflowModule),
+        ), workflowModule);
         const shouldContinue = await this.applyWorkflowRunDirective(workflowId, row, directive, input, state);
         if (shouldContinue) {
           continue;
@@ -1604,7 +1738,12 @@ export class ChimpbaseEngine {
           const actionName = typeof step.action === "string"
             ? step.action
             : resolveChimpbaseActionRegistrationName(step.action);
-          const result = await this.invokeActionByName(actionName, normalizeActionArgs(args));
+          const result = await this.invokeActionByName(
+            actionName,
+            normalizeActionArgs(args),
+            workflowModule,
+            false,
+          );
           const nextState = (step.onResult !== undefined)
             ? step.onResult({ input, result, state, workflowId })
             : state;
@@ -1787,13 +1926,19 @@ export class ChimpbaseEngine {
 
   private createWorkflowRunContext<TInput = unknown, TState = unknown>(
     params: ChimpbaseWorkflowRuntimeState<TInput, TState>,
+    moduleName: string | null,
   ): ChimpbaseWorkflowRunContext<TInput, TState> {
     return {
       ...params,
+      call: async <TCallInput, TOutput>(
+        contract: ChimpbaseModuleCallReference<TCallInput, TOutput>,
+        input: TCallInput,
+      ): Promise<TOutput> => await this.invokeModuleCall(contract, input, moduleName),
+      module: moduleName === null ? null : { name: moduleName },
       action: async <TResult = unknown>(
         nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: unknown[]
-      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args),
+      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, moduleName),
       complete: (state = params.state, options) => ({
         kind: "workflow_complete" as const,
         state,
@@ -2318,53 +2463,173 @@ export class ChimpbaseEngine {
     return row ?? null;
   }
 
+  private async invokeModuleCall<TInput, TOutput>(
+    contract: ChimpbaseModuleCallReference<TInput, TOutput>,
+    input: TInput,
+    callerModule: string | null,
+  ): Promise<TOutput> {
+    const provider = this.registry.moduleInterfaces.get(contract.module);
+    const declared = provider !== undefined
+      && Object.values(provider.calls).some((candidate) => candidate.id === contract.id);
+    if (!declared) {
+      throw new Error(
+        `module call denied: caller ${callerModule ?? "<app>"}, target ${contract.module}, contract ${contract.id}, rule undeclared contract`,
+      );
+    }
+    if (callerModule !== null && callerModule !== contract.module) {
+      const caller = this.registry.moduleInterfaces.get(callerModule);
+      if (caller === undefined || !caller.dependencies.includes(contract.module)) {
+        throw new Error(
+          `module call denied: caller ${callerModule}, target ${contract.module}, contract ${contract.id}, rule undeclared dependency`,
+        );
+      }
+    }
+    return await this.invokeActionByName<TOutput>(contract.id, [input], callerModule, true);
+  }
+
   private async invokeAction<TResult = unknown>(
     nameOrReference: string | ChimpbaseActionRegistrationLike,
     args: unknown[],
+    callerModule: string | null = null,
   ): Promise<TResult> {
     if (typeof nameOrReference === "string") {
-      return await this.invokeActionByName<TResult>(nameOrReference, args);
+      return await this.invokeActionByName<TResult>(nameOrReference, args, callerModule, false);
     }
 
     return await this.invokeActionByName<TResult>(
       nameOrReference.name,
       normalizeActionReferenceArgs(nameOrReference, args),
+      callerModule,
+      false,
     );
   }
 
   private async invokeActionByName<TResult = unknown>(
     name: string,
     args: unknown[],
+    callerModule: string | null = null,
+    viaContract = false,
   ): Promise<TResult> {
     const registration = this.registry.actions.get(name);
     if (!(registration !== undefined)) {
       throw new Error(`action not found: ${name}`);
     }
+    const ownership = this.registry.actionOwnership.get(name);
+    this.assertActionAccess(callerModule, name, ownership, viaContract);
+    const targetModule = ownership?.module ?? null;
 
     return await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
-      const context = this.createContext({ kind: "action", name });
+      const context = this.createContext({ kind: "action", module: targetModule, name });
+      let result: unknown;
       if ((registration.args !== undefined)) {
         if (args.length > 1) {
           throw new Error(`action ${name} expects a single argument`);
         }
 
-        const parsedArgs = registration.args.parse(args[0], "args");
-        if (!isObjectActionHandler<TResult>(registration.handler)) {
+        const inputLabel = ownership?.visibility === "public" ? `module call ${name} input` : "args";
+        const parsedArgs = registration.args.parse(args[0], inputLabel);
+        if (!isObjectActionHandler<unknown>(registration.handler)) {
           throw new TypeError(`action ${name} has an invalid handler`);
         }
-        return await registration.handler(context, parsedArgs);
+        result = await registration.handler(context, parsedArgs);
+      } else {
+        if (!isTupleActionHandler<unknown>(registration.handler)) {
+          throw new TypeError(`action ${name} has an invalid handler`);
+        }
+        result = await registration.handler(context, ...args);
       }
-
-      if (!isTupleActionHandler<TResult>(registration.handler)) {
-        throw new TypeError(`action ${name} has an invalid handler`);
-      }
-      return await registration.handler(context, ...args);
-    }));
+      return (registration.result === undefined
+        ? result
+        : registration.result.parse(result, `module call ${name} output`)) as TResult;
+    }, targetModule));
   }
 
-  private async dispatchSubscriptions(events: ChimpbaseEventRecord[]): Promise<void> {
+  private assertActionAccess(
+    callerModule: string | null,
+    name: string,
+    ownership: { module: string; visibility: "internal" | "public" } | undefined,
+    viaContract: boolean,
+  ): void {
+    if (ownership === undefined) {
+      if (callerModule !== null) {
+        throw new Error(
+          `module call denied: caller ${callerModule}, target <app-global infrastructure>, contract ${name}, rule unowned registration`,
+        );
+      }
+      return;
+    }
+    if (callerModule === ownership.module) return;
+    if (callerModule === null && ownership.visibility === "public") return;
+    if (ownership.visibility === "public" && viaContract) return;
+    throw new Error(
+      `module call denied: caller ${callerModule ?? "<app>"}, target ${ownership.module}, contract ${name}, rule ${ownership.visibility === "internal" ? "internal operation" : "contract reference required"}`,
+    );
+  }
+
+  private publishRawEvent(topic: string, payload: unknown, callerModule: string | null): void {
+    if (callerModule !== null) {
+      throw new Error(
+        `module event denied: caller ${callerModule}, target <raw>, contract ${topic}, rule raw event names are forbidden`,
+      );
+    }
+    this.recordEvent(topic, payload, false);
+  }
+
+  private publishModuleEvent<TPayload>(
+    contract: ChimpbaseModuleEventReference<TPayload>,
+    payload: TPayload,
+    callerModule: string | null,
+  ): void {
+    const declared = this.registry.eventContracts.get(contract.id);
+    if (declared === undefined || declared.module !== contract.module) {
+      throw new Error(
+        `module event denied: caller ${callerModule ?? "<app>"}, target ${contract.module}, contract ${contract.id}, rule undeclared event`,
+      );
+    }
+    if (callerModule !== declared.module) {
+      throw new Error(
+        `module event denied: caller ${callerModule ?? "<app>"}, target ${declared.module}, contract ${declared.id}, rule publisher does not own event`,
+      );
+    }
+    const parsedPayload = declared.payload.parse(payload, `module event ${declared.id} payload`);
+    this.recordEvent(declared.id, parsedPayload, true);
+  }
+
+  private recordEvent(name: string, payload: unknown, moduleEvent: boolean): void {
+    if (moduleEvent && this.transactionDepth === 0) {
+      throw new Error(`module event ${name} must be published inside a runtime transaction`);
+    }
+    const subscriptions = this.registry.subscriptions.get(name) ?? [];
+    const deliverySubscriptions = moduleEvent
+      ? subscriptions.filter((entry) => entry.module != null).map((entry) => entry.name)
+      : [];
+    const event: ChimpbaseEventRecord = {
+      deliverySubscriptions,
+      dispatch: !moduleEvent
+        && this.subscriptionsConfig.dispatch === "async"
+        && subscriptions.length > 0,
+      name,
+      payload,
+      payloadJson: JSON.stringify(payload ?? null),
+    };
+    if (this.transactionDepth > 0) {
+      this.pendingEvents.push(event);
+    } else {
+      this.committedEvents.push(event);
+    }
+  }
+
+  private async dispatchSubscriptions(
+    events: ChimpbaseEventRecord[],
+    subscriptionName?: string,
+  ): Promise<void> {
     for (const event of events) {
-      const subscriptions = this.registry.subscriptions.get(event.name) ?? [];
+      const contract = this.registry.eventContracts.get(event.name);
+      const payload = contract === undefined
+        ? event.payload
+        : contract.payload.parse(event.payload, `module event ${event.name} payload`);
+      const subscriptions = (this.registry.subscriptions.get(event.name) ?? [])
+        .filter((entry) => subscriptionName === undefined || entry.name === subscriptionName);
       for (const sub of subscriptions) {
         const subscriptionHandler: unknown = sub.handler;
         if (!isSubscriptionHandler(subscriptionHandler)) {
@@ -2375,25 +2640,30 @@ export class ChimpbaseEngine {
             const key = `_chimpbase.sub.seen:${event.id}:${sub.name}`;
             if ((await this.adapter.kvGet(key, v.boolean()) === true)) return;
             await this.runWithActionInvoker(async () => {
-              await subscriptionHandler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
-            });
+              await subscriptionHandler(this.createContext({
+                kind: "subscription",
+                module: sub.module ?? null,
+                name: `${event.name}:${sub.name}`,
+              }), payload);
+            }, sub.module ?? null);
             await this.adapter.kvSet(key, true);
           } else {
             await this.runWithActionInvoker(async () => {
-              await subscriptionHandler(this.createContext({ kind: "subscription", name: event.name }), event.payload);
-            });
+              await subscriptionHandler(this.createContext({
+                kind: "subscription",
+                module: sub.module ?? null,
+                name: `${event.name}:${sub.name}`,
+              }), payload);
+            }, sub.module ?? null);
           }
         });
       }
     }
   }
 
-  private async enqueueSubscriptionDispatchJobs(events: ChimpbaseEventRecord[]): Promise<void> {
+  private async enqueueSubscriptionDispatchJobs(events: readonly ChimpbaseEventRecord[]): Promise<void> {
     for (const event of events) {
-      if ((this.registry.subscriptions.get(event.name) ?? []).length === 0) {
-        continue;
-      }
-
+      if ((this.registry.subscriptions.get(event.name) ?? []).length === 0) continue;
       await this.adapter.queueEnqueue(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
         eventId: event.id,
         eventName: event.name,
@@ -2403,28 +2673,33 @@ export class ChimpbaseEngine {
     }
   }
 
+
   private async handleCommittedEvents(
     emittedEvents: ChimpbaseEventRecord[],
     scope: ChimpbaseExecutionScope | undefined,
     telemetryStart: number,
   ): Promise<ChimpbaseEventRecord[]> {
     if (this.subscriptionsConfig.dispatch === "async") {
-      await this.enqueueSubscriptionDispatchJobs(emittedEvents);
       await this.flushTelemetryToStreams(scope, telemetryStart);
       return [];
     }
 
-    await this.dispatchSubscriptions(emittedEvents);
+    await this.dispatchSubscriptions(emittedEvents.filter((event) =>
+      event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
+    ));
     const cascadedEvents = this.takeCommittedEvents();
     await this.flushTelemetryToStreams(scope, telemetryStart);
     return cascadedEvents;
   }
 
-  private async runWithActionInvoker<TResult>(callback: () => TResult | Promise<TResult>): Promise<TResult> {
+  private async runWithActionInvoker<TResult>(
+    callback: () => TResult | Promise<TResult>,
+    callerModule: string | null = null,
+  ): Promise<TResult> {
     const invoker: ChimpbaseActionInvoker = async <TResult = unknown>(
       nameOrReference: string | ChimpbaseActionRegistrationLike,
       args: unknown[],
-    ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args);
+    ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, callerModule);
 
     return await runWithActionInvoker(invoker, callback);
   }
@@ -2447,7 +2722,11 @@ export class ChimpbaseEngine {
         const justCommitted = this.pendingEvents.splice(0);
         this.committedEvents.push(...justCommitted);
         if (justCommitted.length > 0) {
-          await this.eventBus.publish(justCommitted);
+          try {
+            await this.eventBus.publish(justCommitted);
+          } catch {
+            // The persisted event/outbox is authoritative; buses are wake-up optimizations.
+          }
         }
       }
 
@@ -2674,6 +2953,7 @@ export class ChimpbaseEngine {
           size: driverResult.size,
           etag: driverResult.sha256,
           contentType,
+
           metadata,
           driverRef: driverResult.driverRef,
           createdAt: nowIso,

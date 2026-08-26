@@ -57,6 +57,7 @@ const notifyEnvelopeValidator = v.object({
 
 
 export class PostgresListenEventBus implements ChimpbaseEventBus {
+  readonly mode = "wake" as const;
   private readonly channel: string;
   private readonly originId: string;
   private readonly pool: PostgresListenPool;

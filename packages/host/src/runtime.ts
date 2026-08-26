@@ -26,6 +26,7 @@ import {
   type ChimpbaseMigrationsDefinition,
   type ChimpbaseEngineAdapter,
   createChimpbaseRegistry,
+  registerChimpbaseModuleImplementations,
 } from "@chimpbase/core";
 import {
   action as createActionEntry,
@@ -395,25 +396,32 @@ export class ChimpbaseHost<TServer> {
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
     name: string,
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
-    definition?: { args?: undefined },
+    definition?: { args?: undefined; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseTupleActionHandler<TArgs, TResult>;
   registerAction<TArgs, TResult = unknown>(
     name: string,
     handler: ChimpbaseObjectActionHandler<TArgs, TResult>,
-    definition: { args: ChimpbaseValidator<TArgs> },
+    definition: { args: ChimpbaseValidator<TArgs>; result?: ChimpbaseValidator<TResult> },
   ): ChimpbaseObjectActionHandler<TArgs, TResult>;
   registerAction(
     name: string,
     handler: ChimpbaseActionHandler<unknown, unknown>,
-    definition?: { args?: ChimpbaseValidator<unknown> },
+    definition?: { args?: ChimpbaseValidator<unknown>; result?: ChimpbaseValidator<unknown> },
   ): ChimpbaseActionHandler<unknown, unknown> {
+    const ownership = this.registry.actionOwnership.get(name);
+    if (ownership !== undefined) {
+      throw new Error(`action ${name} is owned by module ${ownership.module} and cannot be replaced`);
+    }
     const entry = (definition?.args !== undefined)
       ? createActionEntry({
           args: definition.args,
           handler: handler as ChimpbaseObjectActionHandler<unknown, unknown>,
           name,
+          result: definition.result,
         })
-      : createActionEntry(name, handler as ChimpbaseTupleActionHandler<unknown[], unknown>);
+      : createActionEntry(name, handler as ChimpbaseTupleActionHandler<unknown[], unknown>, {
+          result: definition?.result,
+        });
 
     this.registry.actions.set(name, entry);
     return handler;
@@ -448,6 +456,7 @@ export class ChimpbaseHost<TServer> {
     const subscriptions = this.registry.subscriptions.get(eventName) ?? [];
     subscriptions.push({
       handler,
+      module: null,
       idempotent: options?.idempotent ?? false,
       name: options?.name ?? "",
     });
@@ -465,6 +474,7 @@ export class ChimpbaseHost<TServer> {
         dlq: definition?.dlq === undefined ? `${name}.dlq` : definition.dlq,
       },
       handler,
+      module: null,
       name,
     };
     this.registry.workers.set(name, registration);
@@ -478,6 +488,7 @@ export class ChimpbaseHost<TServer> {
   ): ChimpbaseCronHandler<TResult> {
     this.registry.crons.set(name, {
       handler: handler as ChimpbaseCronHandler,
+      module: null,
       name,
       schedule,
     });
@@ -501,14 +512,14 @@ export class ChimpbaseHost<TServer> {
     name: string,
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
   ): void {
-    this.registry.onStartHooks.push({ handler, name });
+    this.registry.onStartHooks.push({ handler, module: null, name });
   }
 
   registerOnStop(
     name: string,
-    handler: () => Promise<void> | void,
+    handler: (ctx: ChimpbaseContext) => Promise<void> | void,
   ): void {
-    this.registry.onStopHooks.push({ handler, name });
+    this.registry.onStopHooks.push({ handler, module: null, name });
   }
 
   registerWorkflow<TInput = unknown, TState = unknown>(
@@ -612,7 +623,7 @@ export class ChimpbaseHost<TServer> {
     this.engine.startEventBus();
 
     for (const hook of this.registry.onStartHooks) {
-      await this.engine.executeLifecycleHook(hook.handler);
+      await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
     }
 
     return {
@@ -621,7 +632,7 @@ export class ChimpbaseHost<TServer> {
       stop: async () => {
         for (const hook of this.registry.onStopHooks) {
           try {
-            await hook.handler();
+            await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
           } catch (err) {
             console.error(`onStop hook "${hook.name}" failed:`, err);
           }
@@ -1033,6 +1044,10 @@ function applyChimpbaseApp<TServer>(host: ChimpbaseHost<TServer>, app: Chimpbase
     host.register(app.registrations);
   }
 
+  if (app.modules.length > 0) {
+    registerChimpbaseModuleImplementations(host, host.registry, app.modules);
+  }
+
   host.setHttpHandler(app.httpHandler);
 }
 
@@ -1058,12 +1073,16 @@ function createStaticMigrationSource(migrations: readonly ChimpbaseMigration[]):
 
 function cloneRegistryForWorkerEngine(source: ChimpbaseRegistry): ChimpbaseRegistry {
   return {
+    actionOwnership: new Map(source.actionOwnership),
     actions: new Map(source.actions),
     contextExtensions: [...source.contextExtensions],
     crons: new Map(source.crons),
+    eventContracts: new Map(source.eventContracts),
     httpHandler: source.httpHandler,
+    moduleInterfaces: new Map(source.moduleInterfaces),
     onStartHooks: [],
     onStopHooks: [],
+    registrationOwnership: new Map(source.registrationOwnership),
     routes: [...source.routes],
     subscriptions: new Map(
       [...source.subscriptions.entries()].map(([eventName, entries]) => [eventName, [...entries]]),
@@ -1077,6 +1096,7 @@ function cloneRegistryForWorkerEngine(source: ChimpbaseRegistry): ChimpbaseRegis
           {
             definition: { ...registration.definition },
             handler: registration.handler,
+            module: registration.module,
             name: registration.name,
           },
         ]),
@@ -1084,6 +1104,7 @@ function cloneRegistryForWorkerEngine(source: ChimpbaseRegistry): ChimpbaseRegis
     workflows: new Map(
       [...source.workflows.entries()].map(([name, versions]) => [name, new Map(versions)]),
     ),
+    workflowOwnership: new Map(source.workflowOwnership),
   };
 }
 
