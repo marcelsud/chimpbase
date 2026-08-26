@@ -483,7 +483,7 @@ describe("telemetry sink interface", () => {
     const scopes = handlerSpanCalls.map((call) =>
       parseCallArg(call, 0, scopeValidator, "route handler span scope")
     );
-    expect(scopes.some((s) => s.kind === "action" && s.name.includes("route:"))).toBe(true);
+    expect(scopes.some((s) => s.kind === "route" && s.name.includes("route:"))).toBe(true);
   });
 });
 

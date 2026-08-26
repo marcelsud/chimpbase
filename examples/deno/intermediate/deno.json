@@ -14,11 +14,13 @@
     "@chimpbase/tooling/app": "../../../packages/tooling/src/app.ts",
     "@chimpbase/tooling/cli": "../../../packages/tooling/src/cli.ts",
     "@chimpbase/tooling/migrations": "../../../packages/tooling/src/migrations.ts",
+    "@chimpbase/tooling/modules": "../../../packages/tooling/src/modules.ts",
     "@chimpbase/tooling/schema": "../../../packages/tooling/src/schema.ts",
     "@chimpbase/tooling/secrets": "../../../packages/tooling/src/secrets.ts",
     "@chimpbase/tooling/workflow_contracts": "../../../packages/tooling/src/workflow_contracts.ts",
     "hono": "npm:hono@^4.12.5",
     "kysely": "npm:kysely@^0.28.11",
-    "pg": "npm:pg@^8.16.3"
+    "pg": "npm:pg@^8.16.3",
+    "typescript": "npm:typescript@^5.9.3"
   }
 }
