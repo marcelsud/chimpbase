@@ -235,11 +235,11 @@ describe("@chimpbase/tooling", () => {
     const postgresMigrations = await loadProjectPostgresMigrations(projectDir);
 
     expect(sqliteMigrations).toEqual([
-      { name: "001_inline", sql: "SELECT 'sqlite-inline';" },
-      { name: "002_inline", sql: "SELECT 'sqlite-inline-2';" },
+      { name: "001_inline", owner: "framework", sql: "SELECT 'sqlite-inline';" },
+      { name: "002_inline", owner: "framework", sql: "SELECT 'sqlite-inline-2';" },
     ]);
     expect(postgresMigrations).toEqual([
-      { name: "001_pg_inline", sql: "SELECT 'postgres-inline';" },
+      { name: "001_pg_inline", owner: "framework", sql: "SELECT 'postgres-inline';" },
     ]);
   });
 
@@ -268,7 +268,7 @@ describe("@chimpbase/tooling", () => {
     expect(app?.project.name).toBe("tooling-app");
     expect(app?.registrations).toHaveLength(1);
     expect(app?.migrations.sqlite).toEqual([
-      { name: "001_init", sql: "SELECT 1;" },
+      { name: "001_init", owner: "framework", sql: "SELECT 1;" },
     ]);
   });
 

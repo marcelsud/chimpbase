@@ -590,10 +590,6 @@ export class ChimpbaseEngine {
 
   startEventBus(): void {
     this.eventBus.start(async (events, ack) => {
-      if (this.eventBus.mode === "wake") {
-        await ack?.();
-        return;
-      }
       const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
       if (this.subscriptionsConfig.dispatch === "async") {
         await this.enqueueSubscriptionDispatchJobs(legacyEvents);
@@ -2530,7 +2526,8 @@ export class ChimpbaseEngine {
           throw new Error(`action ${name} expects a single argument`);
         }
 
-        const parsedArgs = registration.args.parse(args[0], `module call ${name} input`);
+        const inputLabel = ownership?.visibility === "public" ? `module call ${name} input` : "args";
+        const parsedArgs = registration.args.parse(args[0], inputLabel);
         if (!isObjectActionHandler<unknown>(registration.handler)) {
           throw new TypeError(`action ${name} has an invalid handler`);
         }

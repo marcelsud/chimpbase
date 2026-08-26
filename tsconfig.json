@@ -49,7 +49,6 @@
       "@chimpbase/postgres": ["./packages/postgres/src/index.ts"],
       "@chimpbase/rest-collections": ["./packages/rest-collections/src/index.ts"],
       "@chimpbase/tooling": ["./packages/tooling/src/index.ts"],
-      "@chimpbase/tooling/modules": ["./packages/tooling/src/modules.ts"],
       "@chimpbase/tooling/*": ["./packages/tooling/src/*"],
       "@chimpbase/pact": ["./packages/pact/src/index.ts"],
       "@chimpbase/auth": ["./packages/auth/src/index.ts"],
