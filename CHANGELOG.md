@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-08-29
+
+Consolidates the public API into the single `chimpbase` package and adds business-module boundaries for modular monoliths.
 
 ### Added
 
