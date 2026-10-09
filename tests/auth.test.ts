@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { chimpbaseAuth, type AuthApiKey, type AuthScope, type AuthUser } from "../packages/auth/src/index.ts";
+import { chimpbaseAuth, type AuthApiKey, type AuthScope, type AuthUser, type ChimpbaseAuthOptions } from "../packages/auth/src/index.ts";
+import { chimpbaseWebhooks } from "../packages/webhooks/src/index.ts";
 import { readJsonResponse } from "./support/http.ts";
 import { v } from "../packages/runtime/index.ts";
 
@@ -35,7 +36,7 @@ afterEach(async () => {
 
 const BOOTSTRAP_KEY = "test-bootstrap-key";
 
-async function createAuthHost(options?: { excludePaths?: string[]; rateLimit?: { maxAttempts: number; windowMs: number; blockDurationMs: number } }) {
+async function createAuthHost(options: ChimpbaseAuthOptions = {}) {
   const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-auth-test-"));
   cleanupDirs.push(projectDir);
 
@@ -49,8 +50,7 @@ async function createAuthHost(options?: { excludePaths?: string[]; rateLimit?: {
   host.register({
     authPlugin: chimpbaseAuth({
       bootstrapKeySecret: "BOOTSTRAP_KEY",
-      excludePaths: options?.excludePaths,
-      rateLimit: options?.rateLimit,
+      ...options,
     }),
   });
 
@@ -112,6 +112,25 @@ describe("@chimpbase/auth", () => {
       await host.close();
     }
   });
+
+  for (const { label, options, paths, sibling } of [
+    { label: "default", options: {}, paths: ["/health", "//health", "///health//live///"], sibling: "/healthcheck" },
+    { label: "custom", options: { excludePaths: ["//public///status//"] }, paths: ["/public/status", "//public//status///live///"], sibling: "/public/status-extra" },
+  ]) {
+    test(`repeated separators preserve ${label} path exclusions and prefix boundaries`, async () => {
+      const host = await createAuthHost(options);
+      try {
+        for (const path of paths) {
+          const outcome = await host.executeRoute(new Request(`http://test.local${path}`));
+          expect(outcome.response).toBeNull();
+        }
+        const outcome = await host.executeRoute(new Request(`http://test.local${sibling}`));
+        expect(outcome.response?.status).toBe(401);
+      } finally {
+        await host.close();
+      }
+    });
+  }
 
   // ── User management ─────────────────────────────────────────────────────
 
@@ -510,6 +529,92 @@ describe("@chimpbase/auth", () => {
   });
 
   // ── Scopes ────────────────────────────────────────────────────────────────
+
+  for (const { label, options, basePath } of [
+    { label: "default paths", options: {}, basePath: "/_auth" },
+    { label: "restricted protectedPaths", options: { protectedPaths: ["//_auth//"] }, basePath: "/_auth" },
+    { label: "custom management path", options: { managementBasePath: "//admin///auth//", protectedPaths: ["/admin/auth"] }, basePath: "/admin/auth" },
+  ]) {
+    test(`equivalent auth management paths cannot escalate a write key (${label})`, async () => {
+      const host = await createAuthHost(options);
+      try {
+        const user = idResultValidator.parse((await host.executeAction("__chimpbase.auth.createUser", {
+          email: "writer@test.com", name: "Writer",
+        })).result);
+        const writer = keyResultValidator.parse((await host.executeAction("__chimpbase.auth.createApiKey", {
+          userId: user.id, scopes: ["write"],
+        })).result);
+        const keyPath = `${basePath}/users/${user.id}/keys`;
+        const paths = [keyPath, `/${keyPath}`, keyPath.replaceAll("/", "//"), `${keyPath.replaceAll("/", "///")}///`];
+
+        for (const path of paths) {
+          const unauthenticated = await host.executeRoute(new Request(`http://test.local${path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ scopes: ["admin"] }),
+          }));
+          expect(unauthenticated.response?.status).toBe(401);
+
+          const denied = await host.executeRoute(new Request(`http://test.local${path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...authHeaders(writer.key) },
+            body: JSON.stringify({ scopes: ["admin"] }),
+          }));
+          expect(denied.response?.status).toBe(403);
+          expect(await readJsonResponse<{ error: string }>(denied.response)).toEqual({ error: "insufficient permissions" });
+        }
+
+        const keys = scopesResultValidator.array().parse((await host.executeAction("__chimpbase.auth.listApiKeys", user.id)).result);
+        expect(keys.map((key) => key.scopes)).toEqual([["write"]]);
+
+        const authorized = await host.executeRoute(new Request(`http://test.local${keyPath.replaceAll("/", "//")}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ scopes: ["admin"] }),
+        }));
+        expect(authorized.response?.status).toBe(201);
+        expect((await readJsonResponse<CreatedApiKey>(authorized.response)).scopes).toEqual(["admin"]);
+      } finally {
+        await host.close();
+      }
+    });
+  }
+
+  for (const { label, options, basePath } of [
+    { label: "default paths", options: {}, basePath: "/_webhooks" },
+    { label: "restricted protectedPaths", options: { protectedPaths: ["/_webhooks"] }, basePath: "/_webhooks" },
+    { label: "custom management path", options: { protectedPaths: ["//admin///webhooks//"], webhooksManagementPaths: ["//admin///webhooks//"] }, basePath: "/admin/webhooks" },
+  ]) {
+    test(`equivalent webhook management paths require management scope (${label})`, async () => {
+      const host = await createAuthHost(options);
+      try {
+        host.register(chimpbaseWebhooks({ allowedEvents: ["order.created"], managementBasePath: basePath.replaceAll("/", "//") }));
+        const user = idResultValidator.parse((await host.executeAction("__chimpbase.auth.createUser", {
+          email: "webhooks@test.com", name: "Webhooks",
+        })).result);
+        const writer = keyResultValidator.parse((await host.executeAction("__chimpbase.auth.createApiKey", {
+          userId: user.id, scopes: ["write"],
+        })).result);
+        const manager = keyResultValidator.parse((await host.executeAction("__chimpbase.auth.createApiKey", {
+          userId: user.id, scopes: ["webhooks:manage"],
+        })).result);
+
+        for (const path of [basePath, `/${basePath}`, `${basePath.replaceAll("/", "///")}///`]) {
+          const unauthenticated = await host.executeRoute(new Request(`http://test.local${path}`));
+          expect(unauthenticated.response?.status).toBe(401);
+
+          const denied = await host.executeRoute(new Request(`http://test.local${path}`, { headers: authHeaders(writer.key) }));
+          expect(denied.response?.status).toBe(403);
+
+          const authorized = await host.executeRoute(new Request(`http://test.local${path}`, { headers: authHeaders(manager.key) }));
+          expect(authorized.response?.status).toBe(200);
+          expect(await readJsonResponse<unknown[]>(authorized.response)).toEqual([]);
+        }
+      } finally {
+        await host.close();
+      }
+    });
+  }
 
   test("read scope can GET app routes", async () => {
     const host = await createAuthHost();
