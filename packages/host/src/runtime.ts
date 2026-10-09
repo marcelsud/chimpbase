@@ -1159,7 +1159,9 @@ function registerInternalCleanupCrons<TServer>(
       config.kv.retention.schedule,
       async (ctx) => {
         await ctx.db.query(
-          "DELETE FROM _chimpbase_kv WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP",
+          config.storage.engine === "postgres"
+            ? "DELETE FROM _chimpbase_kv WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"
+            : "DELETE FROM _chimpbase_kv WHERE expires_at IS NOT NULL AND julianday(expires_at) <= julianday('now')",
         );
       },
     );

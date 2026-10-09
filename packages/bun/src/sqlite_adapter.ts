@@ -698,7 +698,7 @@ export function createSqliteEngineAdapter(
         `
           SELECT value_json
           FROM _chimpbase_kv
-          WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+          WHERE key = ?1 AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
           LIMIT 1
         `,
       ).all(key), valueJsonRowValidator, "key-value rows");
@@ -712,7 +712,7 @@ export function createSqliteEngineAdapter(
         `
           SELECT key
           FROM _chimpbase_kv
-          WHERE key LIKE ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+          WHERE key LIKE ?1 AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
           ORDER BY key ASC
         `,
       ).all(`${prefix}%`), keyRowValidator, "key list rows");

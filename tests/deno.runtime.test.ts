@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 
 import {
   defineChimpbaseApp,
@@ -39,6 +40,77 @@ const originalDeno: unknown = Reflect.get(globalThis, "Deno");
 const bunSupportsBetterSqlite3 = false;
 const payloadValueValidator = v.object({ value: v.string() });
 const valueRowsValidator = payloadValueValidator.array();
+
+(Bun.which("deno") === null ? test.skip : test)("Deno SQLite KV expires millisecond TTLs and cleans expired records in a real process", async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-deno-kv-expiration-"));
+  cleanupDirs.push(projectDir);
+  const build = Bun.spawnSync([
+    "node", "./scripts/build-package.mjs", "runtime", "core", "tooling", "postgres", "host", "deno",
+  ], { cwd: repoRoot, env: process.env, stdout: "pipe", stderr: "pipe" });
+  if (build.exitCode !== 0) {
+    throw new Error(`failed to build Deno runtime packages\n${build.stdout.toString()}\n${build.stderr.toString()}`);
+  }
+  const importMapPath = resolve(projectDir, "imports.json");
+  const imports: Record<string, string> = Object.fromEntries([
+    ...["core", "runtime"].map((name) => [`@chimpbase/${name}`, pathToFileURL(resolve(repoRoot, `packages/${name}/dist/index.js`)).href]),
+    ...["host", "postgres"].map((name) => [`@chimpbase/${name}`, pathToFileURL(resolve(repoRoot, `packages/${name}/dist/src/index.js`)).href]),
+    ...["app", "migrations", "secrets", "workflow_contracts", "schema", "modules", "cli"].map((name) =>
+      [`@chimpbase/tooling/${name}`, pathToFileURL(resolve(repoRoot, `packages/tooling/dist/src/${name}.js`)).href]),
+    ...["kysely", "pg", "typescript"].map((name) => [name, `npm:${name}`]),
+  ]);
+  await writeFile(importMapPath, JSON.stringify({ imports }));
+  const scriptPath = resolve(projectDir, "kv.mjs");
+  await writeFile(scriptPath, [
+    `import { ChimpbaseDenoHost } from ${JSON.stringify(resolve(repoRoot, "packages/deno/dist/src/runtime.js"))};`,
+    `import { normalizeProjectConfig } from ${JSON.stringify(resolve(repoRoot, "packages/core/dist/index.js"))};`,
+    'import assert from "node:assert/strict";',
+    "const host = await ChimpbaseDenoHost.create({",
+    `  projectDir: ${JSON.stringify(projectDir)},`,
+    '  config: normalizeProjectConfig({ storage: { engine: "memory" }, kv: { retention: { enabled: true } } }),',
+    "});",
+    "try {",
+    '  host.registerAction("seedKv", async (ctx) => {',
+    '    await ctx.kv.set("ttl.permanent", "permanent");',
+    '    await ctx.kv.set("ttl.live", "live", { ttlMs: 60000 });',
+    '    await ctx.kv.set("ttl.expired", "expired", { ttlMs: 1 });',
+    '    await ctx.db.query("INSERT INTO _chimpbase_kv (key, value_json, expires_at) VALUES (?1, ?2, ?3)", ["ttl.legacy", JSON.stringify("legacy"), new Date(Date.now() - 10).toISOString()]);',
+    "  });",
+    '  host.registerAction("inspectKv", async (ctx) => ({',
+    '    expired: await ctx.kv.get("ttl.expired"), legacy: await ctx.kv.get("ttl.legacy"),',
+    '    live: await ctx.kv.get("ttl.live"), permanent: await ctx.kv.get("ttl.permanent"),',
+    '    keys: await ctx.kv.list({ prefix: "ttl." }),',
+    '    rows: await ctx.db.query("SELECT key FROM _chimpbase_kv ORDER BY key"),',
+    "  }));",
+    '  await host.executeAction("seedKv");',
+    "  await new Promise((resolve) => setTimeout(resolve, 20));",
+    '  const before = (await host.executeAction("inspectKv")).result;',
+    '  assert.equal(before.expired, null); assert.equal(before.legacy, null);',
+    '  assert.equal(before.live, "live"); assert.equal(before.permanent, "permanent");',
+    '  assert.deepEqual(before.keys, ["ttl.live", "ttl.permanent"]); assert.equal(before.rows.length, 4);',
+    "  await host.syncCronSchedules();",
+    '  host.registerAction("makeCleanupDue", async (ctx) => await ctx.db.query("UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = ?2", [Date.now() - 1, "__chimpbase.kv.cleanup"]));',
+    '  await host.executeAction("makeCleanupDue");',
+    '  assert.equal((await host.processNextCronSchedule())?.scheduleName, "__chimpbase.kv.cleanup");',
+    "  assert.notEqual(await host.processNextQueueJob(), null);",
+    '  const after = (await host.executeAction("inspectKv")).result;',
+    '  assert.deepEqual(after, { ...before, rows: [{ key: "ttl.live" }, { key: "ttl.permanent" }] });',
+    '  console.log("KV_EXPIRATION_OK");',
+    "} finally { await host.close(); }",
+  ].join("\n"));
+  const child = Bun.spawn([
+    "deno", "run", "--cached-only", "--node-modules-dir=manual", "--no-check", "--no-config", "--no-lock",
+    `--import-map=${importMapPath}`, "--allow-read", "--allow-env", `--allow-write=${projectDir}`, scriptPath,
+  ], {
+    cwd: repoRoot,
+    env: { ...process.env, DENO_DIR: join(projectDir, "deno-cache") },
+    stdout: "pipe", stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`Deno SQLite KV regression failed\n${stdout}\n${stderr}`);
+  expect(stdout.trim()).toBe("KV_EXPIRATION_OK");
+}, 120_000);
 
 
 afterEach(async () => {

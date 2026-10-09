@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
+import { bunRuntimeShim, ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 import { readJsonResponse } from "./support/http.ts";
 import {
   action,
@@ -15,7 +15,7 @@ import {
   worker,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
-import { defineChimpbaseMigrations } from "../packages/core/index.ts";
+import { defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
 const countRowValidator = v.object({ count: v.number() });
@@ -205,6 +205,74 @@ async function bootInlineApp(overrides?: {
 }
 
 describe("bun runtime regression — inline fixtures", () => {
+  for (const engine of ["memory", "sqlite"] as const) {
+    test(`KV expiration hides millisecond TTL and legacy timestamps and cleanup removes them (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-kv-expiration-"));
+      cleanupDirs.push(projectDir);
+      const host = await ChimpbaseBunHost.create({
+        projectDir,
+        config: normalizeProjectConfig({
+          storage: { engine, path: "kv.db" },
+          kv: { retention: { enabled: true } },
+        }),
+      });
+      host.register(
+        action("test.seedKv", async (ctx) => {
+          await ctx.kv.set("ttl.permanent", "permanent");
+          await ctx.kv.set("ttl.live", "live", { ttlMs: 60_000 });
+          await ctx.kv.set("ttl.expired", "expired", { ttlMs: 1 });
+          for (const [key, expiresAt] of [
+            ["ttl.legacyIso", new Date(Date.now() - 10).toISOString()],
+            ["ttl.legacySqlite", "2000-01-01 00:00:00.000"],
+          ]) {
+            await ctx.db.query(
+              "INSERT INTO _chimpbase_kv (key, value_json, expires_at) VALUES (?1, ?2, ?3)",
+              [key, JSON.stringify("legacy"), expiresAt],
+            );
+          }
+        }),
+        action("test.inspectKv", async (ctx) => ({
+          expired: await ctx.kv.get("ttl.expired", v.string()),
+          legacyIso: await ctx.kv.get("ttl.legacyIso", v.string()),
+          legacySqlite: await ctx.kv.get("ttl.legacySqlite", v.string()),
+          live: await ctx.kv.get("ttl.live", v.string()),
+          permanent: await ctx.kv.get("ttl.permanent", v.string()),
+          keys: await ctx.kv.list({ prefix: "ttl." }),
+          rows: await ctx.db.query("SELECT key FROM _chimpbase_kv ORDER BY key", undefined, v.object({ key: v.string() })),
+        })),
+        action("test.makeCleanupDue", async (ctx) => {
+          await ctx.db.query(
+            "UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = ?2",
+            [Date.now() - 1, "__chimpbase.kv.cleanup"],
+          );
+        }),
+      );
+      const snapshotValidator = v.object({
+        expired: v.string().nullable(), legacyIso: v.string().nullable(), legacySqlite: v.string().nullable(),
+        live: v.string().nullable(), permanent: v.string().nullable(), keys: v.string().array(),
+        rows: v.object({ key: v.string() }).array(),
+      });
+      try {
+        await host.executeAction("test.seedKv");
+        await Bun.sleep(20);
+        const before = snapshotValidator.parse((await host.executeAction("test.inspectKv")).result);
+        expect(before).toMatchObject({
+          expired: null, legacyIso: null, legacySqlite: null,
+          live: "live", permanent: "permanent", keys: ["ttl.live", "ttl.permanent"],
+        });
+        expect(before.rows).toHaveLength(5);
+        await host.syncCronSchedules();
+        await host.executeAction("test.makeCleanupDue");
+        expect((await host.processNextCronSchedule())?.scheduleName).toBe("__chimpbase.kv.cleanup");
+        expect(await host.processNextQueueJob()).not.toBeNull();
+        const after = snapshotValidator.parse((await host.executeAction("test.inspectKv")).result);
+        expect(after).toEqual({ ...before, rows: [{ key: "ttl.live" }, { key: "ttl.permanent" }] });
+      } finally {
+        await host.close();
+      }
+    });
+  }
+
   test("actions + route + subscription + worker pipeline (memory)", async () => {
     const { host, started, baseUrl } = await bootInlineApp();
     try {

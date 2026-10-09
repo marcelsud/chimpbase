@@ -437,6 +437,22 @@ describe("@chimpbase/auth", () => {
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
 
+  test("authentication cooldown expires at its configured millisecond duration", async () => {
+    const host = await createAuthHost({ rateLimit: { maxAttempts: 1, windowMs: 60_000, blockDurationMs: 200 } });
+    try {
+      const invalidKey = `${BOOTSTRAP_KEY.substring(0, 8)}-invalid`;
+      const failed = await host.executeRoute(new Request("http://test.local/some-path", { headers: authHeaders(invalidKey) }));
+      expect(failed.response?.status).toBe(429);
+      const blocked = await host.executeRoute(new Request("http://test.local/some-path", { headers: authHeaders() }));
+      expect(blocked.response?.status).toBe(429);
+      await Bun.sleep(250);
+      const expired = await host.executeRoute(new Request("http://test.local/some-path", { headers: authHeaders() }));
+      expect(expired.response).toBeNull();
+    } finally {
+      await host.close();
+    }
+  });
+
   test("rate limit blocks after max failures", async () => {
     const host = await createAuthHost({ rateLimit: { maxAttempts: 3, windowMs: 60_000, blockDurationMs: 5_000 } });
     try {
