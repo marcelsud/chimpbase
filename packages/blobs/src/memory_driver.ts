@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   ChimpbaseBlobDriver,
@@ -61,7 +61,7 @@ function sliceRange(bytes: Uint8Array, range?: ChimpbaseBlobDriverRange): Uint8A
 export function memoryBlobDriver(): ChimpbaseBlobDriver {
   const blobs = new Map<string, BlobRecord>();
   const uploads = new Map<string, Map<number, BlobRecord>>();
-  const key = (bucket: string, key: string) => `${bucket}\u0000${key}`;
+  const objectRef = (bucket: string, key: string) => `${bucket}/${key}/${randomUUID()}`;
 
   return {
     async ensureBucket(_bucket: string) {
@@ -70,26 +70,28 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     async put(bucket, key_, body) {
       const bytes = await readAll(body);
       const sha256 = hashBytes(bytes);
-      blobs.set(key(bucket, key_), { bytes, sha256 });
-      return { driverRef: `${bucket}/${key_}`, size: bytes.byteLength, sha256 };
+      const driverRef = objectRef(bucket, key_);
+      blobs.set(driverRef, { bytes, sha256 });
+      return { driverRef, size: bytes.byteLength, sha256 };
     },
-    async get(bucket, key_, _driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
-      const record = blobs.get(key(bucket, key_));
+    async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
+      const record = blobs.get(driverRef);
       if (!(record !== undefined)) return null;
       const slice = sliceRange(record.bytes, range);
       return { body: streamFrom(slice), size: slice.byteLength };
     },
-    async delete(bucket, key_, _driverRef) {
-      blobs.delete(key(bucket, key_));
+    async delete(_bucket, _key, driverRef) {
+      blobs.delete(driverRef);
     },
     async copy(src, dst): Promise<ChimpbaseBlobDriverPutResult> {
-      const record = blobs.get(key(src.bucket, src.key));
+      const record = blobs.get(src.driverRef);
       if (!(record !== undefined)) {
         throw new Error(`memory driver copy missing source ${src.bucket}/${src.key}`);
       }
       const clone = new Uint8Array(record.bytes);
-      blobs.set(key(dst.bucket, dst.key), { bytes: clone, sha256: record.sha256 });
-      return { driverRef: `${dst.bucket}/${dst.key}`, size: clone.byteLength, sha256: record.sha256 };
+      const driverRef = objectRef(dst.bucket, dst.key);
+      blobs.set(driverRef, { bytes: clone, sha256: record.sha256 });
+      return { driverRef, size: clone.byteLength, sha256: record.sha256 };
     },
     async putPart(uploadId, partNumber, body) {
       const bytes = await readAll(body);
@@ -118,9 +120,9 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
         offset += buf.byteLength;
       }
       const sha256 = hashBytes(out);
-      blobs.set(key(finalBucket, finalKey), { bytes: out, sha256 });
-      uploads.delete(uploadId);
-      return { driverRef: `${finalBucket}/${finalKey}`, size: out.byteLength, sha256 };
+      const driverRef = objectRef(finalBucket, finalKey);
+      blobs.set(driverRef, { bytes: out, sha256 });
+      return { driverRef, size: out.byteLength, sha256 };
     },
     async abortUpload(uploadId) {
       uploads.delete(uploadId);

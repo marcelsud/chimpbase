@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import type { Stats } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
@@ -94,7 +94,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
   const bucketRoot = (bucket: string) => join(root, bucket, OBJECTS_DIR);
   const uploadsRoot = (uploadId: string) => join(root, UPLOADS_DIR, uploadId);
   const objectPath = (bucket: string, key: string) =>
-    join(bucketRoot(bucket), shardPrefix(key, shardBytes), encodeKey(key));
+    join(bucketRoot(bucket), shardPrefix(key, shardBytes), `${encodeKey(key)}-${randomUUID()}`);
 
   return {
     async ensureBucket(bucket: string) {
@@ -113,8 +113,13 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
         hash.update(buf);
         size += buf.byteLength;
       });
-      await pipeline(reader, writeStream);
-      await rename(tempTarget, target);
+      try {
+        await pipeline(reader, writeStream);
+        await rename(tempTarget, target);
+      } catch (error) {
+        await rm(tempTarget, { force: true });
+        throw error;
+      }
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
@@ -156,7 +161,12 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
         hash.update(buf);
         size += buf.byteLength;
       });
-      await pipeline(reader, writer);
+      try {
+        await pipeline(reader, writer);
+      } catch (error) {
+        await rm(target, { force: true });
+        throw error;
+      }
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },
     async putPart(uploadId, partNumber, body) {
@@ -199,12 +209,8 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
         });
       } catch (error) {
         writer.destroy();
+        await rm(target, { force: true });
         throw error;
-      }
-      try {
-        await rm(uploadsRoot(uploadId), { recursive: true, force: true });
-      } catch {
-        /* best-effort cleanup */
       }
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },

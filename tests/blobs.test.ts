@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -10,7 +10,7 @@ import {
   fsBlobDriver,
   memoryBlobDriver,
 } from "../packages/blobs/src/index.ts";
-import type { ChimpbaseBlobDriver } from "../packages/core/index.ts";
+import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core/index.ts";
 
 
 const cleanupDirs: string[] = [];
@@ -192,7 +192,7 @@ async function bootBlobsHost(options: {
   const started = await host.start((options.serve === true) ? {} : { serve: false, runWorker: false });
   const port = started.server?.port;
   const serverBaseUrl = (port !== undefined && port > 0) ? `http://127.0.0.1:${port}` : null;
-  return { host, started, plugin, baseUrl: serverBaseUrl };
+  return { host, started, plugin, driver, baseUrl: serverBaseUrl };
 }
 
 interface PutResult { size: number; etag: string }
@@ -402,6 +402,223 @@ describe("chimpbase blobs primitive (memory driver)", () => {
       await started.stop();
     }
   });
+});
+
+for (const useFs of [false, true]) {
+  describe(`chimpbase blob transactions (${useFs ? "filesystem" : "memory"} driver)`, () => {
+    for (const operation of ["put", "copy", "multipart", "delete", "deleteMany"]) {
+      test(`${operation} preserves bytes and metadata on rollback and retires payloads on commit`, async () => {
+        const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-rollback-")) : undefined;
+        if (root !== undefined) cleanupDirs.push(root);
+        const { host, started, driver } = await bootBlobsHost({ useFs, root });
+        const adapter = host.engine.getBlobsAdapter();
+        const commit = adapter.commitTransaction.bind(adapter);
+        const staged: ChimpbaseBlobMetaRow[] = [];
+        const readPayload = async (row: ChimpbaseBlobMetaRow) => {
+          const object = await driver.get(row.bucket, row.key, row.driverRef);
+          return object === null ? null : await new Response(object.body).text();
+        };
+        try {
+          for (const [key, body] of [["target.txt", "before"], ["second.txt", "keep"], ["source.txt", "after"]]) {
+            await host.executeAction("blobs.put", { bucket: "uploads", key, body });
+          }
+          const before = await adapter.blobGetMetadata("uploads", "target.txt");
+          const second = await adapter.blobGetMetadata("uploads", "second.txt");
+          if (before === null || second === null) throw new Error("missing test blob metadata");
+          host.register(
+            action("blobs.mutate", async (ctx, fail: boolean) => {
+              if (operation === "put") {
+                await ctx.blobs.put("uploads", "target.txt", new TextEncoder().encode("after"));
+              } else if (operation === "copy") {
+                await ctx.blobs.copy({ bucket: "uploads", key: "source.txt" }, { bucket: "uploads", key: "target.txt" });
+              } else if (operation === "multipart") {
+                const upload = await ctx.blobs.createUpload("uploads", "target.txt");
+                await upload.writePart(1, new TextEncoder().encode("after"));
+                await upload.complete();
+              } else if (operation === "delete") {
+                expect(await ctx.blobs.delete("uploads", "target.txt")).toBe(true);
+              } else {
+                expect(await ctx.blobs.deleteMany("uploads", ["target.txt", "second.txt", "missing.txt"])).toEqual({
+                  deleted: ["target.txt", "second.txt"], errors: [],
+                });
+              }
+              const row = await adapter.blobGetMetadata("uploads", "target.txt");
+              if (row !== null) staged.push(row);
+              expect(await readPayload(before)).toBe("before");
+              if (fail) throw new Error("failed after mutation");
+            }),
+            action("blobs.outerFail", async (ctx) => {
+              await ctx.action("blobs.mutate", false);
+              throw new Error("failed after nested action");
+            }),
+            action("blobs.innerFail", async (ctx) => {
+              await ctx.action("blobs.mutate", true);
+            }),
+          );
+          for (const failure of ["action", "outer", "inner", "commit"]) {
+            if (failure === "commit") {
+              adapter.commitTransaction = async () => { throw new Error("failed during commit"); };
+            }
+            const name = failure === "outer" ? "blobs.outerFail" : failure === "inner" ? "blobs.innerFail" : "blobs.mutate";
+            await expect(host.executeAction(name, failure === "action")).rejects.toThrow(/failed/);
+            adapter.commitTransaction = commit;
+            expect(await adapter.blobGetMetadata("uploads", "target.txt")).toEqual(before);
+            expect(await adapter.blobGetMetadata("uploads", "second.txt")).toEqual(second);
+            expect(await readPayload(before)).toBe("before");
+            expect(await readPayload(second)).toBe("keep");
+            for (const row of staged.splice(0)) expect(await readPayload(row)).toBeNull();
+            expect((await host.routeEnv().blobs.listUploads("uploads")).uploads).toEqual([]);
+            if (root !== undefined && operation === "multipart") {
+              expect(await readdir(join(root, "_uploads"))).toEqual([]);
+            }
+          }
+          await host.executeAction("blobs.mutate", false);
+          expect(await readPayload(before)).toBeNull();
+          const after = await adapter.blobGetMetadata("uploads", "target.txt");
+          if (operation === "delete" || operation === "deleteMany") {
+            expect(after).toBeNull();
+          } else {
+            if (after === null) throw new Error("missing committed blob metadata");
+            expect(after.driverRef).not.toBe(before.driverRef);
+            expect(after.etag).not.toBe(before.etag);
+            expect(await readPayload(after)).toBe("after");
+          }
+          expect(await readPayload(second)).toBe(operation === "deleteMany" ? null : "keep");
+        } finally {
+          adapter.commitTransaction = commit;
+          await started.stop();
+        }
+      });
+    }
+
+    test("multipart completion and abort keep committed parts available after rollback", async () => {
+      const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-multipart-")) : undefined;
+      if (root !== undefined) cleanupDirs.push(root);
+      const { host, started } = await bootBlobsHost({ useFs, root });
+      try {
+        const blobs = host.routeEnv().blobs;
+        await blobs.put("uploads", "target.txt", new TextEncoder().encode("before"));
+        const before = await blobs.head("uploads", "target.txt");
+        const upload = await blobs.createUpload("uploads", "target.txt");
+        await upload.writePart(1, new TextEncoder().encode("after"));
+        const parts = await upload.listParts();
+        host.register(action("blobs.uploadFail", async (ctx, abort: boolean) => {
+          const resumed = await ctx.blobs.resumeUpload(upload.id);
+          if (abort) await resumed.abort();
+          else await resumed.complete();
+          throw new Error("failed after upload mutation");
+        }));
+        for (const abort of [false, true]) {
+          await expect(host.executeAction("blobs.uploadFail", abort)).rejects.toThrow(/failed after upload mutation/);
+          expect(await blobs.head("uploads", "target.txt")).toEqual(before);
+          const preserved = await blobs.get("uploads", "target.txt");
+          expect(preserved === null ? null : await new Response(preserved.body).text()).toBe("before");
+          const resumed = await blobs.resumeUpload(upload.id);
+          expect(await resumed.listParts()).toEqual(parts);
+        }
+        await (await blobs.resumeUpload(upload.id)).complete();
+        const completed = await blobs.get("uploads", "target.txt");
+        expect(completed === null ? null : await new Response(completed.body).text()).toBe("after");
+        await expect(blobs.resumeUpload(upload.id)).rejects.toThrow(/not found/);
+        if (root !== undefined) await expect(stat(join(root, "_uploads", upload.id))).rejects.toHaveProperty("code", "ENOENT");
+      } finally {
+        await started.stop();
+      }
+    });
+
+    test("multiple replacements and newly created payloads follow the root transaction", async () => {
+      const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-replacements-")) : undefined;
+      if (root !== undefined) cleanupDirs.push(root);
+      const { host, started, driver } = await bootBlobsHost({ useFs, root });
+      const adapter = host.engine.getBlobsAdapter();
+      const staged: ChimpbaseBlobMetaRow[] = [];
+      try {
+        await host.executeAction("blobs.put", { bucket: "uploads", key: "target.txt", body: "before" });
+        const before = await adapter.blobGetMetadata("uploads", "target.txt");
+        if (before === null) throw new Error("missing test blob metadata");
+        host.register(action("blobs.replaceMany", async (ctx, fail: boolean) => {
+          for (const [key, body] of [["target.txt", "intermediate"], ["new.txt", "new"], ["target.txt", "final"]]) {
+            await ctx.blobs.put("uploads", key, new TextEncoder().encode(body));
+            const row = await adapter.blobGetMetadata("uploads", key);
+            if (row !== null) staged.push(row);
+          }
+          if (fail) throw new Error("failed after replacements");
+        }));
+        await expect(host.executeAction("blobs.replaceMany", true)).rejects.toThrow(/failed after replacements/);
+        expect(await adapter.blobGetMetadata("uploads", "target.txt")).toEqual(before);
+        expect(await adapter.blobGetMetadata("uploads", "new.txt")).toBeNull();
+        for (const row of staged.splice(0)) {
+          expect(await driver.get(row.bucket, row.key, row.driverRef)).toBeNull();
+        }
+        await host.executeAction("blobs.replaceMany", false);
+        expect(await driver.get(before.bucket, before.key, before.driverRef)).toBeNull();
+        const intermediate = staged[0];
+        if (intermediate === undefined) throw new Error("missing intermediate payload");
+        expect(await driver.get(intermediate.bucket, intermediate.key, intermediate.driverRef)).toBeNull();
+        const result = await host.executeAction("blobs.get", { bucket: "uploads", key: "target.txt" });
+        expect(textResultValidator.parse(result.result).text).toBe("final");
+        const created = await host.executeAction("blobs.get", { bucket: "uploads", key: "new.txt" });
+        expect(textResultValidator.parse(created.result).text).toBe("new");
+      } finally {
+        await started.stop();
+      }
+    });
+
+    test("failed input streams preserve the existing payload and leave no partial replacement", async () => {
+      const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-stream-")) : undefined;
+      if (root !== undefined) cleanupDirs.push(root);
+      const { host, started } = await bootBlobsHost({ useFs, root });
+      try {
+        const blobs = host.routeEnv().blobs;
+        await blobs.put("uploads", "target.txt", new TextEncoder().encode("before"));
+        const before = await blobs.head("uploads", "target.txt");
+        const files = root === undefined ? [] : await readdir(join(root, "uploads", "objects"), { recursive: true });
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+            controller.error(new Error("input stream failed"));
+          },
+        });
+        await expect(blobs.put("uploads", "target.txt", body)).rejects.toThrow(/input stream failed/);
+        expect(await blobs.head("uploads", "target.txt")).toEqual(before);
+        const preserved = await blobs.get("uploads", "target.txt");
+        expect(preserved === null ? null : await new Response(preserved.body).text()).toBe("before");
+        if (root !== undefined) {
+          expect(await readdir(join(root, "uploads", "objects"), { recursive: true })).toEqual(files);
+        }
+      } finally {
+        await started.stop();
+      }
+    });
+  });
+}
+
+test("failed payload cleanup after commit preserves the new blob and records a warning", async () => {
+  const { host, started, driver } = await bootBlobsHost();
+  const remove = driver.delete.bind(driver);
+  try {
+    await host.executeAction("blobs.put", { bucket: "uploads", key: "target.txt", body: "before" });
+    const before = await host.engine.getBlobsAdapter().blobGetMetadata("uploads", "target.txt");
+    if (before === null) throw new Error("missing test blob metadata");
+    driver.delete = async (bucket, key, driverRef) => {
+      if (driverRef === before.driverRef) throw new Error("cleanup unavailable");
+      await remove(bucket, key, driverRef);
+    };
+    await host.executeAction("blobs.put", { bucket: "uploads", key: "target.txt", body: "after" });
+    const fetched = await host.executeAction("blobs.get", { bucket: "uploads", key: "target.txt" });
+    expect(textResultValidator.parse(fetched.result).text).toBe("after");
+    const warning = host.engine.drainTelemetryRecords().find((record) => record.kind === "log" && record.message === "blob payload cleanup failed");
+    expect(warning).toMatchObject({
+      kind: "log", level: "warn", message: "blob payload cleanup failed",
+      attributes: { committed: true, error: "cleanup unavailable" },
+    });
+    await host.executeAction("blobs.put", { bucket: "uploads", key: "target.txt", body: "next" });
+    const next = await host.executeAction("blobs.get", { bucket: "uploads", key: "target.txt" });
+    expect(textResultValidator.parse(next.result).text).toBe("next");
+  } finally {
+    driver.delete = remove;
+    await started.stop();
+  }
 });
 
 describe("chimpbase blobs primitive (fs driver)", () => {

@@ -762,13 +762,6 @@ export function chimpbaseWebhooks(
           if (matchPrefixWithId(segments, baseSegments) && request.method === "GET") {
             const lastSegment = decodeURIComponent(segments[segments.length - 1]!);
 
-            // Check if this is /_webhooks/:id/deliveries
-            if (lastSegment === "deliveries" && segments.length === baseSegments.length + 2) {
-              const webhookId = decodeURIComponent(segments[baseSegments.length]!);
-              const deliveries = await env.action("__chimpbase.webhooks.listDeliveries", webhookId);
-              return Response.json(deliveries);
-            }
-
             const webhook = await env.action("__chimpbase.webhooks.get", lastSegment);
             return webhook === null
               ? jsonError(404, "webhook not found")
@@ -777,7 +770,7 @@ export function chimpbaseWebhooks(
 
           // GET /_webhooks/:id/deliveries
           if (
-            segments.length === baseSegments.length + 2 &&
+            matchPrefixWithId(segments.slice(0, -1), baseSegments) &&
             segments[segments.length - 1] === "deliveries" &&
             request.method === "GET"
           ) {

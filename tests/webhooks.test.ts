@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { chimpbaseAuth } from "../packages/auth/src/index.ts";
 import {
   chimpbaseWebhooks,
   headerToken,
+  type WebhookDeliveryLog,
   type WebhookRegistration,
 } from "../packages/webhooks/src/index.ts";
 import { action, subscription } from "../packages/runtime/index.ts";
@@ -29,8 +31,9 @@ afterEach(async () => {
 });
 
 const INBOUND_SECRET = "test-inbound-secret";
+const MANAGEMENT_KEY = "test-management-key";
 
-async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?: boolean }) {
+async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?: boolean; withAuth?: boolean; managementBasePath?: string }) {
   const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-webhooks-test-"));
   cleanupDirs.push(projectDir);
 
@@ -54,13 +57,21 @@ async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?:
     project: { name: "webhooks-test" },
     projectDir,
     storage: { engine: "memory" },
-    secrets: { get: (name: string) => name === "INBOUND_SECRET" ? INBOUND_SECRET : null },
+    secrets: { get: (name: string) => name === "INBOUND_SECRET" ? INBOUND_SECRET : name === "MANAGEMENT_KEY" ? MANAGEMENT_KEY : null },
   });
+
+  if (options?.withAuth === true) {
+    host.register(chimpbaseAuth({
+      bootstrapKeySecret: "MANAGEMENT_KEY",
+      webhooksManagementPaths: [options.managementBasePath ?? "/_webhooks"],
+    }));
+  }
 
   host.register({
     webhooksPlugin: chimpbaseWebhooks({
       allowedEvents: ["order.created", "order.updated"],
       inbound,
+      managementBasePath: options?.managementBasePath,
     }),
   });
 
@@ -188,6 +199,69 @@ describe("@chimpbase/webhooks", () => {
       await host.close();
     }
   });
+
+  for (const managementBasePath of ["/_webhooks", "/admin/hooks"]) {
+    for (const withAuth of [false, true]) {
+      test(`delivery history requires the complete ${managementBasePath} prefix (auth: ${withAuth})`, async () => {
+        const host = await createWebhooksHost({ managementBasePath, withAuth });
+        try {
+          const headers = { "x-api-key": MANAGEMENT_KEY };
+          const created = await host.executeRoute(new Request(`http://test.local${managementBasePath}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...headers },
+            body: JSON.stringify({ url: "https://example.invalid/hook", events: ["order.created"] }),
+          }));
+          expect(created.response?.status).toBe(201);
+          const webhook = await readJsonResponse<WebhookResponse>(created.response);
+          host.register(action("test.seedDelivery", async (ctx) => {
+            await ctx.collection.insert("__chimpbase.webhooks.delivery_log", {
+              webhookId: webhook.id,
+              event: "order.created",
+              deliveryId: "test-delivery",
+              status: "delivered",
+              statusCode: 200,
+              attempt: 1,
+              error: null,
+              createdAt: new Date().toISOString(),
+            });
+          }));
+          await host.executeAction("test.seedDelivery");
+
+          const historyPath = `${managementBasePath}/${webhook.id}/deliveries`;
+          const unauthenticated = await host.executeRoute(new Request(`http://test.local${historyPath}`));
+          expect(unauthenticated.response?.status).toBe(withAuth ? 401 : 200);
+
+          for (const path of [historyPath, `${historyPath.replaceAll("/", "//")}//`]) {
+            const authorized = await host.executeRoute(new Request(`http://test.local${path}`, { headers }));
+            expect(authorized.response?.status).toBe(200);
+            const records = await readJsonResponse<WebhookDeliveryLog[]>(authorized.response);
+            expect(records.map(({ deliveryId, webhookId }) => ({ deliveryId, webhookId }))).toEqual([
+              { deliveryId: "test-delivery", webhookId: webhook.id },
+            ]);
+          }
+
+          const healthPrefix = managementBasePath === "/_webhooks" ? "/health" : "/health/status";
+          const unrelatedPrefix = managementBasePath === "/_webhooks" ? "/unrelated" : "/other/hooks";
+          for (const prefix of [healthPrefix, unrelatedPrefix, `${managementBasePath}-other`]) {
+            const outcome = await host.executeRoute(new Request(`http://test.local${prefix}/${webhook.id}/deliveries`, { headers }));
+            expect(outcome.response).toBeNull();
+          }
+
+          const health = await host.executeRoute(new Request(`http://test.local${healthPrefix}/${webhook.id}/deliveries`));
+          expect(health.response).toBeNull();
+
+          for (const path of [`${historyPath}/extra`, `${managementBasePath}/${webhook.id}/events`]) {
+            const outcome = await host.executeRoute(new Request(`http://test.local${path}`, { headers }));
+            expect(outcome.response).toBeNull();
+          }
+          const wrongMethod = await host.executeRoute(new Request(`http://test.local${historyPath}`, { method: "POST", headers }));
+          expect(wrongMethod.response).toBeNull();
+        } finally {
+          await host.close();
+        }
+      });
+    }
+  }
 
   test("deletes a webhook", async () => {
     const host = await createWebhooksHost();
