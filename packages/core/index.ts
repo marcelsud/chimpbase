@@ -399,6 +399,7 @@ export {
 
 export { registerChimpbaseModuleImplementations } from "./module-registration.ts";
 export { createSqliteKysely } from "./sqlite-kysely.ts";
+export { ensureSqliteInternalTables } from "./sqlite-schema.ts";
 export { applySqliteMigrations } from "./host.ts";
 export {
   createSqliteEngineAdapter,
