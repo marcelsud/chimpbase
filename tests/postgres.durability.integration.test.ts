@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { applyPostgresSqlMigrations } from "../packages/postgres/src/index.ts";
 import {
   action,
   cron,
@@ -42,6 +43,34 @@ describeIfPg("PostgreSQL queue durability", () => {
       );
     }
     await pool.end();
+  });
+
+  test("named migrations serialize concurrent startup and roll back failed batches", async () => {
+    const id = crypto.randomUUID().replaceAll("-", "");
+    const table = `migration_test_${id}`;
+    const create = { name: `${id}:001_create`, sql: `CREATE TABLE ${table} (value TEXT)` };
+    const insert = { name: `${id}:002_insert`, sql: `INSERT INTO ${table} VALUES ('once')` };
+    const pending = { name: `${id}:003_update`, sql: `UPDATE ${table} SET value = 'updated'` };
+    const invalid = { name: `${id}:004_bad`, sql: `INSERT INTO missing_${id} VALUES (1)` };
+    try {
+      await Promise.all([
+        applyPostgresSqlMigrations(pool, [create, insert]),
+        applyPostgresSqlMigrations(pool, [create, insert]),
+      ]);
+      expect((await pool.query<{ value: string }>(`SELECT value FROM ${table}`)).rows).toEqual([{ value: "once" }]);
+      await expect(applyPostgresSqlMigrations(pool, [pending, invalid])).rejects.toThrow(`missing_${id}`);
+      expect((await pool.query<{ value: string }>(`SELECT value FROM ${table}`)).rows).toEqual([{ value: "once" }]);
+      expect((await pool.query<{ name: string }>("SELECT name FROM _chimpbase_migrations WHERE name = ANY($1::text[]) ORDER BY name", [
+        [create.name, insert.name, pending.name, invalid.name],
+      ])).rows).toEqual([{ name: create.name }, { name: insert.name }]);
+      await applyPostgresSqlMigrations(pool, [create, insert, pending]);
+      expect((await pool.query<{ value: string }>(`SELECT value FROM ${table}`)).rows).toEqual([{ value: "updated" }]);
+    } finally {
+      await pool.query(`DROP TABLE IF EXISTS ${table}`);
+      await pool.query("DELETE FROM _chimpbase_migrations WHERE name = ANY($1::text[])", [
+        [create.name, insert.name, pending.name, invalid.name],
+      ]);
+    }
   });
 
   for (const scenario of ["single failure", "exhausted retries", "recovered retry", "SQL failure"] as const) {

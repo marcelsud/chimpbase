@@ -31,6 +31,39 @@ export interface ChimpbaseMigrationSource {
   list(): Promise<ChimpbaseMigration[]>;
 }
 
+interface SqliteMigrationDatabase {
+  exec(sql: string): unknown;
+  query(sql: string): {
+    all(...params: string[]): unknown[];
+    run(...params: string[]): unknown;
+  };
+}
+
+export function applySqliteMigrations(
+  db: SqliteMigrationDatabase,
+  migrations: readonly ChimpbaseMigration[],
+): void {
+  if (migrations.length === 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS _chimpbase_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    for (const migration of migrations) {
+      if (db.query("SELECT name FROM _chimpbase_migrations WHERE name = ?1").all(migration.name).length > 0) {
+        continue;
+      }
+      db.exec(migration.sql);
+      db.query("INSERT INTO _chimpbase_migrations (name) VALUES (?1)").run(migration.name);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export interface ChimpbaseDrainOptions {
   maxDurationMs?: number;
   maxRuns?: number;

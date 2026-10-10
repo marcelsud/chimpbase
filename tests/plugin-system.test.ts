@@ -13,6 +13,7 @@ import {
   plugin,
   route,
   v,
+  worker,
   type ChimpbaseValidator,
 } from "../packages/runtime/index.ts";
 import { readJsonResponse } from "./support/http.ts";
@@ -109,6 +110,104 @@ describe("plugin system", () => {
   });
 
   // ── Lifecycle hooks ───────────────────────────────────────────────────
+
+  test("HTTP and workers wait for asynchronous initialization", async () => {
+    const host = await createTestHost();
+    host.config.server.port = 0;
+    let initialized = false;
+    const readiness: boolean[] = [];
+    const serve = host.serve.bind(host);
+    const startWorker = host.startWorker.bind(host);
+    host.serve = () => {
+      readiness.push(initialized);
+      return serve();
+    };
+    host.startWorker = () => {
+      readiness.push(initialized);
+      return startWorker();
+    };
+    host.register(
+      worker("test.work", async () => { expect(initialized).toBe(true); }),
+      onStart("test.init", async (ctx) => {
+        await ctx.enqueue("test.work", {});
+        await Bun.sleep(25);
+        initialized = true;
+      }),
+    );
+    const started = await host.start({ serve: true, runWorker: true });
+    try {
+      expect(readiness).toEqual([true, true]);
+    } finally {
+      await started.stop();
+      await host.close();
+    }
+  });
+
+  test("onStart can await host actions and routes", async () => {
+    const host = await createTestHost();
+    const completed: string[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    host.register(
+      action("test.initialize", async (ctx) => {
+        await ctx.kv.set("initialization", "ready");
+        completed.push("action");
+      }),
+      route("test.initialization.route", async () => {
+        completed.push("route");
+        return new Response("ready");
+      }),
+      onStart("test.init", async () => {
+        await host.executeAction("test.initialize");
+        const outcome = await host.executeRoute(new Request("http://test.local/init"));
+        expect(await outcome.response?.text()).toBe("ready");
+      }),
+    );
+    try {
+      const started = await Promise.race([
+        host.start({ serve: false, runWorker: false }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("initialization deadlocked")), 1000);
+        }),
+      ]);
+      try {
+        expect(completed).toEqual(["action", "route"]);
+      } finally {
+        await started.stop();
+      }
+    } finally {
+      clearTimeout(timer);
+      await host.close();
+    }
+  });
+
+  test("failed initialization starts no HTTP listener or worker", async () => {
+    const host = await createTestHost();
+    host.config.server.port = 0;
+    const servers: ReturnType<typeof host.serve>[] = [];
+    const workers: ReturnType<typeof host.startWorker>[] = [];
+    const serve = host.serve.bind(host);
+    const startWorker = host.startWorker.bind(host);
+    host.serve = () => {
+      const server = serve();
+      servers.push(server);
+      return server;
+    };
+    host.startWorker = () => {
+      const handle = startWorker();
+      workers.push(handle);
+      return handle;
+    };
+    host.register(onStart("test.init", () => { throw new Error("initialization failed"); }));
+    try {
+      await expect(host.start({ serve: true, runWorker: true })).rejects.toThrow("initialization failed");
+      expect(servers).toHaveLength(0);
+      expect(workers).toHaveLength(0);
+    } finally {
+      for (const server of servers) await server.stop(true);
+      for (const handle of workers) await handle.stop();
+      await host.close();
+    }
+  });
 
   test("onStart hook runs on start and has ctx access", async () => {
     const host = await createTestHost();

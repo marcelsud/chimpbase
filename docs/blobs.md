@@ -128,13 +128,15 @@ The `fsBlobDriver` writes to:
   <bucket>/
     objects/
       <2-byte-sha-shard>/
-        <urlencoded-key>
+        <object-id>
   _uploads/
     <upload-id>/
-      part-000001
+      part-000001-<part-id>
 ```
 
-This layout is path-addressed (not content-addressed) so `rsync -a --delete <root>/ <backup-root>/` mirrors the logical content verbatim. Run it from a chimpbase `cron(...)` for periodic local backup.
+Object and part IDs are fixed-length UUIDs. Logical keys stay in database metadata, so long keys do not exceed filesystem filename limits. Replacing a part writes a new payload; the previous payload remains available until the transaction commits.
+
+Use `rsync -a --delete <root>/ <backup-root>/` to mirror the stored payloads, together with a database backup to preserve their logical keys and metadata. Run it from a chimpbase `cron(...)` for periodic local backup.
 
 ## Drivers
 
@@ -143,3 +145,5 @@ This layout is path-addressed (not content-addressed) so `rsync -a --delete <roo
 | `fsBlobDriver({ root })` | Default. Local disk. Rsync, nfs, or a block-volume backed directory. |
 | `memoryBlobDriver()` | Tests only. |
 | custom | Implement `ChimpbaseBlobDriver` from `@chimpbase/core`. |
+
+Custom drivers must return a fresh, immutable `driverRef` from each `putPart` call and assemble the exact references supplied by the engine. `delete(bucket, key, driverRef)` must remove either an object or a staged part, so transaction cleanup can discard a replacement or retire the previous version.

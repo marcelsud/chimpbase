@@ -77,13 +77,19 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
         await expect(host.executeAction("runGc")).rejects.toThrow("staging cleanup failed");
         expect(await inspect()).toEqual(before);
         expect((await host.routeEnv().blobs.resumeUpload(expiredId)).id).toBe(expiredId);
-        if (useFs) expect(await Bun.file(join(root, "_uploads", expiredId, "part-000001")).text()).toBe("expired bytes");
+        if (useFs) {
+          const [part] = await host.engine.getBlobsAdapter().blobListParts(expiredId);
+          if (part === undefined) throw new Error("missing expired upload part");
+          expect(await Bun.file(part.driverRef).text()).toBe("expired bytes");
+        }
         await host.executeAction("runGc");
         expect(await inspect()).toEqual({ uploads: [{ upload_id: liveId }], parts: [{ upload_id: liveId }] });
         await expect(host.routeEnv().blobs.resumeUpload(expiredId)).rejects.toThrow("not found");
         if (useFs) {
           await expect(stat(join(root, "_uploads", expiredId))).rejects.toMatchObject({ code: "ENOENT" });
-          expect(await Bun.file(join(root, "_uploads", liveId, "part-000001")).text()).toBe("live bytes");
+          const [part] = await host.engine.getBlobsAdapter().blobListParts(liveId);
+          if (part === undefined) throw new Error("missing live upload part");
+          expect(await Bun.file(part.driverRef).text()).toBe("live bytes");
         } else {
           await expect(driver.assemble(expiredId, [{ partNumber: 1, driverRef: `${expiredId}/1` }], bucket, "expired.txt")).rejects.toThrow("missing upload");
         }
@@ -692,6 +698,81 @@ for (const useFs of [false, true]) {
       });
     }
 
+    test("multipart replacements preserve committed bytes on handler or commit failure and clean retired parts", async () => {
+      const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-parts-")) : undefined;
+      if (root !== undefined) cleanupDirs.push(root);
+      const { host, started, driver } = await bootBlobsHost({ useFs, root });
+      const adapter = host.engine.getBlobsAdapter();
+      const commit = adapter.commitTransaction.bind(adapter);
+      const stagedRefs: string[] = [];
+      try {
+        const upload = await host.routeEnv().blobs.createUpload("uploads", "target.txt");
+        await upload.writePart(1, new TextEncoder().encode("before"));
+        const originalParts = await adapter.blobListParts(upload.id);
+        const original = originalParts[0];
+        if (original === undefined) throw new Error("missing original upload part");
+        host.register(action("blobs.replaceParts", async (ctx, fail: boolean) => {
+          const resumed = await ctx.blobs.resumeUpload(upload.id);
+          for (const [partNumber, body] of [[1, "intermediate"], [1, "after"], [2, "tail"]] as const) {
+            await resumed.writePart(partNumber, new TextEncoder().encode(body));
+            const part = (await adapter.blobListParts(upload.id)).find((part) => part.partNumber === partNumber);
+            if (part === undefined) throw new Error("missing replacement upload part");
+            stagedRefs.push(part.driverRef);
+          }
+          if (fail) throw new Error("failed after replacing parts");
+        }));
+        for (const failure of ["handler", "commit"]) {
+          if (failure === "commit") adapter.commitTransaction = async () => { throw new Error("part commit failed"); };
+          await expect(host.executeAction("blobs.replaceParts", failure === "handler"))
+            .rejects.toThrow(failure === "handler" ? "failed after replacing parts" : "part commit failed");
+          adapter.commitTransaction = commit;
+          expect(await adapter.blobListParts(upload.id)).toEqual(originalParts);
+          const preserved = await driver.get("uploads", "target.txt", original.driverRef);
+          expect(preserved === null ? null : await new Response(preserved.body).text()).toBe("before");
+          for (const ref of stagedRefs.splice(0)) expect(await driver.get("uploads", "target.txt", ref)).toBeNull();
+          if (root !== undefined) expect(await readdir(join(root, "_uploads", upload.id))).toHaveLength(1);
+        }
+        await host.executeAction("blobs.replaceParts", false);
+        expect(await driver.get("uploads", "target.txt", original.driverRef)).toBeNull();
+        expect(await driver.get("uploads", "target.txt", stagedRefs[0]!)).toBeNull();
+        await upload.complete();
+        const completed = await host.routeEnv().blobs.get("uploads", "target.txt");
+        expect(completed === null ? null : await new Response(completed.body).text()).toBe("aftertail");
+        for (const ref of stagedRefs) expect(await driver.get("uploads", "target.txt", ref)).toBeNull();
+      } finally {
+        adapter.commitTransaction = commit;
+        await started.stop();
+        await host.close();
+      }
+    });
+
+    test("failed part streams preserve the original part and leave no partial replacement", async () => {
+      const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-part-stream-")) : undefined;
+      if (root !== undefined) cleanupDirs.push(root);
+      const { host, started } = await bootBlobsHost({ useFs, root });
+      try {
+        const upload = await host.routeEnv().blobs.createUpload("uploads", "target.txt");
+        await upload.writePart(1, new TextEncoder().encode("before"));
+        const parts = await upload.listParts();
+        const files = root === undefined ? [] : await readdir(join(root, "_uploads", upload.id));
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+            controller.error(new Error("part stream failed"));
+          },
+        });
+        await expect(upload.writePart(1, body)).rejects.toThrow("part stream failed");
+        expect(await upload.listParts()).toEqual(parts);
+        if (root !== undefined) expect(await readdir(join(root, "_uploads", upload.id))).toEqual(files);
+        await upload.complete();
+        const completed = await host.routeEnv().blobs.get("uploads", "target.txt");
+        expect(completed === null ? null : await new Response(completed.body).text()).toBe("before");
+      } finally {
+        await started.stop();
+        await host.close();
+      }
+    });
+
     test("multipart completion and abort keep committed parts available after rollback", async () => {
       const root = useFs ? await mkdtemp(join(tmpdir(), "chimpbase-blobs-multipart-")) : undefined;
       if (root !== undefined) cleanupDirs.push(root);
@@ -793,6 +874,30 @@ for (const useFs of [false, true]) {
     });
   });
 }
+
+test("filesystem put, copy and multipart support long ASCII and Unicode keys", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-long-keys-"));
+  cleanupDirs.push(root);
+  const { host, started } = await bootBlobsHost({ useFs: true, root });
+  try {
+    const blobs = host.routeEnv().blobs;
+    for (const key of ["a".repeat(230), "é".repeat(200)]) {
+      await blobs.put("uploads", key, new TextEncoder().encode("before"));
+      await blobs.copy({ bucket: "uploads", key }, { bucket: "uploads", key: `${key}.copy` });
+      const upload = await blobs.createUpload("uploads", `${key}.multipart`);
+      await upload.writePart(1, new TextEncoder().encode("before"));
+      await upload.complete();
+      for (const storedKey of [key, `${key}.copy`, `${key}.multipart`]) {
+        const object = await blobs.get("uploads", storedKey);
+        expect(object?.key).toBe(storedKey);
+        expect(object === null ? null : await new Response(object.body).text()).toBe("before");
+      }
+    }
+  } finally {
+    await started.stop();
+    await host.close();
+  }
+});
 
 test("failed payload cleanup after commit preserves the new blob and records a warning", async () => {
   const { host, started, driver } = await bootBlobsHost();

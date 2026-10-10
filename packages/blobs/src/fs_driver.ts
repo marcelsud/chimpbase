@@ -21,10 +21,6 @@ export interface FsBlobDriverOptions {
 const UPLOADS_DIR = "_uploads";
 const OBJECTS_DIR = "objects";
 
-function encodeKey(key: string): string {
-  return encodeURIComponent(key);
-}
-
 function shardPrefix(key: string, shardBytes: number): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return digest.slice(0, Math.max(2, Math.min(shardBytes, 8)));
@@ -94,7 +90,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
   const bucketRoot = (bucket: string) => join(root, bucket, OBJECTS_DIR);
   const uploadsRoot = (uploadId: string) => join(root, UPLOADS_DIR, uploadId);
   const objectPath = (bucket: string, key: string) =>
-    join(bucketRoot(bucket), shardPrefix(key, shardBytes), `${encodeKey(key)}-${randomUUID()}`);
+    join(bucketRoot(bucket), shardPrefix(key, shardBytes), randomUUID());
 
   return {
     async ensureBucket(bucket: string) {
@@ -172,7 +168,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
     async putPart(uploadId, partNumber, body) {
       const dir = uploadsRoot(uploadId);
       await ensureDir(dir);
-      const target = join(dir, `part-${String(partNumber).padStart(6, "0")}`);
+      const target = join(dir, `part-${String(partNumber).padStart(6, "0")}-${randomUUID()}`);
       const hash = createHash("sha256");
       let size = 0;
       const writer = createWriteStream(target);
@@ -182,7 +178,12 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
         hash.update(buf);
         size += buf.byteLength;
       });
-      await pipeline(reader, writer);
+      try {
+        await pipeline(reader, writer);
+      } catch (error) {
+        await rm(target, { force: true });
+        throw error;
+      }
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },
     async assemble(uploadId, parts, finalBucket, finalKey) {

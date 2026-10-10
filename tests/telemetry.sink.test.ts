@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { defineChimpbaseApp, normalizeProjectConfig } from "../packages/core/index.ts";
-import { action, cron, v, worker } from "../packages/runtime/index.ts";
+import { defineChimpbaseApp, normalizeProjectConfig, type ChimpbaseEventBusCallback } from "../packages/core/index.ts";
+import { action, cron, subscription, v, worker } from "../packages/runtime/index.ts";
 import { ChimpbaseBunHost, bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createRuntimeHost } from "../packages/host/src/runtime.ts";
 import type {
@@ -151,6 +151,120 @@ async function createHostWithCleanup(
 }
 
 describe("telemetry sink interface", () => {
+  test("bounded history preserves all stream and sink delivery across overflow", async () => {
+    const mock = createMockSink();
+    const host = await createHostWithSink(mock.sink);
+    host.setTelemetryOverride("action:burst", true);
+    host.setTelemetryOverride("action:tail", true);
+    host.register(
+      action("burst", async (ctx) => {
+        for (let index = 0; index < 10_005; index += 1) ctx.log.info("record", { index });
+        ctx.metric("count", 1);
+        await ctx.trace("overflow-span", async () => {});
+      }),
+      action("tail", (ctx) => ctx.log.info("tail")),
+      action("inspectStreams", async (ctx) => ctx.db.query(
+        "SELECT stream_name, COUNT(*) AS count FROM _chimpbase_stream_events GROUP BY stream_name ORDER BY stream_name",
+        [], v.object({ stream_name: v.string(), count: v.number() }),
+      )),
+    );
+    await host.executeAction("burst");
+    await host.executeAction("tail");
+    expect((await host.executeAction("inspectStreams")).result).toEqual([
+      { stream_name: "_chimpbase.logs", count: 10_006 },
+      { stream_name: "_chimpbase.metrics", count: 1 },
+      { stream_name: "_chimpbase.traces", count: 2 },
+    ]);
+    expect(mock.calls.filter((call) => call.method === "onLog")).toHaveLength(10_006);
+    expect(mock.calls.filter((call) => call.method === "onMetric")).toHaveLength(1);
+    expect(mock.calls.filter((call) => call.method === "startSpan")).toHaveLength(1);
+    const retained = host.drainTelemetryRecords();
+    expect(retained).toHaveLength(10_000);
+    expect(retained[0]).toMatchObject({ kind: "log", attributes: { index: 9 } });
+    expect(retained.at(-1)).toMatchObject({ kind: "log", message: "tail" });
+    expect(retained.filter((record) => record.kind === "metric")).toHaveLength(1);
+    expect(retained.filter((record) => record.kind === "trace")).toHaveLength(2);
+    expect(host.drainTelemetryRecords()).toEqual([]);
+  });
+
+  test("failed handlers also cap retained history without dropping sink delivery", async () => {
+    const mock = createMockSink();
+    const host = await createHostWithSink(mock.sink);
+    host.register(action("failAfterLogs", (ctx) => {
+      for (let index = 0; index < 10_005; index += 1) ctx.log.info("record", { index });
+      throw new Error("handler failed");
+    }));
+    await expect(host.executeAction("failAfterLogs")).rejects.toThrow("handler failed");
+    const retained = host.drainTelemetryRecords();
+    expect(retained).toHaveLength(10_000);
+    expect(retained[0]).toMatchObject({ kind: "log", attributes: { index: 5 } });
+    expect(mock.calls.filter((call) => call.method === "onLog")).toHaveLength(10_005);
+  });
+
+  test("nested event delivery does not trim an action's unpersisted records", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-telemetry-nested-"));
+    cleanupDirs.push(projectDir);
+    let callback: ChimpbaseEventBusCallback | undefined;
+    const runtime = {
+      ...bunRuntimeShim,
+      storage: {
+        async open(...args: Parameters<typeof bunRuntimeShim.storage.open>) {
+          const resources = await bunRuntimeShim.storage.open(...args);
+          return {
+            ...resources,
+            eventBus: {
+              start(handler: ChimpbaseEventBusCallback) { callback = handler; },
+              stop() { callback = undefined; },
+              async publish() {
+                await callback?.([{ id: 123, name: "foreign", payload: {}, payloadJson: "{}" }]);
+              },
+            },
+          };
+        },
+      },
+    };
+    const host = await createRuntimeHost(ChimpbaseBunHost, runtime, {
+      projectDir, secrets: { get: () => null },
+      config: normalizeProjectConfig({ storage: { engine: "memory" }, telemetry: { persist: { log: true } } }),
+    });
+    cleanupHosts.push(host);
+    host.register(
+      subscription("foreign", (ctx) => ctx.log.info("bus")),
+      action("burst", (ctx) => {
+        for (let index = 0; index < 10_005; index += 1) ctx.log.info("root");
+        ctx.pubsub.publish("origin", {});
+      }),
+      action("inspect", (ctx) => ctx.db.query(
+        "SELECT COUNT(*) AS count FROM _chimpbase_stream_events WHERE json_extract(payload_json, '$.message') = ?1",
+        ["root"], v.object({ count: v.number() }),
+      )),
+    );
+    const started = await host.start({ serve: false, runWorker: false });
+    try {
+      await host.executeAction("burst");
+      expect((await host.executeAction("inspect")).result).toEqual([{ count: 10_005 }]);
+      expect(host.drainTelemetryRecords()).toHaveLength(10_000);
+    } finally {
+      await started.stop();
+    }
+  });
+
+  for (const fail of [false, true]) {
+    test(`routeEnv actions also cap retained history, fail=${fail}`, async () => {
+      const mock = createMockSink();
+      const host = await createHostWithSink(mock.sink);
+      host.register(action("rawBurst", (ctx) => {
+        for (let index = 0; index < 10_005; index += 1) ctx.log.info("record", { index });
+        if (fail) throw new Error("raw handler failed");
+      }));
+      const pending = host.routeEnv().action("rawBurst");
+      if (fail) await expect(pending).rejects.toThrow("raw handler failed");
+      else await pending;
+      expect(host.drainTelemetryRecords()).toHaveLength(10_000);
+      expect(mock.calls.filter((call) => call.method === "onLog")).toHaveLength(10_005);
+    });
+  }
+
   test("onLog is called when ctx.log is used", async () => {
     const mock = createMockSink();
     const host = await createHostWithSink(mock.sink);

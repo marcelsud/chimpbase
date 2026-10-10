@@ -139,6 +139,8 @@ OTel export works alongside the existing telemetry features:
 - Stream persistence (`telemetry.persist`) continues to write to internal streams
 - Sinks receive telemetry in parallel, not instead of existing mechanisms
 
+The in-memory history keeps the latest 10,000 records after each handler execution. Stream persistence and sinks still receive all records.
+
 ### Custom Sinks
 
 You can implement your own sink by implementing the `ChimpbaseTelemetrySink` interface from `@chimpbase/runtime`:

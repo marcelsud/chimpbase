@@ -10,6 +10,7 @@ import type {
 interface BlobRecord {
   bytes: Uint8Array;
   sha256: string;
+  uploadId?: string;
 }
 
 async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
@@ -60,7 +61,7 @@ function sliceRange(bytes: Uint8Array, range?: ChimpbaseBlobDriverRange): Uint8A
 
 export function memoryBlobDriver(): ChimpbaseBlobDriver {
   const blobs = new Map<string, BlobRecord>();
-  const uploads = new Map<string, Map<number, BlobRecord>>();
+  const uploads = new Map<string, Set<string>>();
   const objectRef = (bucket: string, key: string) => `${bucket}/${key}/${randomUUID()}`;
 
   return {
@@ -81,7 +82,9 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
       return { body: streamFrom(slice), size: slice.byteLength };
     },
     async delete(_bucket, _key, driverRef) {
+      const uploadId = blobs.get(driverRef)?.uploadId;
       blobs.delete(driverRef);
+      if (uploadId !== undefined) uploads.get(uploadId)?.delete(driverRef);
     },
     async copy(src, dst): Promise<ChimpbaseBlobDriverPutResult> {
       const record = blobs.get(src.driverRef);
@@ -96,10 +99,12 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     async putPart(uploadId, partNumber, body) {
       const bytes = await readAll(body);
       const sha256 = hashBytes(bytes);
-      const parts = uploads.get(uploadId) ?? new Map<number, BlobRecord>();
-      parts.set(partNumber, { bytes, sha256 });
+      const driverRef = `${uploadId}/${partNumber}/${randomUUID()}`;
+      const parts = uploads.get(uploadId) ?? new Set<string>();
+      blobs.set(driverRef, { bytes, sha256, uploadId });
+      parts.add(driverRef);
       uploads.set(uploadId, parts);
-      return { driverRef: `${uploadId}/${partNumber}`, size: bytes.byteLength, sha256 };
+      return { driverRef, size: bytes.byteLength, sha256 };
     },
     async assemble(uploadId, parts, finalBucket, finalKey) {
       const staged = uploads.get(uploadId);
@@ -108,7 +113,7 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
       const buffers: Uint8Array[] = [];
       let total = 0;
       for (const part of ordered) {
-        const record = staged.get(part.partNumber);
+        const record = staged.has(part.driverRef) ? blobs.get(part.driverRef) : undefined;
         if (!(record !== undefined)) throw new Error(`memory driver assemble missing part ${part.partNumber}`);
         buffers.push(record.bytes);
         total += record.bytes.byteLength;
@@ -125,6 +130,7 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
       return { driverRef, size: out.byteLength, sha256 };
     },
     async abortUpload(uploadId) {
+      for (const driverRef of uploads.get(uploadId) ?? []) blobs.delete(driverRef);
       uploads.delete(uploadId);
     },
   };

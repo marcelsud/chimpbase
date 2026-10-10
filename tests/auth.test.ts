@@ -64,6 +64,22 @@ function authHeaders(key: string = BOOTSTRAP_KEY) {
 describe("@chimpbase/auth", () => {
   // ── Guard ───────────────────────────────────────────────────────────────
 
+  test("root protected prefix covers every route and preserves exclusions", async () => {
+    const host = await createAuthHost({ protectedPaths: [" / "] });
+    try {
+      for (const path of ["/", "/api/items", "/_auth/users", "/_webhooks"]) {
+        const outcome = await host.executeRoute(new Request(`http://test.local${path}`));
+        expect(outcome.response?.status).toBe(401);
+      }
+      expect((await host.executeRoute(new Request("http://test.local/health"))).response).toBeNull();
+      expect((await host.executeRoute(new Request("http://test.local/api/items", {
+        headers: authHeaders(),
+      }))).response).toBeNull();
+    } finally {
+      await host.close();
+    }
+  });
+
   test("blocks request without API key", async () => {
     const host = await createAuthHost();
     try {
@@ -341,6 +357,49 @@ describe("@chimpbase/auth", () => {
         new Request("http://test.local/some-path", { headers: authHeaders(keyData.key) }),
       );
       expect(authOutcome.response?.status).toBe(401);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("invalid expiry is rejected without creating an API key", async () => {
+    const host = await createAuthHost();
+    try {
+      const user = idResultValidator.parse((await host.executeAction("__chimpbase.auth.createUser", {
+        email: "invalid-expiry@test.com", name: "Invalid expiry",
+      })).result);
+      for (const expiresAt of ["invalid-date", ""]) {
+        const outcome = await host.executeRoute(new Request(`http://test.local/_auth/users/${user.id}/keys`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ expiresAt }),
+        }));
+        expect(outcome.response?.status).toBe(400);
+      }
+      expect((await host.executeAction("__chimpbase.auth.listApiKeys", [user.id])).result).toEqual([]);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("invalid persisted expiry fails authentication", async () => {
+    const host = await createAuthHost();
+    try {
+      const user = idResultValidator.parse((await host.executeAction("__chimpbase.auth.createUser", {
+        email: "corrupt-expiry@test.com", name: "Corrupt expiry",
+      })).result);
+      const key = keyResultValidator.parse((await host.executeAction("__chimpbase.auth.createApiKey", {
+        userId: user.id,
+      })).result);
+      host.registerAction("corruptExpiry", async (ctx, expiresAt: string) =>
+        await ctx.collection.update("__chimpbase.auth.api_keys", { userId: user.id }, { expiresAt }));
+      for (const expiresAt of ["invalid-date", ""]) {
+        await host.executeAction("corruptExpiry", [expiresAt]);
+        const outcome = await host.executeRoute(new Request("http://test.local/api/items", {
+          headers: authHeaders(key.key),
+        }));
+        expect(outcome.response?.status).toBe(401);
+      }
     } finally {
       await host.close();
     }

@@ -91,7 +91,7 @@ export const bunRuntimeShim: ChimpbaseRuntimeShim<Bun.Server<unknown>> = {
           throw new Error("@chimpbase/bun requires storage.url for postgres storage");
         }
         const pool = openPostgresPool(config);
-        await applyPostgresSqlMigrations(pool, resolvedMigrations.map((migration) => migration.sql));
+        await applyPostgresSqlMigrations(pool, resolvedMigrations);
         await applyInlinePostgresMigrations(pool, migrationsSql);
         await ensurePostgresInternalTables(pool);
         const eventBus = new PostgresPollingEventBus({ pool });
@@ -110,7 +110,7 @@ export const bunRuntimeShim: ChimpbaseRuntimeShim<Bun.Server<unknown>> = {
       }
 
       const db = await openSqliteDatabase(projectDir, config);
-      await applySqlMigrations(db, resolvedMigrations.map((migration) => migration.sql));
+      await applySqlMigrations(db, resolvedMigrations);
       await applyInlineSqlMigrations(db, migrationsSql);
       await ensureSqliteInternalTables(db);
       return {
