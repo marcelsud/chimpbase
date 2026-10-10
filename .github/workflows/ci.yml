@@ -96,8 +96,8 @@ jobs:
 
       - name: Postgres integration tests
         run: >-
-          bun test tests/listen-event-bus.integration.test.ts tests/mesh.integration.test.ts
-          tests/mesh.registry.test.ts tests/postgres.durability.integration.test.ts
+          bun test tests/listen-event-bus.integration.test.ts tests/mesh*.test.ts
+          tests/postgres.durability.integration.test.ts
           tests/postgres.event-bus.integration.test.ts tests/collections.integration.test.ts
           tests/blobs.test.ts tests/webhooks.test.ts
 

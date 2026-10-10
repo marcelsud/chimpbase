@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { isArrayValue } from "@chimpbase/runtime";
 import type { ChimpbaseContext, ChimpbaseValidator } from "@chimpbase/runtime";
 
 import type { MeshPeerCache } from "./discovery.ts";
@@ -23,6 +22,7 @@ export interface CallResolverOptions {
   defaultStrategy: LoadBalanceStrategy;
   defaultTimeoutMs: number;
   localActionNames: ReadonlySet<string>;
+  localMetadata?: Readonly<Record<string, unknown>>;
   localNodeId: string;
   middleware: readonly MeshCallMiddleware[];
   remoteDispatcher: RemoteDispatcher | null;
@@ -35,10 +35,9 @@ export type RemoteDispatcher = (params: {
   peer: NodeRecord;
 }) => Promise<unknown>;
 
-const roundRobinCounters = new Map<string, number>();
-
 export function createCallDispatcher(options: CallResolverOptions) {
   const contexts = new AsyncLocalStorage<ChimpbaseContext>();
+  const roundRobinCounters = new Map<string, number>();
   const core = async <TResult>(
     ctx: ChimpbaseContext,
     actionName: string,
@@ -50,14 +49,20 @@ export function createCallDispatcher(options: CallResolverOptions) {
     const timeoutMs = callOpts.timeoutMs ?? options.defaultTimeoutMs;
     const retryAttempts = callOpts.retry?.attempts ?? options.defaultRetries;
     const retryDelayMs = callOpts.retry?.delayMs ?? 100;
+    const excludedRemoteNodeIds = new Set<string>();
 
-    const attempt = async (): Promise<TResult> => {
+    let localAttempt = false;
+    const attempt = async (): Promise<unknown> => {
+      localAttempt = false;
       const target = pickTarget({
         actionName,
         cache: options.cache,
+        excludedRemoteNodeIds,
         localActionNames: options.localActionNames,
+        localMetadata: options.localMetadata,
         localNodeId: options.localNodeId,
         pinnedNodeId: callOpts.nodeId,
+        roundRobinCounters,
         strategy,
       });
 
@@ -67,11 +72,13 @@ export function createCallDispatcher(options: CallResolverOptions) {
 
       let result: unknown;
       if (target.kind === "local") {
+        localAttempt = true;
         result = await withTimeout(
           invokeLocal(ctx, actionName, args),
           timeoutMs,
           actionName,
           options.localNodeId,
+          true,
         );
       } else {
         if (!(options.remoteDispatcher !== null)) {
@@ -83,32 +90,46 @@ export function createCallDispatcher(options: CallResolverOptions) {
         }
 
         const deadlineMs = Date.now() + timeoutMs;
-        result = await withTimeout(
-          options.remoteDispatcher({
+        try {
+          result = await withTimeout(
+            options.remoteDispatcher({
+              actionName,
+              args,
+              deadlineMs,
+              peer: target.peer,
+            }),
+            timeoutMs,
             actionName,
-            args,
-            deadlineMs,
-            peer: target.peer,
-          }),
-          timeoutMs,
-          actionName,
-          target.peer.nodeId,
-        );
+            target.peer.nodeId,
+          );
+        } catch (error) {
+          excludedRemoteNodeIds.add(target.peer.nodeId);
+          throw error;
+        }
       }
 
-      return resultValidator.parse(result, `mesh action ${actionName} result`);
+      return result;
     };
 
     let lastError: Error | null = null;
     for (let i = 0; i <= retryAttempts; i++) {
+      let result: unknown;
       try {
-        return await attempt();
+        result = await attempt();
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        // Local failures share the caller's transaction and must reach its rollback boundary.
+        if (localAttempt) throw lastError;
+        const retryable = error instanceof MeshNoAvailableNodeError
+          || error instanceof MeshTimeoutError
+          || (error instanceof MeshCallError && error.retryable);
+        if (!retryable) break;
         if (i < retryAttempts) {
           await delay(retryDelayMs);
         }
+        continue;
       }
+      return resultValidator.parse(result, `mesh action ${actionName} result`);
     }
 
     if ((callOpts.fallback !== undefined)) {
@@ -147,9 +168,12 @@ export function createCallDispatcher(options: CallResolverOptions) {
 interface PickTargetArgs {
   actionName: string;
   cache: MeshPeerCache;
+  excludedRemoteNodeIds: ReadonlySet<string>;
   localActionNames: ReadonlySet<string>;
+  localMetadata?: Readonly<Record<string, unknown>>;
   localNodeId: string;
   pinnedNodeId?: string;
+  roundRobinCounters: Map<string, number>;
   strategy: LoadBalanceStrategy;
 }
 
@@ -165,15 +189,18 @@ function pickTarget(args: PickTargetArgs): PickResult | null {
       return localAvailable ? { kind: "local", nodeId: args.localNodeId } : null;
     }
 
-    const pinned = args.cache.get(args.pinnedNodeId);
-    if (!(pinned !== null)) {
+    const pinned = args.cache.findByAction(args.actionName)
+      .find((peer) => peer.nodeId === args.pinnedNodeId);
+    if (pinned === undefined) {
       return null;
     }
 
     return { kind: "remote", peer: pinned };
   }
 
-  const peers = args.cache.findByAction(args.actionName).filter((peer) => peer.nodeId !== args.localNodeId);
+  const peers = args.cache.findByAction(args.actionName).filter((peer) =>
+    peer.nodeId !== args.localNodeId && !args.excludedRemoteNodeIds.has(peer.nodeId),
+  );
 
   if (args.strategy === "local-first") {
     if (localAvailable) {
@@ -199,14 +226,14 @@ function pickTarget(args: PickTargetArgs): PickResult | null {
     case "random":
       return candidates[Math.floor(Math.random() * candidates.length)];
     case "round-robin": {
-      const counter = (roundRobinCounters.get(args.actionName) ?? 0) + 1;
-      roundRobinCounters.set(args.actionName, counter);
+      const counter = (args.roundRobinCounters.get(args.actionName) ?? 0) + 1;
+      args.roundRobinCounters.set(args.actionName, counter);
       return candidates[counter % candidates.length];
     }
     case "cpu":
       return candidates.reduce((best, current) => {
-        const bestLoad = loadOf(best);
-        const currentLoad = loadOf(current);
+        const bestLoad = loadOf(best, args.localMetadata);
+        const currentLoad = loadOf(current, args.localMetadata);
         return currentLoad < bestLoad ? current : best;
       });
     default:
@@ -214,28 +241,13 @@ function pickTarget(args: PickTargetArgs): PickResult | null {
   }
 }
 
-function loadOf(result: PickResult): number {
-  if (result.kind === "local") {
-    return 0.5;
-  }
-
-  const cpu = result.peer.metadata["cpuLoad"];
+function loadOf(result: PickResult, localMetadata: Readonly<Record<string, unknown>> = {}): number {
+  const cpu = (result.kind === "local" ? localMetadata : result.peer.metadata)["cpuLoad"];
   return typeof cpu === "number" ? cpu : 0.5;
 }
 
 function invokeLocal(ctx: ChimpbaseContext, actionName: string, args: unknown): Promise<unknown> {
-  const invocationArgs = toInvocationArgs(args);
-  return ctx.action(actionName, ...invocationArgs);
-}
-
-function toInvocationArgs(args: unknown): unknown[] {
-  if (args === undefined) {
-    return [];
-  }
-  if (isArrayValue(args)) {
-    return args;
-  }
-  return [args];
+  return ctx.action(actionName, args);
 }
 
 async function withTimeout<T>(
@@ -243,6 +255,7 @@ async function withTimeout<T>(
   timeoutMs: number,
   actionName: string,
   nodeId: string | null,
+  waitForSettlement = false,
 ): Promise<T> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return await promise;
@@ -257,6 +270,10 @@ async function withTimeout<T>(
 
   try {
     return await Promise.race([promise, timeout]);
+  } catch (error) {
+    // A local action cannot be cancelled; keep its transaction alive through late writes.
+    if (waitForSettlement) await promise.catch(() => {});
+    throw error;
   } finally {
     if ((timer !== null)) {
       clearTimeout(timer);

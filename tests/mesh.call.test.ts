@@ -11,7 +11,7 @@ import {
   type MeshCallMiddleware,
 } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { onStart, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { action, onStart, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
 import { createCallDispatcher } from "../packages/mesh/src/call.ts";
 import { MeshPeerCache } from "../packages/mesh/src/discovery.ts";
 import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
@@ -75,6 +75,38 @@ test("HTTP dispatcher wraps malformed JSON as MeshCallError", async () => {
 });
 
 describe("@chimpbase/mesh ctx.mesh.call", () => {
+  test("preserves arrays and omitted payloads while ctx.action remains variadic", async () => {
+    const host = await createMeshHost();
+    try {
+      host.register(
+        chimpbaseMesh({
+          services: [service({ name: "payload", actions: {
+            echo: (_ctx, payload: unknown) => ({ omitted: payload === undefined, payload }),
+            run: async (ctx, payload: unknown) => {
+              if (ctx.mesh === undefined) throw new Error("mesh missing");
+              return await ctx.mesh.call("v1.payload.echo", payload, v.unknown());
+            },
+            generic: async (ctx) => await ctx.action("generic.add", 2, 3),
+          } })],
+          transport: "local-only",
+        }),
+        action("generic.add", (_ctx, left: number, right: number) => left + right),
+      );
+      const started = await host.start({ serve: false, runWorker: false });
+      try {
+        for (const payload of [undefined, [], ["one"], ["one", "two"], { value: "one" }, null]) {
+          const outcome = await host.executeAction("v1.payload.run", payload === undefined ? [] : [payload]);
+          expect(outcome.result).toEqual({ omitted: payload === undefined, payload });
+        }
+        expect((await host.executeAction("v1.payload.generic")).result).toBe(5);
+      } finally {
+        await started.stop();
+      }
+    } finally {
+      await host.close();
+    }
+  });
+
   test("overlapping middleware calls keep their own action context", async () => {
     const hostA = await createMeshHost();
     const hostB = await createMeshHost();
@@ -205,7 +237,7 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
     }
   });
 
-  test("retry attempts until success", async () => {
+  test("local application errors are not retried within the caller's transaction", async () => {
     const host = await createMeshHost();
     try {
       let attempts = 0;
@@ -231,9 +263,8 @@ describe("@chimpbase/mesh ctx.mesh.call", () => {
       host.register(chimpbaseMesh({ services: [svc], transport: "local-only" }));
       const started = await host.start({ serve: false, runWorker: false });
       try {
-        const outcome = await host.executeAction("v1.flaky.run");
-        expect(outcome.result).toBe("ok");
-        expect(attempts).toBe(3);
+        await expect(host.executeAction("v1.flaky.run")).rejects.toThrow("transient");
+        expect(attempts).toBe(1);
       } finally {
         await started.stop();
       }

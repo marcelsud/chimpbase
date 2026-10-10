@@ -46,6 +46,51 @@ async function createTestEngine(
 }
 
 describe("event bus", () => {
+  test("an async subscription override queues delivery under a sync host default", async () => {
+    const { db, engine, registry } = await createTestEngine(new NoopEventBus());
+    const calls: string[] = [];
+    registry.actions.set("emit", action("emit", (ctx) => { ctx.pubsub.publish("mixed", {}); }));
+    registry.subscriptions.set("mixed", [
+      { dispatch: "async", handler: () => { calls.push("async"); }, name: "async", idempotent: false },
+      { handler: () => { calls.push("sync"); }, name: "sync", idempotent: false },
+    ]);
+    try {
+      await engine.executeAction("emit");
+      expect(calls).toEqual(["sync"]);
+      await engine.processNextQueueJob();
+      expect(calls).toEqual(["sync", "async"]);
+      expect(await engine.processNextQueueJob()).toBeNull();
+    } finally { db.close(); }
+  });
+
+  for (const mode of ["wake", "delivery"] as const) {
+    test(`${mode} buses keep synchronous subscription overrides out of async queue delivery`, async () => {
+      let deliver: ChimpbaseEventBusCallback | undefined;
+      const { db, engine, registry } = await createTestEngine({
+        mode, publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+      }, "async");
+      const calls: string[] = [];
+      registry.actions.set("emit", action("emit", (ctx) => { ctx.pubsub.publish("mixed", {}); }));
+      registry.subscriptions.set("mixed", [
+        { dispatch: "sync", handler: () => { calls.push("sync"); }, name: "sync", idempotent: false },
+        { handler: () => { calls.push("async"); }, name: "async", idempotent: false },
+      ]);
+      try {
+        const emitted = await engine.executeAction("emit");
+        expect(calls).toEqual(["sync"]);
+        await engine.processNextQueueJob();
+        expect(calls).toEqual(["sync", "async"]);
+        engine.startEventBus();
+        if (!deliver) throw new Error("bus did not start");
+        await deliver(emitted.emittedEvents);
+        expect(calls).toEqual(["sync", "async", "sync"]);
+        await engine.processNextQueueJob();
+        expect(calls).toEqual(["sync", "async", "sync", "async"]);
+        expect(await engine.processNextQueueJob()).toBeNull();
+      } finally { engine.stopEventBus(); db.close(); }
+    });
+  }
+
   for (const dispatch of ["sync", "async"] as const) {
     test(`${dispatch} bus delivery waits for an unrelated action rollback before ack`, async () => {
       let callback: ChimpbaseEventBusCallback | undefined;

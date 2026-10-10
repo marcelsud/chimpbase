@@ -928,10 +928,13 @@ export type ChimpbaseInferActionResult<TAction> =
   TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions> ? TResult : never;
 
 export type ChimpbaseSubscriptionOptions =
-  | { idempotent: true; name: string; telemetry?: ChimpbaseTelemetryPersistOption }
-  | { idempotent?: false; name?: string; telemetry?: ChimpbaseTelemetryPersistOption };
+  { dispatch?: "async" | "sync"; telemetry?: ChimpbaseTelemetryPersistOption } & (
+    | { idempotent: true; name: string }
+    | { idempotent?: false; name?: string }
+  );
 
 export type ChimpbaseSubscriptionRegistration<TPayload = unknown, TResult = unknown> = {
+  dispatch?: "async" | "sync";
   eventName: string;
   handler: ChimpbaseSubscriptionHandler<TPayload, TResult>;
   kind: "subscription";
@@ -1242,6 +1245,7 @@ export function subscription<TPayload = unknown, TResult = unknown>(
   options?: ChimpbaseSubscriptionOptions,
 ): ChimpbaseSubscriptionRegistration<TPayload, TResult> {
   const telemetry = options?.telemetry === undefined ? {} : { telemetry: options.telemetry };
+  const dispatch = options?.dispatch === undefined ? {} : { dispatch: options.dispatch };
   if (options?.idempotent === true) {
     return {
       eventName,
@@ -1250,6 +1254,7 @@ export function subscription<TPayload = unknown, TResult = unknown>(
       kind: "subscription",
       name: options.name,
       ...telemetry,
+      ...dispatch,
     };
   }
   return {
@@ -1259,6 +1264,7 @@ export function subscription<TPayload = unknown, TResult = unknown>(
     kind: "subscription",
     ...((options?.name !== undefined) ? { name: options.name } : {}),
     ...telemetry,
+    ...dispatch,
   };
 }
 
@@ -1735,8 +1741,8 @@ export function register(
           entry.eventName,
           entry.handler,
           (entry.idempotent === true)
-            ? { idempotent: true, name: entry.name }
-            : { idempotent: entry.idempotent, name: entry.name },
+            ? { dispatch: entry.dispatch, idempotent: true, name: entry.name }
+            : { dispatch: entry.dispatch, idempotent: entry.idempotent, name: entry.name },
         );
         if (entry.telemetry !== undefined) {
           target.setTelemetryOverride?.(`subscription:${entry.eventName}`, entry.telemetry);

@@ -21,6 +21,8 @@ Queue retries can repeat external effects. Use an idempotency key for email, pay
 
 A directly constructed `ChimpbaseEngine` defaults to `NoopEventBus`. Supply a transport through its `eventBus` option and call `startEventBus(runOperation)` with the scheduler used for other engine operations. Nested `ctx.action` calls keep the current transaction.
 
+Individual subscriptions can set `dispatch: "sync"` or `dispatch: "async"` in their options to override the host default. Synchronous handlers run in the publishing transaction on the local node and in the event listener on peers; asynchronous handlers run through shared queue jobs. Mesh broadcast subscriptions use the synchronous override to deliver to every listening node, independently of the host default.
+
 The polling transport skips events committed by its own process. It advances its cursor after successful delivery, so a failed callback retries on the next poll. LISTEN/NOTIFY filters its own origin and provides low-latency peer delivery.
 
 An oversized LISTEN/NOTIFY envelope throws `PayloadTooLargeError` after the event has committed. The event remains stored, but the notification is not sent. Use polling for larger payloads.

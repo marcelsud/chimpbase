@@ -74,7 +74,7 @@ import {
   chimpbaseModuleSchemaName,
 } from "./modules.ts";
 import { assertChimpbaseModuleRuntimeSql } from "./sql-ownership.ts";
-import type { ChimpbaseRegistry, ChimpbaseTelemetryPersistOverride } from "./index.ts";
+import type { ChimpbaseRegistry, ChimpbaseSubscriptionEntry, ChimpbaseTelemetryPersistOverride } from "./index.ts";
 
 export interface ChimpbaseExecutionScope {
   kind: "action" | "cron" | "lifecycle" | "queue" | "route" | "subscription" | "workflow";
@@ -619,7 +619,7 @@ export class ChimpbaseEngine {
             payload: message.payload,
             payloadJson: message.payloadJson,
           },
-        ], message.subscriptionName);
+        ], message.subscriptionName, "async");
       },
       module: null,
       name: INTERNAL_SUBSCRIPTION_QUEUE_NAME,
@@ -649,13 +649,12 @@ export class ChimpbaseEngine {
       try {
         this.telemetryExecutionDepth += 1;
         const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
-        if (this.subscriptionsConfig.dispatch === "async") {
+        await this.runInTransaction(async () => {
           await this.enqueueSubscriptionDispatchJobs(legacyEvents);
-        } else {
-          await this.runInTransaction(async () => await this.dispatchSubscriptions(legacyEvents));
-          this.committedEvents.splice(committedEventsStart);
-          await this.flushTelemetryToStreams(undefined, telemetryStart);
-        }
+          await this.dispatchSubscriptions(legacyEvents, undefined, "sync");
+        });
+        this.committedEvents.splice(committedEventsStart);
+        await this.flushTelemetryToStreams(undefined, telemetryStart);
         await ack?.();
       } finally {
         this.finishTelemetryExecution();
@@ -769,6 +768,12 @@ export class ChimpbaseEngine {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       for (const span of handlerSpans) span.end("error", message);
+      // Thrown HTTP responses leave the route transaction through its rollback path.
+      if (error instanceof Response) {
+        const emittedEvents = this.takeCommittedEvents();
+        await this.flushTelemetryToStreams(undefined, telemetryStart);
+        return { emittedEvents, response: error };
+      }
       throw error;
     } finally {
       this.finishTelemetryExecution();
@@ -904,12 +909,7 @@ export class ChimpbaseEngine {
       queueNames.push(INTERNAL_CRON_QUEUE_NAME);
     }
 
-    const hasModuleSubscriptions = [...this.registry.subscriptions.values()]
-      .some((entries) => entries.some((entry) => entry.module != null));
-    if (
-      this.registry.subscriptions.size > 0
-      && (this.subscriptionsConfig.dispatch === "async" || hasModuleSubscriptions)
-    ) {
+    if ([...this.registry.subscriptions.values()].some((entries) => entries.some((entry) => this.isAsyncSubscription(entry)))) {
       queueNames.push(INTERNAL_SUBSCRIPTION_QUEUE_NAME);
     }
 
@@ -2713,8 +2713,7 @@ export class ChimpbaseEngine {
     const event: ChimpbaseEventRecord = {
       deliverySubscriptions,
       dispatch: !moduleEvent
-        && this.subscriptionsConfig.dispatch === "async"
-        && subscriptions.length > 0,
+        && subscriptions.some((entry) => this.isAsyncSubscription(entry)),
       name,
       payload,
       payloadJson: JSON.stringify(payload ?? null),
@@ -2729,6 +2728,7 @@ export class ChimpbaseEngine {
   private async dispatchSubscriptions(
     events: ChimpbaseEventRecord[],
     subscriptionName?: string,
+    dispatch?: "async" | "sync",
   ): Promise<void> {
     for (const event of events) {
       const contract = this.registry.eventContracts.get(event.name);
@@ -2736,7 +2736,8 @@ export class ChimpbaseEngine {
         ? event.payload
         : contract.payload.parse(event.payload, `module event ${event.name} payload`);
       const subscriptions = (this.registry.subscriptions.get(event.name) ?? [])
-        .filter((entry) => subscriptionName === undefined || entry.name === subscriptionName);
+        .filter((entry) => (subscriptionName === undefined || entry.name === subscriptionName)
+          && (dispatch === undefined || this.isAsyncSubscription(entry) === (dispatch === "async")));
       for (const sub of subscriptions) {
         const subscriptionHandler: unknown = sub.handler;
         if (!isSubscriptionHandler(subscriptionHandler)) {
@@ -2767,7 +2768,7 @@ export class ChimpbaseEngine {
 
   private async enqueueSubscriptionDispatchJobs(events: readonly ChimpbaseEventRecord[]): Promise<void> {
     for (const event of events) {
-      if ((this.registry.subscriptions.get(event.name) ?? []).length === 0) continue;
+      if (!(this.registry.subscriptions.get(event.name) ?? []).some((entry) => this.isAsyncSubscription(entry))) continue;
       await this.adapter.queueEnqueue(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
         eventId: event.id,
         eventName: event.name,
@@ -2775,6 +2776,10 @@ export class ChimpbaseEngine {
         payloadJson: event.payloadJson,
       } satisfies SubscriptionQueuePayload);
     }
+  }
+
+  private isAsyncSubscription(entry: ChimpbaseSubscriptionEntry): boolean {
+    return entry.module != null || (entry.dispatch ?? this.subscriptionsConfig.dispatch) === "async";
   }
 
 
@@ -2810,11 +2815,9 @@ export class ChimpbaseEngine {
           const events = this.pendingEvents.slice(persistedCount);
           persistedCount = this.pendingEvents.length;
           await this.adapter.persistEvents(events);
-          if (this.subscriptionsConfig.dispatch === "sync") {
-            await this.dispatchSubscriptions(events.filter((event) =>
-              event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
-            ));
-          }
+          await this.dispatchSubscriptions(events.filter((event) =>
+            (event.deliverySubscriptions?.length ?? 0) === 0
+          ), undefined, "sync");
         }
       }
       this.transactionDepth = parentDepth;

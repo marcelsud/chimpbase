@@ -178,7 +178,8 @@ export interface RuntimeHostInstanceOptions<TServer> {
 }
 
 const IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX = "_chimpbase.sub.seen:";
-const engineOperationContext = new AsyncLocalStorage<{ active: boolean; host: object }>();
+const engineOperationContext = new AsyncLocalStorage<{ active: boolean; engine: ChimpbaseEngine; host: object }>();
+const MAX_REQUEST_TELEMETRY_RECORDS = 10_000;
 const POSTGRES_WORKER_QUEUE_BATCH_SIZE = 8;
 const RESERVED_ENGINE_QUEUE_NAMES = new Set([
   "__chimpbase.cron.run",
@@ -208,6 +209,9 @@ export class ChimpbaseHost<TServer> {
   private readonly debugEnabled: boolean;
   private readonly runtime: ChimpbaseRuntimeShim<TServer>;
   private serializedEngineOperations: Promise<void> = Promise.resolve();
+  private readonly activeEngineOperations = new Set<Promise<unknown>>();
+  private readonly requestTelemetryRecords: TelemetryRecord[] = [];
+  private acceptingRoutes = true;
   private readonly storage: StorageHandle;
   private readonly supportsConcurrentWorkers: boolean;
 
@@ -248,14 +252,14 @@ export class ChimpbaseHost<TServer> {
 
     try {
       const outcome = typeof nameOrReference === "string"
-        ? await this.runEngineOperation(async () => await this.engine.executeAction(
+        ? await this.runEngineOperation(async (engine) => await engine.executeAction(
           nameOrReference,
           normalizeActionExecutionArgs(args[0]),
-        ))
-        : await this.runEngineOperation(async () => await this.engine.executeAction(
+        ), true)
+        : await this.runEngineOperation(async (engine) => await engine.executeAction(
           actionName,
           normalizeReferenceInvocationArgs(nameOrReference, args),
-        ));
+        ), true);
 
       this.debug("action completed", { emittedEvents: outcome.emittedEvents.length, name: actionName });
       return outcome;
@@ -266,11 +270,14 @@ export class ChimpbaseHost<TServer> {
   }
 
   async executeRoute(request: Request): Promise<RouteExecutionResult> {
+    if (!this.acceptingRoutes) {
+      return { emittedEvents: [], response: new Response("runtime is stopping", { status: 503 }) };
+    }
     const route = getRouteKey(request);
     this.debug("route executing", { route });
 
     try {
-      const outcome = await this.runEngineOperation(async () => await this.engine.executeRoute(request));
+      const outcome = await this.runEngineOperation(async (engine) => await engine.executeRoute(request), true);
       this.debug("route completed", {
         emittedEvents: outcome.emittedEvents.length,
         route,
@@ -284,9 +291,9 @@ export class ChimpbaseHost<TServer> {
   }
 
   async processNextCronSchedule(): Promise<CronScheduleExecutionResult | null> {
-    const outcome = await this.runEngineOperation(async () => {
+    const outcome = await this.runEngineOperation(async (engine) => {
       await this.syncCronSchedulesIfNeeded();
-      return await this.engine.processNextCronSchedule();
+      return await engine.processNextCronSchedule();
     });
     if ((outcome !== null)) {
       this.debug("cron schedule processed", {
@@ -300,7 +307,7 @@ export class ChimpbaseHost<TServer> {
   }
 
   async processNextQueueJob(): Promise<Awaited<ReturnType<ChimpbaseEngine["processNextQueueJob"]>>> {
-    const outcome = await this.runEngineOperation(async () => await this.engine.processNextQueueJob());
+    const outcome = await this.runEngineOperation(async (engine) => await engine.processNextQueueJob());
     if ((outcome !== null)) {
       this.debug("queue job processed", {
         emittedEvents: outcome.emittedEvents.length,
@@ -313,9 +320,9 @@ export class ChimpbaseHost<TServer> {
   }
 
   async drain(options: DrainOptions = {}): Promise<DrainResult> {
-    const outcome = await this.runEngineOperation(async () => {
+    const outcome = await this.runEngineOperation(async (engine) => {
       await this.syncCronSchedulesIfNeeded();
-      return await this.engine.drain(options);
+      return await engine.drain(options);
     });
     this.debug("worker drain completed", {
       cronSchedules: outcome.cronSchedules,
@@ -457,6 +464,7 @@ export class ChimpbaseHost<TServer> {
   ): ChimpbaseSubscriptionHandler<TPayload, TResult> {
     const subscriptions = this.registry.subscriptions.get(eventName) ?? [];
     subscriptions.push({
+      dispatch: options?.dispatch,
       handler,
       module: null,
       idempotent: options?.idempotent ?? false,
@@ -552,7 +560,8 @@ export class ChimpbaseHost<TServer> {
   }
 
   routeEnv(): ChimpbaseRouteEnv {
-    return this.engine.createRouteEnv();
+    const current = engineOperationContext.getStore();
+    return (current?.host === this && current.active ? current.engine : this.engine).createRouteEnv();
   }
 
   listWorkflowContracts(): ChimpbaseWorkflowContract[] {
@@ -612,28 +621,31 @@ export class ChimpbaseHost<TServer> {
   }
 
   async start(options: { runWorker?: boolean; serve?: boolean } = {}): Promise<StartedHost<this, TServer>> {
+    this.acceptingRoutes = true;
     const runServe = options.serve ?? !(options.runWorker === true);
     const runWorker = options.runWorker ?? !(options.serve === true);
     let worker: WorkerHandle | null = null;
     let server: TServer | null = null;
     const stop = async () => {
-      for (const hook of this.registry.onStopHooks) {
-        try {
-          await this.runEngineOperation(async () => {
-            await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
-          });
-        } catch (err) {
-          console.error(`onStop hook "${hook.name}" failed:`, err);
-        }
-      }
+      this.acceptingRoutes = false;
       try {
-        if (server !== null) await this.runtime.server.stop(server);
-      } finally {
         try {
-          await worker?.stop();
-        } finally {
           this.engine.stopEventBus();
+        } finally {
+          await worker?.stop();
+          await this.drainEngineOperations();
+          for (const hook of this.registry.onStopHooks) {
+            try {
+              await this.runEngineOperation(async () => {
+                await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+              });
+            } catch (err) {
+              console.error(`onStop hook "${hook.name}" failed:`, err);
+            }
+          }
         }
+      } finally {
+        if (server !== null) await this.runtime.server.stop(server);
       }
       this.debug("runtime stopped");
     };
@@ -653,7 +665,9 @@ export class ChimpbaseHost<TServer> {
         runWorker,
         storage: this.config.storage.engine,
       });
-      this.engine.startEventBus(async (operation) => await this.runEngineOperation(operation));
+      this.engine.startEventBus(async (operation) => {
+        if (this.acceptingRoutes) await this.runEngineOperation(operation);
+      });
     } catch (error) {
       try {
         await stop();
@@ -783,37 +797,63 @@ export class ChimpbaseHost<TServer> {
   }
 
   drainTelemetryRecords(): TelemetryRecord[] {
-    return this.engine.drainTelemetryRecords();
+    return [...this.engine.drainTelemetryRecords(), ...this.requestTelemetryRecords.splice(0)];
   }
 
   async close(): Promise<void> {
-    const results = await Promise.allSettled([
+    this.acceptingRoutes = false;
+    const busCleanup = Promise.allSettled([
       Promise.resolve().then(() => this.engine.stopEventBus()),
+    ]);
+    if (this.activeEngineOperations.size > 0) await this.drainEngineOperations();
+    const cleanup = Promise.allSettled([
       Promise.resolve().then(() => this.engine.shutdownSinks()),
       Promise.resolve().then(() => this.storage.close()),
     ]);
+    const results = [...await busCleanup, ...await cleanup];
     const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, "runtime cleanup failed");
     this.debug("runtime closed");
   }
 
-  private async runEngineOperation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+  private async runEngineOperation<TResult>(
+    operation: (engine: ChimpbaseEngine) => Promise<TResult>,
+    concurrent = false,
+  ): Promise<TResult> {
     const current = engineOperationContext.getStore();
-    if (current?.host === this && current.active) return await operation();
-    const queued = this.serializedEngineOperations
-      .catch(() => undefined)
-      .then(async () => {
-        const context = { active: true, host: this };
-        try {
-          return await engineOperationContext.run(context, operation);
-        } finally {
-          context.active = false;
+    if (current?.host === this && current.active) return await operation(current.engine);
+    const engine = concurrent && this.supportsConcurrentWorkers ? this.createWorkerEngine() : this.engine;
+    const run = async () => {
+      const context = { active: true, engine, host: this };
+      try {
+        return await engineOperationContext.run(context, async () => await operation(engine));
+      } finally {
+        context.active = false;
+        if (engine !== this.engine) {
+          this.requestTelemetryRecords.push(...engine.drainTelemetryRecords());
+          const overflow = this.requestTelemetryRecords.length - MAX_REQUEST_TELEMETRY_RECORDS;
+          if (overflow > 0) this.requestTelemetryRecords.splice(0, overflow);
         }
-      });
+      }
+    };
+    const queued = engine === this.engine
+      ? this.serializedEngineOperations.catch(() => undefined).then(run)
+      : run();
 
-    this.serializedEngineOperations = queued.then(() => undefined, () => undefined);
-    return await queued;
+    if (engine === this.engine) this.serializedEngineOperations = queued.then(() => undefined, () => undefined);
+    this.activeEngineOperations.add(queued);
+    try {
+      return await queued;
+    } finally {
+      this.activeEngineOperations.delete(queued);
+    }
+  }
+
+  private async drainEngineOperations(): Promise<void> {
+    while (this.activeEngineOperations.size > 0) {
+      await Promise.allSettled([...this.activeEngineOperations]);
+    }
   }
 
   private createWorkerLanes(): WorkerLane[] {
