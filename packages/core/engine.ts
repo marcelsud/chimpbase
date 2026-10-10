@@ -595,11 +595,13 @@ export class ChimpbaseEngine {
 
   startEventBus(): void {
     this.eventBus.start(async (events, ack) => {
+      const telemetryStart = this.telemetryRecords.length;
       const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
       if (this.subscriptionsConfig.dispatch === "async") {
         await this.enqueueSubscriptionDispatchJobs(legacyEvents);
       } else {
         await this.dispatchSubscriptions(legacyEvents);
+        await this.handleCommittedEvents(this.takeCommittedEvents(), undefined, telemetryStart);
       }
       await ack?.();
     });
@@ -2683,10 +2685,15 @@ export class ChimpbaseEngine {
       return [];
     }
 
-    await this.dispatchSubscriptions(emittedEvents.filter((event) =>
-      event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
-    ));
-    const cascadedEvents = this.takeCommittedEvents();
+    const cascadedEvents: ChimpbaseEventRecord[] = [];
+    let pendingEvents = emittedEvents;
+    while (pendingEvents.length > 0) {
+      await this.dispatchSubscriptions(pendingEvents.filter((event) =>
+        event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
+      ));
+      pendingEvents = this.takeCommittedEvents();
+      cascadedEvents.push(...pendingEvents);
+    }
     await this.flushTelemetryToStreams(scope, telemetryStart);
     return cascadedEvents;
   }

@@ -41,6 +41,45 @@ async function createTestEngine(
 }
 
 describe("event bus", () => {
+  for (const dispatch of ["sync", "async"] as const) {
+    test(`${dispatch} subscriptions deliver a three-event chain once in order`, async () => {
+      const { db, engine, registry } = await createTestEngine(new NoopEventBus(), dispatch);
+      const calls: string[] = [];
+      registry.actions.set("cascade", action("cascade", async (ctx) => {
+        ctx.pubsub.publish("first", { position: 1 });
+      }));
+      for (const [index, name] of ["first", "second", "third"].entries()) {
+        registry.subscriptions.set(name, [{
+          name: `on-${name}`, idempotent: true,
+          handler: async (ctx, payload) => {
+            calls.push(name);
+            expect(v.object({ position: v.number() }).parse(payload)).toEqual({ position: index + 1 });
+            const next = ["second", "third"][index];
+            if (next !== undefined) ctx.pubsub.publish(next, { position: index + 2 });
+          },
+        }]);
+      }
+      try {
+        const result = await engine.executeAction("cascade");
+        if (dispatch === "sync") {
+          expect(result.emittedEvents.map((event) => event.name)).toEqual(["first", "second", "third"]);
+          expect(calls).toEqual(["first", "second", "third"]);
+        } else {
+          expect(result.emittedEvents.map((event) => event.name)).toEqual(["first"]);
+          expect(calls).toEqual([]);
+          for (const name of ["first", "second", "third"]) {
+            expect(await engine.processNextQueueJob()).not.toBeNull();
+            expect(calls.at(-1)).toBe(name);
+          }
+          expect(calls).toEqual(["first", "second", "third"]);
+        }
+        expect(await engine.processNextQueueJob()).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+  }
+
   test("NoopEventBus publish and start are no-ops", async () => {
     const bus = new NoopEventBus();
     const received: ChimpbaseEventRecord[][] = [];
@@ -131,11 +170,24 @@ describe("event bus", () => {
       {
         handler: async (_ctx, payload) => {
           dispatched.push(v.object({ orderId: v.string() }).parse(payload, "order event").orderId);
+          _ctx.pubsub.publish("order.followup", payload);
         },
         idempotent: false,
         name: "",
       },
     ]);
+
+    registry.subscriptions.set("order.followup", [{
+      handler: async (ctx, payload) => { ctx.pubsub.publish("order.finished", payload); },
+      idempotent: false, name: "followup",
+    }]);
+    registry.subscriptions.set("order.finished", [{
+      handler: async (_ctx, payload) => {
+        dispatched.push(`finished:${v.object({ orderId: v.string() }).parse(payload).orderId}`);
+        expect(ackCalls).toEqual([]);
+      },
+      idempotent: true, name: "finished",
+    }]);
 
     engine.startEventBus();
 
@@ -145,7 +197,7 @@ describe("event bus", () => {
     ]);
 
     // Subscription handlers ran before ack
-    expect(dispatched).toEqual(["abc", "def"]);
+    expect(dispatched).toEqual(["abc", "def", "finished:abc", "finished:def"]);
     // Ack was called exactly once, after dispatch
     expect(ackCalls).toEqual([1]);
 
