@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { defineChimpbaseApp } from "../packages/core/index.ts";
+import { createDefaultChimpbasePlatformShim, defineChimpbaseApp, normalizeProjectConfig } from "../packages/core/index.ts";
 import { action, v, worker } from "../packages/runtime/index.ts";
-import type { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
+import { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 
 const cleanupHosts: ChimpbaseBunHost[] = [];
 const cleanupDirs: string[] = [];
@@ -50,6 +50,60 @@ async function createMemoryHost(
 }
 
 describe("telemetry stream persistence", () => {
+  for (const engine of ["memory", "sqlite"] as const) {
+    test(`retention compares SQLite and ISO dates at the cutoff without deleting recent logs (${engine})`, async () => {
+      const dir = await mkdtemp(join(tmpdir(), "chimpbase-telemetry-retention-"));
+      cleanupDirs.push(dir);
+      const now = Date.parse("2026-10-09T02:00:00.000Z");
+      const host = await ChimpbaseBunHost.create({
+        projectDir: dir,
+        config: normalizeProjectConfig({
+          storage: { engine, path: "telemetry.db" },
+          telemetry: { retention: { enabled: true, maxAgeDays: 1 } },
+        }),
+        platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+      });
+      cleanupHosts.push(host);
+      const timestamps = [
+        ["expired.sqlite", "2026-10-08 01:59:59.999"],
+        ["expired.iso", "2026-10-08T01:59:59.999Z"],
+        ["boundary.sqlite", "2026-10-08 02:00:00"],
+        ["boundary.iso", "2026-10-08T02:00:00.000Z"],
+        ["recent.sqlite", "2026-10-08 23:00:00"],
+        ["recent.iso", "2026-10-08T23:00:00.000Z"],
+      ];
+      host.register(
+        action("seedRetention", async (ctx) => {
+          for (const stream of ["_chimpbase.logs", "_chimpbase.metrics", "_chimpbase.traces"]) {
+            for (const [event, createdAt] of timestamps) {
+              await ctx.db.query(
+                "INSERT INTO _chimpbase_stream_events (stream_name, event_name, payload_json, created_at) VALUES (?1, ?2, '{}', ?3)",
+                [stream, event, createdAt],
+              );
+            }
+          }
+          await ctx.db.query(
+            "INSERT INTO _chimpbase_stream_events (stream_name, event_name, payload_json, created_at) VALUES ('app.activity', 'keep', '{}', '2000-01-01 00:00:00')",
+          );
+          await ctx.db.query(
+            "UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = '__chimpbase.telemetry.cleanup'",
+            [now - 1],
+          );
+        }),
+      );
+      await host.syncCronSchedules();
+      await host.executeAction("seedRetention");
+      expect((await host.processNextCronSchedule())?.scheduleName).toBe("__chimpbase.telemetry.cleanup");
+      expect(await host.processNextQueueJob()).not.toBeNull();
+      for (const stream of ["_chimpbase.logs", "_chimpbase.metrics", "_chimpbase.traces"]) {
+        expect((await readStream(host, stream)).map((event) => event.event)).toEqual([
+          "boundary.sqlite", "boundary.iso", "recent.sqlite", "recent.iso",
+        ]);
+      }
+      expect((await readStream(host, "app.activity")).map((event) => event.event)).toEqual(["keep"]);
+    });
+  }
+
   test("does not persist telemetry when disabled (default)", async () => {
     const host = await createMemoryHost();
     host.register(

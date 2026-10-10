@@ -14,11 +14,12 @@ import {
   createSqliteEngineAdapter,
   ensureSqliteInternalTables,
 } from "../packages/bun/src/sqlite_adapter.ts";
-import { action, v } from "../packages/runtime/index.ts";
+import { action, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
 
 async function createTestEngine(
   eventBus: ChimpbaseEventBus,
   dispatch: "async" | "sync" = "sync",
+  persistLogs = false,
 ) {
   const platform = createDefaultChimpbasePlatformShim();
   const registry = createChimpbaseRegistry();
@@ -33,14 +34,160 @@ async function createTestEngine(
     registry,
     secrets: { get: () => null },
     subscriptions: { dispatch },
-    telemetry: { minLevel: "debug", persist: { log: false, metric: false, trace: false } },
+    telemetry: { minLevel: "debug", persist: { log: persistLogs, metric: false, trace: false } },
     worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
   });
 
-  return { db, engine, registry };
+  return { adapter, db, engine, registry };
 }
 
 describe("event bus", () => {
+  for (const publisher of ["action", "route", "worker"] as const) {
+    test(`failing cascaded sync subscription rolls back its ${publisher} publisher`, async () => {
+      const published: ChimpbaseEventRecord[][] = [];
+      let callback: ChimpbaseEventBusCallback | undefined;
+      const bus: ChimpbaseEventBus = {
+        publish: async (events) => {
+          published.push(events);
+          expect(db.inTransaction).toBe(false);
+        },
+        start(handler) { callback = handler; }, stop() {},
+      };
+      const { adapter, db, engine, registry } = await createTestEngine(bus);
+      db.exec("CREATE TABLE effects (label TEXT)");
+      const emit = async (ctx: ChimpbaseContext) => {
+        await ctx.db.query("INSERT INTO effects VALUES ('publisher')");
+        ctx.pubsub.publish("first", {});
+      };
+      registry.actions.set("emit", action("emit", emit));
+      registry.httpHandler = async (_request, env) => {
+        await env.action("emit");
+        return new Response("ok");
+      };
+      registry.workers.set("emit", { name: "emit", definition: { dlq: false }, handler: emit });
+      registry.subscriptions.set("first", [{
+        name: "first", idempotent: true,
+        handler: async (ctx) => {
+          await ctx.db.query("INSERT INTO effects VALUES ('subscriber')");
+          await ctx.enqueue("followup", {});
+          ctx.pubsub.publish("second", {});
+        },
+      }]);
+      let shouldFail = true;
+      registry.subscriptions.set("second", [{
+        name: "second", idempotent: true,
+        handler: async (ctx) => {
+          await ctx.db.query("INSERT INTO effects VALUES ('cascade')");
+          if (shouldFail) throw new Error("cascade failed");
+        },
+      }]);
+      const invoke = publisher === "action"
+        ? () => engine.executeAction("emit")
+        : publisher === "route"
+        ? () => engine.executeRoute(new Request("http://localhost/emit"))
+        : () => engine.processNextQueueJob();
+      try {
+        engine.startEventBus();
+        if (publisher === "worker") await adapter.queueEnqueue("emit", {});
+        await expect(invoke()).rejects.toThrow("cascade failed");
+        expect(db.query("SELECT * FROM effects").all()).toEqual([]);
+        expect(db.query("SELECT * FROM _chimpbase_events").all()).toEqual([]);
+        expect(db.query("SELECT * FROM _chimpbase_kv").all()).toEqual([]);
+        expect(db.query("SELECT * FROM _chimpbase_queue_jobs WHERE queue_name = 'followup'").all()).toEqual([]);
+        expect(published).toEqual([]);
+
+        shouldFail = false;
+        const result = await invoke();
+        expect(result?.emittedEvents.map((event) => event.name)).toEqual(["first", "second"]);
+        expect(db.query("SELECT label FROM effects ORDER BY rowid").all()).toEqual([
+          { label: "publisher" }, { label: "subscriber" }, { label: "cascade" },
+        ]);
+        const ids = result?.emittedEvents.map((event) => event.id);
+        expect(ids).toEqual(db.query("SELECT id FROM _chimpbase_events ORDER BY id").all().map((row) =>
+          v.object({ id: v.number() }).parse(row).id
+        ));
+        expect(db.query("SELECT key FROM _chimpbase_kv ORDER BY key").all()).toEqual([
+          { key: `_chimpbase.sub.seen:${ids?.[0]}:first` },
+          { key: `_chimpbase.sub.seen:${ids?.[1]}:second` },
+        ]);
+        expect(published).toHaveLength(1);
+        await callback?.(published[0]);
+        expect(db.query("SELECT COUNT(*) AS count FROM effects").get()).toEqual({ count: 3 });
+      } finally {
+        engine.stopEventBus();
+        db.close();
+      }
+    });
+  }
+
+  for (const failure of ["completion", "commit"] as const) {
+    test(`queue ${failure} failure rolls back worker effects before retry`, async () => {
+      const { adapter, db, engine, registry } = await createTestEngine(new NoopEventBus());
+      db.exec("CREATE TABLE effects (label TEXT)");
+      registry.workers.set("work", {
+        name: "work", definition: { dlq: false },
+        handler: async (ctx) => {
+          await ctx.db.query("INSERT INTO effects VALUES ('work')");
+          ctx.pubsub.publish("worked", {});
+        },
+      });
+      const complete = adapter.completeQueueJob.bind(adapter);
+      const commit = adapter.commitTransaction.bind(adapter);
+      if (failure === "completion") {
+        adapter.completeQueueJob = async (id) => {
+          await complete(id);
+          throw new Error("completion failed");
+        };
+      } else {
+        adapter.commitTransaction = async () => { throw new Error("commit failed"); };
+      }
+      try {
+        await adapter.queueEnqueue("work", {});
+        await expect(engine.processNextQueueJob()).rejects.toThrow(`${failure} failed`);
+        expect(db.query("SELECT * FROM effects").all()).toEqual([]);
+        expect(db.query("SELECT * FROM _chimpbase_events").all()).toEqual([]);
+        expect(db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs").all())
+          .toEqual([{ status: "pending", attempt_count: 1 }]);
+
+        adapter.completeQueueJob = complete;
+        adapter.commitTransaction = commit;
+        const result = await engine.processNextQueueJob();
+        expect(result?.emittedEvents.map((event) => event.name)).toEqual(["worked"]);
+        expect(db.query("SELECT label FROM effects").all()).toEqual([{ label: "work" }]);
+        expect(db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs").all())
+          .toEqual([{ status: "completed", attempt_count: 2 }]);
+        expect(await engine.processNextQueueJob()).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  test("telemetry failure after commit does not retry a completed worker or call onFailure", async () => {
+    const { adapter, db, engine, registry } = await createTestEngine(new NoopEventBus(), "sync", true);
+    db.exec("CREATE TABLE effects (label TEXT)");
+    let failures = 0;
+    registry.workers.set("work", {
+      name: "work", definition: { dlq: false, onFailure: () => { failures += 1; } },
+      handler: async (ctx) => {
+        await ctx.db.query("INSERT INTO effects VALUES ('work')");
+        ctx.log.info("work completed");
+      },
+    });
+    adapter.streamAppend = async () => { throw new Error("telemetry failed"); };
+    try {
+      await adapter.queueEnqueue("work", {});
+      await expect(engine.processNextQueueJob()).rejects.toThrow("telemetry failed");
+      expect(db.query("SELECT label FROM effects").all()).toEqual([{ label: "work" }]);
+      expect(db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs").all())
+        .toEqual([{ status: "completed", attempt_count: 1 }]);
+      expect(failures).toBe(0);
+      expect(await engine.processNextQueueJob()).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
   for (const dispatch of ["sync", "async"] as const) {
     test(`${dispatch} subscriptions deliver a three-event chain once in order`, async () => {
       const { db, engine, registry } = await createTestEngine(new NoopEventBus(), dispatch);

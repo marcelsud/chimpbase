@@ -412,6 +412,41 @@ describe("telemetry sink interface", () => {
     expect(mock.runInContextCalled()).toBe(true);
   });
 
+  test("sink context failure after worker commit does not retry its database effects", async () => {
+    const mock = createMockSink();
+    const startHandlerSpan = mock.sink.startHandlerSpan.bind(mock.sink);
+    mock.sink.startHandlerSpan = (scope) => {
+      const span = startHandlerSpan(scope);
+      if (scope.kind === "queue") {
+        span.runInContext = async (callback) => {
+          await callback();
+          throw new Error("sink context failed");
+        };
+      }
+      return span;
+    };
+    const host = await createHostWithSink(mock.sink);
+    let failures = 0;
+    host.register(
+      worker("work", async (ctx) => await ctx.kv.set("effect", "committed"), {
+        onFailure: () => { failures += 1; },
+      }),
+      action("enqueue", async (ctx) => await ctx.enqueue("work", {})),
+      action("inspect", async (ctx) => ({
+        effect: await ctx.kv.get("effect", v.string()),
+        jobs: await ctx.db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs", [],
+          v.object({ status: v.string(), attempt_count: v.number() })),
+      })),
+    );
+    await host.executeAction("enqueue");
+    await expect(host.processNextQueueJob()).rejects.toThrow("sink context failed");
+    expect((await host.executeAction("inspect")).result).toEqual({
+      effect: "committed", jobs: [{ status: "completed", attempt_count: 1 }],
+    });
+    expect(failures).toBe(0);
+    expect(await host.processNextQueueJob()).toBeNull();
+  });
+
   test("drainTelemetryRecords still works alongside sinks", async () => {
     const mock = createMockSink();
     const host = await createHostWithSink(mock.sink);

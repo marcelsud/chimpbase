@@ -588,7 +588,7 @@ export function createPostgresEngineAdapter(
       }
       return matched.length;
     },
-    async commitTransaction(events: ChimpbaseEventRecord[]) {
+    async persistEvents(events: ChimpbaseEventRecord[]) {
       const connection = queryable();
       await persistEvents(connection, events);
       const availableAtMs = platform.now();
@@ -606,6 +606,8 @@ export function createPostgresEngineAdapter(
           );
         }
       }
+    },
+    async commitTransaction() {
       if ((transactionClient !== null)) {
         await transactionClient.query("COMMIT");
         transactionClient.release();

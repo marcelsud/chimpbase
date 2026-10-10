@@ -1122,7 +1122,9 @@ function registerInternalCleanupCrons<TServer>(
         const cutoffMs = platform.now() - config.telemetry.retention.maxAgeDays * 86_400_000;
         const cutoffTimestamp = new Date(cutoffMs).toISOString();
         await ctx.db.query(
-          `DELETE FROM _chimpbase_stream_events WHERE stream_name IN ('_chimpbase.logs', '_chimpbase.metrics', '_chimpbase.traces') AND created_at < ?1`,
+          `DELETE FROM _chimpbase_stream_events WHERE stream_name IN ('_chimpbase.logs', '_chimpbase.metrics', '_chimpbase.traces') AND ${
+            config.storage.engine === "postgres" ? "created_at < ?1" : "julianday(created_at) < julianday(?1)"
+          }`,
           [cutoffTimestamp],
         );
       },

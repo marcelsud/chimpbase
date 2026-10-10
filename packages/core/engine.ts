@@ -338,7 +338,7 @@ export interface ChimpbaseEngineAdapter {
     filter: ChimpbaseCollectionFilter,
     patch: ChimpbaseCollectionPatch,
   ): Promise<number>;
-  commitTransaction(events: ChimpbaseEventRecord[]): Promise<void>;
+  commitTransaction(): Promise<void>;
   completeQueueJob(jobId: number): Promise<void>;
   deleteCronSchedule(scheduleName: string): Promise<void>;
   getQueueJobPayload(jobId: number): Promise<string | null>;
@@ -354,6 +354,7 @@ export interface ChimpbaseEngineAdapter {
     nextAvailableAtMs: number,
     errorMessage: string,
   ): Promise<void>;
+  persistEvents(events: ChimpbaseEventRecord[]): Promise<void>;
   createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase>;
   query<T>(sql: string, params: readonly unknown[], validator: ChimpbaseValidator<T>): Promise<T[]>;
   queueEnqueue<TPayload = unknown>(
@@ -642,8 +643,9 @@ export class ChimpbaseEngine {
         if (this.subscriptionsConfig.dispatch === "async") {
           await this.enqueueSubscriptionDispatchJobs(legacyEvents);
         } else {
-          await this.dispatchSubscriptions(legacyEvents);
-          await this.handleCommittedEvents(this.takeCommittedEvents(), undefined, telemetryStart);
+          await this.runInTransaction(async () => await this.dispatchSubscriptions(legacyEvents));
+          this.takeCommittedEvents();
+          await this.flushTelemetryToStreams(undefined, telemetryStart);
         }
         await ack?.();
       } finally {
@@ -684,12 +686,12 @@ export class ChimpbaseEngine {
 
       const result = await invoke();
       const emittedEvents = this.takeCommittedEvents();
-      const allEmittedEvents = await this.handleCommittedEvents(emittedEvents, scope, telemetryStart);
+      await this.flushTelemetryToStreams(scope, telemetryStart);
 
       for (const span of handlerSpans) span.end("ok");
 
       return {
-        emittedEvents: [...emittedEvents, ...allEmittedEvents],
+        emittedEvents,
         result,
       };
     } catch (error) {
@@ -747,12 +749,12 @@ export class ChimpbaseEngine {
 
       const response = await invoke();
       const emittedEvents = this.takeCommittedEvents();
-      const allEmittedEvents = await this.handleCommittedEvents(emittedEvents, undefined, telemetryStart);
+      await this.flushTelemetryToStreams(undefined, telemetryStart);
 
       for (const span of handlerSpans) span.end("ok");
 
       return {
-        emittedEvents: [...emittedEvents, ...allEmittedEvents],
+        emittedEvents,
         response,
       };
     } catch (error) {
@@ -923,6 +925,7 @@ export class ChimpbaseEngine {
       name: job.queue_name,
     };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
+    let committed = false;
 
     try {
       this.telemetryExecutionDepth += 1;
@@ -937,7 +940,9 @@ export class ChimpbaseEngine {
           await this.runWithActionInvoker(async () => {
             await workerHandler(this.createContext(scope), payload, { attempt: job.attempt_count });
           });
+          await this.adapter.completeQueueJob(job.id);
         });
+        committed = true;
       };
 
       for (const span of handlerSpans) {
@@ -951,32 +956,26 @@ export class ChimpbaseEngine {
       await invoke();
 
       const emittedEvents = this.takeCommittedEvents();
-      const allEmittedEvents = await this.handleCommittedEvents(
-        emittedEvents,
-        scope,
-        telemetryStart,
-      );
-      const combinedEvents = [...emittedEvents, ...allEmittedEvents];
-
-      await this.adapter.completeQueueJob(job.id);
+      await this.flushTelemetryToStreams(scope, telemetryStart);
 
       for (const span of handlerSpans) span.end("ok");
 
       return {
-        emittedEvents: combinedEvents,
+        emittedEvents,
         jobId: job.id,
         queueName: job.queue_name,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const onFailure = worker.definition.onFailure;
-      if (onFailure !== undefined) {
+      if (!committed && onFailure !== undefined) {
         await this.runInTransaction(async () => {
           await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null);
           await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
         });
-        await this.handleCommittedEvents(this.takeCommittedEvents(), scope, telemetryStart);
-      } else {
+        this.takeCommittedEvents();
+        await this.flushTelemetryToStreams(scope, telemetryStart);
+      } else if (!committed) {
         await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
       }
       for (const span of handlerSpans) span.end("error", message);
@@ -2755,29 +2754,6 @@ export class ChimpbaseEngine {
   }
 
 
-  private async handleCommittedEvents(
-    emittedEvents: ChimpbaseEventRecord[],
-    scope: ChimpbaseExecutionScope | undefined,
-    telemetryStart: number,
-  ): Promise<ChimpbaseEventRecord[]> {
-    if (this.subscriptionsConfig.dispatch === "async") {
-      await this.flushTelemetryToStreams(scope, telemetryStart);
-      return [];
-    }
-
-    const cascadedEvents: ChimpbaseEventRecord[] = [];
-    let pendingEvents = emittedEvents;
-    while (pendingEvents.length > 0) {
-      await this.dispatchSubscriptions(pendingEvents.filter((event) =>
-        event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
-      ));
-      pendingEvents = this.takeCommittedEvents();
-      cascadedEvents.push(...pendingEvents);
-    }
-    await this.flushTelemetryToStreams(scope, telemetryStart);
-    return cascadedEvents;
-  }
-
   private async runWithActionInvoker<TResult>(
     callback: () => TResult | Promise<TResult>,
     callerModule: string | null = null,
@@ -2791,7 +2767,8 @@ export class ChimpbaseEngine {
   }
 
   private async runInTransaction<T>(callback: () => Promise<T>): Promise<T> {
-    const isRootTransaction = this.transactionDepth === 0;
+    const parentDepth = this.transactionDepth;
+    const isRootTransaction = parentDepth === 0;
     let committed = false;
 
     if (isRootTransaction) {
@@ -2802,10 +2779,24 @@ export class ChimpbaseEngine {
 
     try {
       const result = await callback();
-      this.transactionDepth -= 1;
 
       if (isRootTransaction) {
-        await this.adapter.commitTransaction(this.pendingEvents);
+        let persistedCount = 0;
+        while (persistedCount < this.pendingEvents.length) {
+          const events = this.pendingEvents.slice(persistedCount);
+          persistedCount = this.pendingEvents.length;
+          await this.adapter.persistEvents(events);
+          if (this.subscriptionsConfig.dispatch === "sync") {
+            await this.dispatchSubscriptions(events.filter((event) =>
+              event.dispatch !== true && (event.deliverySubscriptions?.length ?? 0) === 0
+            ));
+          }
+        }
+      }
+      this.transactionDepth = parentDepth;
+
+      if (isRootTransaction) {
+        await this.adapter.commitTransaction();
         committed = true;
         await this.runBlobCleanups(true);
         const justCommitted = this.pendingEvents.splice(0);
@@ -2821,7 +2812,7 @@ export class ChimpbaseEngine {
 
       return result;
     } catch (error) {
-      this.transactionDepth = Math.max(0, this.transactionDepth - 1);
+      this.transactionDepth = parentDepth;
 
       if (isRootTransaction && !committed) {
         this.pendingEvents.splice(0);

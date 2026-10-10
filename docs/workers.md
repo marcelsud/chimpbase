@@ -42,6 +42,11 @@ const sendEmail = worker("email.send", async (ctx, payload) => {
 
 If the handler throws, the job is retried according to the worker configuration.
 
+Worker database writes, published events, and job completion commit in one transaction.
+A completion or commit failure rolls them back before retrying. Telemetry or event bus
+failures after commit do not reopen a completed job. External effects such as sending
+email still need idempotency because they cannot roll back with the database.
+
 ## Dead Letter Queue (DLQ)
 
 When a job fails after all retry attempts, it's moved to a DLQ. Register a DLQ worker to handle failed jobs:
