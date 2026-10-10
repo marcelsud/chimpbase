@@ -471,6 +471,7 @@ export class ChimpbaseHost<TServer> {
   ): ChimpbaseWorkerHandler<TPayload, TResult> {
     const registration: ChimpbaseWorkerRegistration = {
       definition: {
+        onFailure: definition?.onFailure,
         dlq: definition?.dlq === undefined ? `${name}.dlq` : definition.dlq,
       },
       handler,

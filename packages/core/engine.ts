@@ -284,7 +284,7 @@ function isSubscriptionHandler(
 
 function isWorkerHandler(
   value: unknown,
-): value is (ctx: ChimpbaseContext, payload: unknown) => unknown {
+): value is (ctx: ChimpbaseContext, payload: unknown, execution?: { attempt: number }) => unknown {
   return typeof value === "function";
 }
 
@@ -920,7 +920,7 @@ export class ChimpbaseEngine {
       let invoke = async () => {
         await this.runInTransaction(async () => {
           await this.runWithActionInvoker(async () => {
-            await workerHandler(this.createContext(scope), payload);
+            await workerHandler(this.createContext(scope), payload, { attempt: job.attempt_count });
           });
         });
       };
@@ -954,7 +954,16 @@ export class ChimpbaseEngine {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
+      const onFailure = worker.definition.onFailure;
+      if (onFailure !== undefined) {
+        await this.runInTransaction(async () => {
+          await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null);
+          await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
+        });
+        await this.handleCommittedEvents(this.takeCommittedEvents(), scope, telemetryStart);
+      } else {
+        await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
+      }
       for (const span of handlerSpans) span.end("error", message);
       throw error;
     }

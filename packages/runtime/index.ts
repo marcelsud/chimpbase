@@ -182,6 +182,8 @@ export interface ChimpbaseQueueEnqueueOptions {
 
 export interface ChimpbaseWorkerDefinition {
   dlq?: false | string;
+  /** Runs in a fresh transaction after failed execution has rolled back. */
+  onFailure?: (ctx: ChimpbaseContext, error: unknown) => void | Promise<void>;
 }
 
 export interface ChimpbaseCronInvocation {
@@ -818,6 +820,7 @@ export type ChimpbaseWorkerHandler<
 > = (
   ctx: ChimpbaseContext<TActions>,
   payload: TPayload,
+  execution?: { attempt: number },
 ) => Promise<TResult> | TResult;
 
 type ChimpbaseWorkerMethod<TThis, TPayload = unknown, TResult = unknown> = (

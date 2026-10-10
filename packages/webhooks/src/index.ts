@@ -127,6 +127,12 @@ export interface WebhookDeliveryLog {
   error: string | null;
   createdAt: string;
 }
+
+class WebhookDeliveryError extends Error {
+  constructor(readonly record: Omit<WebhookDeliveryLog, "id">) {
+    super(`webhook delivery failed: ${record.error}`);
+  }
+}
 const deliveryLogValidator = v.object({
   attempt: v.number(),
   createdAt: v.string(),
@@ -658,7 +664,7 @@ export function chimpbaseWebhooks(
         }
 
         // Log delivery attempt
-        await ctx.collection.insert(DELIVERY_LOG_COLLECTION, {
+        const record = {
           webhookId: input.webhookId,
           event: input.event,
           deliveryId: input.deliveryId,
@@ -667,10 +673,11 @@ export function chimpbaseWebhooks(
           attempt: input.attempt,
           error,
           createdAt: nowIso(),
-        });
+        };
+        await ctx.collection.insert(DELIVERY_LOG_COLLECTION, record);
 
         if (status === "failed") {
-          throw new Error(`webhook delivery failed: ${error}`);
+          throw new WebhookDeliveryError(record);
         }
       },
     ),
@@ -707,10 +714,17 @@ export function chimpbaseWebhooks(
   entries.push(
     worker(
       DELIVERY_WORKER,
-      async (ctx, payload: { webhookId: string; event: string; payload: unknown; deliveryId: string; attempt: number }) => {
-        await ctx.action("__chimpbase.webhooks.deliver", payload);
+      async (ctx, payload: { webhookId: string; event: string; payload: unknown; deliveryId: string; attempt: number }, execution) => {
+        await ctx.action("__chimpbase.webhooks.deliver", { ...payload, attempt: execution?.attempt ?? payload.attempt });
       },
-      { dlq: DELIVERY_DLQ },
+      {
+        dlq: DELIVERY_DLQ,
+        async onFailure(ctx, error) {
+          if (error instanceof WebhookDeliveryError) {
+            await ctx.collection.insert(DELIVERY_LOG_COLLECTION, error.record);
+          }
+        },
+      },
     ),
   );
 

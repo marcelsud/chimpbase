@@ -11,7 +11,7 @@ import {
   type WebhookDeliveryLog,
   type WebhookRegistration,
 } from "../packages/webhooks/src/index.ts";
-import { action, subscription } from "../packages/runtime/index.ts";
+import { action, subscription, v } from "../packages/runtime/index.ts";
 import { readJsonResponse } from "./support/http.ts";
 
 /** The webhook routes return the stored registration with `events` decoded back into a list. */
@@ -20,6 +20,82 @@ interface WebhookResponse extends Omit<WebhookRegistration, "events"> {
 }
 
 const cleanupDirs: string[] = [];
+
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
+  for (const scenario of ["HTTP retry", "network retry", "exhausted retries"] as const) {
+    const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+    (engine === "postgres" && !pgUrl ? test.skip : test)(`webhook ${scenario} retains every attempt after rollback (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-webhook-retry-"));
+      cleanupDirs.push(projectDir);
+      const host = await createChimpbase({
+        projectDir, storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+        worker: { maxAttempts: 2, retryDelayMs: 0 },
+        registrations: [
+          chimpbaseWebhooks({ allowedEvents: ["order.created"], deliveryTimeoutMs: 50 }),
+          action("publishRetry", async (ctx) => { ctx.pubsub.publish("order.created", { orderId: 1 }); }),
+          action("inspectRetry", async (ctx, deliveryId: string) => await ctx.db.query(
+            "SELECT queue_name, status, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE CAST(payload_json AS TEXT) LIKE ?1 ORDER BY id",
+            [`%${deliveryId}%`], v.object({ queue_name: v.string(), status: v.string(), attempt_count: v.number(), lease_expires_at_ms: v.number().nullable() }),
+          )),
+          action("cleanupRetry", async (ctx, webhookId: string) => {
+            await ctx.collection.delete("__chimpbase.webhooks.registrations", { id: webhookId });
+            await ctx.collection.delete("__chimpbase.webhooks.delivery_log", { webhookId });
+            await ctx.db.query("DELETE FROM _chimpbase_queue_jobs WHERE CAST(payload_json AS TEXT) LIKE ?1", [`%${webhookId}%`]);
+          }),
+        ],
+      });
+      const originalFetch = globalThis.fetch;
+      const deliveryIds: string[] = [];
+      let webhookId = "";
+      let fetchCalls = 0;
+      globalThis.fetch = Object.assign(async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        fetchCalls += 1;
+        deliveryIds.push(new Headers(init?.headers).get("x-chimpbase-delivery-id") ?? "");
+        if (scenario === "network retry" && fetchCalls === 1) throw new Error("connection failed");
+        return new Response("response", { status: fetchCalls === 1 || scenario === "exhausted retries" ? 500 : 200 });
+      }, { preconnect: originalFetch.preconnect });
+      const failure = scenario === "network retry" ? "connection failed" : "HTTP 500";
+      const history = async () => v.object({
+        webhookId: v.string(), deliveryId: v.string(), event: v.string(), status: v.string(),
+        statusCode: v.number().nullable(), attempt: v.number(), error: v.string().nullable(),
+      }).array().parse((await host.executeAction("__chimpbase.webhooks.listDeliveries", webhookId)).result)
+        .sort((a, b) => a.attempt - b.attempt);
+      try {
+        webhookId = v.object({ id: v.string() }).parse((await host.executeAction("__chimpbase.webhooks.register", {
+          url: "https://example.invalid/hook", events: ["order.created"],
+        })).result).id;
+        await host.executeAction("publishRetry");
+        await expect(host.processNextQueueJob()).rejects.toThrow(`webhook delivery failed: ${failure}`);
+        const first = {
+          webhookId, deliveryId: deliveryIds[0], event: "order.created", status: "failed",
+          statusCode: scenario === "network retry" ? null : 500, attempt: 1, error: failure,
+        };
+        expect(await history()).toEqual([first]);
+        expect((await host.executeAction("inspectRetry", deliveryIds[0])).result).toEqual([{
+          queue_name: "__chimpbase.webhooks.deliver", status: "pending", attempt_count: 1, lease_expires_at_ms: null,
+        }]);
+        if (scenario === "exhausted retries") await expect(host.processNextQueueJob()).rejects.toThrow("webhook delivery failed: HTTP 500");
+        else await host.processNextQueueJob();
+        expect(fetchCalls).toBe(2);
+        expect(deliveryIds[1]).toBe(deliveryIds[0]);
+        expect(await history()).toEqual([first, {
+          ...first, attempt: 2, status: scenario === "exhausted retries" ? "failed" : "delivered",
+          statusCode: scenario === "exhausted retries" ? 500 : 200, error: scenario === "exhausted retries" ? "HTTP 500" : null,
+        }]);
+        expect((await host.executeAction("inspectRetry", deliveryIds[0])).result).toEqual(scenario === "exhausted retries" ? [
+          { queue_name: "__chimpbase.webhooks.deliver", status: "dlq", attempt_count: 2, lease_expires_at_ms: null },
+          { queue_name: "__chimpbase.webhooks.deliver.dlq", status: "pending", attempt_count: 0, lease_expires_at_ms: null },
+        ] : [{ queue_name: "__chimpbase.webhooks.deliver", status: "completed", attempt_count: 2, lease_expires_at_ms: null }]);
+        if (scenario === "exhausted retries") await host.processNextQueueJob();
+        expect(await host.processNextQueueJob()).toBeNull();
+      } finally {
+        globalThis.fetch = originalFetch;
+        try { if (webhookId) await host.executeAction("cleanupRetry", webhookId); }
+        finally { await host.close(); }
+      }
+    });
+  }
+}
 
 afterEach(async () => {
   while (cleanupDirs.length > 0) {

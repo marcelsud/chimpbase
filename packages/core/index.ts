@@ -178,7 +178,7 @@ export interface ChimpbaseAppDefinitionInput {
 export type ChimpbaseAppModuleInput = ChimpbaseAppDefinitionInput;
 
 export interface ChimpbaseWorkerRegistration {
-  definition: Required<ChimpbaseWorkerDefinition>;
+  definition: ChimpbaseWorkerDefinition & { dlq: false | string };
   handler: ChimpbaseWorkerHandler<never, unknown>;
   module?: string | null;
   name: string;
