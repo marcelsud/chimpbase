@@ -7,23 +7,33 @@ Use `route()` to handle HTTP requests with the standard `Request` and `Response`
 ```ts
 import { route } from "chimpbase/runtime";
 
-const notesRoute = route("notes", async (request, env) => {
-  if (new URL(request.url).pathname !== "/notes") return null;
+const notes = route("GET", "/notes", async (_request, env) => {
+  return Response.json(await env.action("listNotes"));
+});
 
-  if (request.method === "GET") {
-    return Response.json(await env.action("listNotes"));
-  }
-
-  if (request.method === "POST") {
-    const note = await env.action("createNote", await request.json());
-    return Response.json(note, { status: 201 });
-  }
-
-  return new Response("Method not allowed", { status: 405 });
+const addNote = route("POST", "/notes", async (request, env) => {
+  const note = await env.action("createNote", await request.json());
+  return Response.json(note, { status: 201 });
 });
 ```
 
-Add `notesRoute` alongside its actions in your app's `registrations` array. See [Getting Started](/getting-started) for a complete app.
+Add both routes alongside their actions in your app's `registrations` array. See [Getting Started](/getting-started) for a complete app.
+
+`route(method, path, handler)` checks the method and pathname before calling your handler. Query strings do not affect matching. Paths match exactly, including trailing slashes. Unmatched requests pass to the next handler.
+
+## Path Parameters
+
+Use `:name` for a whole path segment. The handler receives decoded values in `env.params`:
+
+```ts
+const note = route("GET", "/notes/:id", async (_request, env) => {
+  return Response.json(await env.action("getNote", env.params.id));
+});
+```
+
+For `/notes/abc`, `env.params.id` is `"abc"`. Parameter names must be unique and contain only letters, digits and underscores, starting with a letter or underscore. Empty segments and malformed URL encoding do not match.
+
+The registration name is generated from the method and pattern, such as `GET /notes/:id`.
 
 ## Route Environment
 
@@ -33,7 +43,8 @@ The route's second argument is a `ChimpbaseRouteEnv`:
 interface ChimpbaseRouteEnv {
   action(name: string, ...args: unknown[]): Promise<unknown>;
   action(reference: ActionRegistration, ...args): Promise<Result>;
-  get<T = unknown>(key: string): T | undefined;
+  get(key: string): unknown;
+  get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
   set(key: string, value: unknown): void;
 }
 ```
@@ -52,9 +63,8 @@ middleware("requestId", async (request, env) => {
 });
 
 // A later route reads it
-route("requestInfo", async (request, env) => {
-  if (new URL(request.url).pathname !== "/request-info") return null;
-  return Response.json({ requestId: env.get<string>("requestId") });
+route("GET", "/request-info", async (_request, env) => {
+  return Response.json({ requestId: env.get("requestId") });
 });
 ```
 
@@ -87,6 +97,15 @@ Middleware and routes run in registration order. Put middleware before the route
 
 ```ts
 (request: Request, env: ChimpbaseRouteEnv) => Response | null | Promise<Response | null>
+```
+
+Method/path handlers also receive `env.params`. The named two-argument form keeps manual matching for middleware and custom dispatch:
+
+```ts
+const notesHandler = route("notes.custom", async (request, env) => {
+  if (new URL(request.url).pathname !== "/notes") return null;
+  return Response.json(await env.action("listNotes"));
+});
 ```
 
 - Return a `Response` to handle the request

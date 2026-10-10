@@ -34,24 +34,18 @@ const listNotes = action({
   },
 });
 
-const notes = route("notes", async (request, env) => {
-  if (new URL(request.url).pathname !== "/notes") return null;
+const notes = route("GET", "/notes", async (_request, env) => {
+  return Response.json(await env.action(listNotes));
+});
 
-  if (request.method === "POST") {
-    const note = await env.action(createNote, await request.json());
-    return Response.json(note, { status: 201 });
-  }
-
-  if (request.method === "GET") {
-    return Response.json(await env.action(listNotes));
-  }
-
-  return null;
+const addNote = route("POST", "/notes", async (request, env) => {
+  const note = await env.action(createNote, await request.json());
+  return Response.json(note, { status: 201 });
 });
 
 export default {
   project: { name: "my-app" },
-  registrations: [createNote, listNotes, notes],
+  registrations: [createNote, listNotes, notes, addNote],
 } satisfies ChimpbaseAppDefinitionInput;
 ```
 

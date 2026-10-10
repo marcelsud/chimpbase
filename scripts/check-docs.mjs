@@ -32,6 +32,10 @@ try {
   assert.equal(notes.length, 2);
   assert.ok(notes.some((item) => item.id === note.id && item.body === note.body));
   assert.ok(notes.some((item) => item.id === fromHttp.id && item.body === fromHttp.body));
+  const unmatched = await host.executeRoute(new Request("http://test.local/other"));
+  assert.equal(unmatched.response, null);
+  const wrongMethod = await host.executeRoute(new Request("http://test.local/notes", { method: "DELETE" }));
+  assert.equal(wrongMethod.response, null);
   await assert.rejects(host.executeAction("createNote", { body: 42 }));
 } finally {
   await host.close();

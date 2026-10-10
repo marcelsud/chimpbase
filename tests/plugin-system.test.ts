@@ -295,6 +295,97 @@ describe("plugin system", () => {
     expect(pluginStopped).toBe(true);
   });
 
+  test("method/path routes match exactly and pass unmatched requests to the next handler", async () => {
+    const host = await createTestHost();
+    let getCalls = 0;
+    const getNotes = route("get", "/notes", (_request, env) => {
+      getCalls++;
+      expect(env.params).toEqual({});
+      return Response.json({ requestId: env.get("requestId") });
+    });
+    expect(getNotes.name).toBe("GET /notes");
+    try {
+      host.register(
+        middleware("requestId", (_request, env) => {
+          env.set("requestId", "request-123");
+          return null;
+        }),
+        getNotes,
+        route("POST", "/notes", () => new Response("created", { status: 201 })),
+        route("GET", "/café", () => new Response("unicode")),
+        route("fallback", () => new Response("not found", { status: 404 })),
+      );
+
+      const get = await host.executeRoute(new Request("http://test.local/notes?limit=10"));
+      expect(await readJsonResponse<{ requestId: string }>(get.response)).toEqual({ requestId: "request-123" });
+      const post = await host.executeRoute(new Request("http://test.local/notes", { method: "POST" }));
+      expect(post.response?.status).toBe(201);
+      const unicode = await host.executeRoute(new Request("http://test.local/caf%C3%A9"));
+      expect(await unicode.response?.text()).toBe("unicode");
+
+      for (const [method, path] of [["GET", "/other"], ["GET", "/notes/"], ["HEAD", "/notes"]]) {
+        const result = await host.executeRoute(new Request(`http://test.local${path}`, { method }));
+        expect(result.response?.status).toBe(404);
+      }
+      expect(getCalls).toBe(1);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("path parameters are decoded, isolated between requests, and preserve action access", async () => {
+    const host = await createTestHost();
+    const describeNote = action("describeNote", (_ctx, team: string, id: string) => ({ team, id }));
+    try {
+      host.register(
+        describeNote,
+        route("GET", "/teams/:team/notes/:id", async (_request, env) => {
+          return Response.json(await env.action(describeNote, env.params.team, env.params.id));
+        }),
+      );
+      const requests = await Promise.all([
+        host.executeRoute(new Request("http://test.local/teams/acme/notes/caf%C3%A9?x=1")),
+        host.executeRoute(new Request("http://test.local/teams/other/notes/a%2Fb")),
+      ]);
+      expect(await readJsonResponse<{ team: string; id: string }>(requests[0].response)).toEqual({ team: "acme", id: "café" });
+      expect(await readJsonResponse<{ team: string; id: string }>(requests[1].response)).toEqual({ team: "other", id: "a/b" });
+
+      for (const path of ["/teams/acme/notes", "/teams//notes/id", "/teams/acme/notes/", "/teams/acme/notes/%ZZ", "/teams/acme/other/id"]) {
+        const result = await host.executeRoute(new Request(`http://test.local${path}`));
+        expect(result.response).toBeNull();
+      }
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("path parameters support object property names safely", async () => {
+    const host = await createTestHost();
+    try {
+      host.register(route("GET", "/notes/:__proto__/:constructor", (_request, env) => Response.json(env.params)));
+      const result = await host.executeRoute(new Request("http://test.local/notes/alice/bob"));
+      expect(await readJsonResponse<Record<string, string>>(result.response)).toEqual({ ["__proto__"]: "alice", constructor: "bob" });
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("method/path routes reject invalid paths and parameter names", () => {
+    for (const path of ["notes", "/notes?limit=1", "/notes#id", "/notes/:", "/notes/:id/:id", "/notes/:id.json"]) {
+      expect(() => route("GET", path, () => new Response())).toThrow(TypeError);
+    }
+  });
+
+  test("method/path routes propagate matched handler failures", async () => {
+    const host = await createTestHost();
+    try {
+      host.register(route("GET", "/notes", () => { throw new Error("handler failed"); }));
+      await expect(host.executeRoute(new Request("http://test.local/notes"))).rejects.toThrow("handler failed");
+    } finally {
+      await host.close();
+    }
+  });
+
   // ── Middleware alias ──────────────────────────────────────────────────
 
   test("middleware() is an alias for route()", async () => {
