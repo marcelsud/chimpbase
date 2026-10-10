@@ -183,14 +183,20 @@ type PickResult =
 
 function pickTarget(args: PickTargetArgs): PickResult | null {
   const localAvailable = args.localActionNames.has(args.actionName);
+  const remotePeers = args.cache.findByAction(args.actionName).filter((peer) => {
+    if (peer.nodeId === args.localNodeId || peer.advertisedUrl === null || !URL.canParse(peer.advertisedUrl)) {
+      return false;
+    }
+    const { protocol } = new URL(peer.advertisedUrl);
+    return protocol === "http:" || protocol === "https:";
+  });
 
   if ((args.pinnedNodeId !== undefined && args.pinnedNodeId.length > 0)) {
     if (args.pinnedNodeId === args.localNodeId) {
       return localAvailable ? { kind: "local", nodeId: args.localNodeId } : null;
     }
 
-    const pinned = args.cache.findByAction(args.actionName)
-      .find((peer) => peer.nodeId === args.pinnedNodeId);
+    const pinned = remotePeers.find((peer) => peer.nodeId === args.pinnedNodeId);
     if (pinned === undefined) {
       return null;
     }
@@ -198,8 +204,8 @@ function pickTarget(args: PickTargetArgs): PickResult | null {
     return { kind: "remote", peer: pinned };
   }
 
-  const peers = args.cache.findByAction(args.actionName).filter((peer) =>
-    peer.nodeId !== args.localNodeId && !args.excludedRemoteNodeIds.has(peer.nodeId),
+  const peers = remotePeers.filter((peer) =>
+    !args.excludedRemoteNodeIds.has(peer.nodeId),
   );
 
   if (args.strategy === "local-first") {

@@ -56,7 +56,7 @@ function peer(
   lastHeartbeatMs = Date.now(),
 ): NodeRecord {
   return {
-    advertisedUrl: null,
+    advertisedUrl: `http://${nodeId}.test`,
     lastHeartbeatMs,
     metadata: {},
     nodeId,
@@ -85,6 +85,32 @@ function dispatcherFor(
 }
 
 describe("@chimpbase/mesh routing", () => {
+  test("all strategies exclude peers without usable HTTP endpoints, including pinned targets", async () => {
+    await withContext(async (ctx) => {
+      const visited: string[] = [];
+      const unavailable = [null, "", " ", "not a URL", "ftp://worker.test", "http://"].map((advertisedUrl, index) => ({
+        ...peer(`worker-${index}`), advertisedUrl, metadata: { cpuLoad: 0 },
+      }));
+      const dispatcher = dispatcherFor([...unavailable, {
+        ...peer("healthy"), metadata: { cpuLoad: 1 },
+      }], async ({ peer: target }) => {
+        visited.push(target.nodeId);
+        return "ok";
+      });
+
+      for (const strategy of ["local-first", "round-robin", "random", "cpu"] as const) {
+        expect(await dispatcher(ctx, actionName, {}, v.string(), { strategy })).toBe("ok");
+      }
+      expect(visited).toEqual(["healthy", "healthy", "healthy", "healthy"]);
+
+      for (const target of unavailable) {
+        await expect(dispatcher(ctx, actionName, {}, v.string(), { nodeId: target.nodeId }))
+          .rejects.toBeInstanceOf(MeshNoAvailableNodeError);
+      }
+      expect(visited).toEqual(["healthy", "healthy", "healthy", "healthy"]);
+    });
+  });
+
   test("retries a draining HTTP host on a healthy replica before executing the target", async () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-mesh-failover-"));
     const hosts = await Promise.all([0, 1].map(() => createChimpbase({

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { createServer } from "node:net";
 
 import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
 import { MeshCallError, MeshTimeoutError, type NodeRecord } from "../packages/mesh/src/types.ts";
@@ -14,6 +15,80 @@ const peer: NodeRecord = {
   services: [],
   startedAtMs: Date.now(),
 };
+
+test("a connection lost after HTTP headers retries a healthy replica", async () => {
+  const visited: string[] = [];
+  const broken = createServer((socket) => {
+    socket.once("data", () => {
+      visited.push("broken");
+      socket.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{"ok":true');
+      setTimeout(() => socket.destroy(), 20);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    broken.once("error", reject);
+    broken.listen(0, "127.0.0.1", resolve);
+  });
+  const address = broken.address();
+  if (address === null || typeof address === "string") throw new Error("TCP fixture has no port");
+  const healthy = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch() {
+      visited.push("healthy");
+      return Response.json({ ok: true, result: "healthy" });
+    },
+  });
+  const cache = new MeshPeerCache(30_000);
+  for (const [nodeId, port] of [["broken", address.port], ["healthy", healthy.port]] as const) {
+    cache.upsert({
+      ...peer, nodeId, advertisedUrl: `http://127.0.0.1:${port}`,
+      services: [{ name: "test", version: 1, actions: ["v1.test.run"], events: [] }],
+    });
+  }
+  const call = createCallDispatcher({
+    cache, defaultRetries: 1, defaultStrategy: "local-first", defaultTimeoutMs: 1_000,
+    localActionNames: new Set(), localNodeId: "caller", middleware: [],
+    remoteDispatcher: createHttpDispatcher({ callerNodeId: "caller", rpcPath: "/rpc", tokenProvider: () => "token" }),
+  });
+  try {
+    expect(await call({} as never, "v1.test.run", {}, v.string(), { retry: { attempts: 1, delayMs: 0 } })).toBe("healthy");
+    expect(visited).toEqual(["broken", "healthy"]);
+  } finally {
+    await healthy.stop(true);
+    await new Promise<void>((resolve, reject) => broken.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("a complete malformed JSON response does not retry another replica", async () => {
+  const visited: string[] = [];
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (
+    input: Parameters<typeof fetch>[0],
+  ) => {
+    const url = input instanceof Request ? input.url : String(input);
+    visited.push(url);
+    return url.includes("malformed") ? new Response("{") : Response.json({ ok: true, result: "healthy" });
+  }, { preconnect: () => {} }));
+  const cache = new MeshPeerCache(30_000);
+  for (const nodeId of ["malformed", "healthy"]) {
+    cache.upsert({
+      ...peer, nodeId, advertisedUrl: `http://${nodeId}.test`,
+      services: [{ name: "test", version: 1, actions: ["v1.test.run"], events: [] }],
+    });
+  }
+  const call = createCallDispatcher({
+    cache, defaultRetries: 2, defaultStrategy: "local-first", defaultTimeoutMs: 1_000,
+    localActionNames: new Set(), localNodeId: "caller", middleware: [],
+    remoteDispatcher: createHttpDispatcher({ callerNodeId: "caller", rpcPath: "/rpc", tokenProvider: () => "token" }),
+  });
+  try {
+    await expect(call({} as never, "v1.test.run", {}, v.string(), {})).rejects.toMatchObject({
+      message: "mesh RPC returned invalid JSON", retryable: false,
+    });
+    expect(visited).toEqual(["http://malformed.test/rpc"]);
+  } finally {
+    fetchMock.mockRestore();
+  }
+});
 
 for (const marked of [false, true]) {
   test(`HTTP 503 ${marked ? "before execution retries a healthy peer" : "from an application is not retried"}`, async () => {

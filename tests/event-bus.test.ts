@@ -46,6 +46,54 @@ async function createTestEngine(
 }
 
 describe("event bus", () => {
+  for (const name of ["", "shared-name"]) {
+    test(`external async events deliver shared ${name === "" ? "unnamed" : "named"} subscription identities once`, async () => {
+      let deliver: ChimpbaseEventBusCallback | undefined;
+      const { db, engine, registry } = await createTestEngine({
+        publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+      }, "async");
+      const calls: string[] = [];
+      registry.subscriptions.set("shared", [
+        { name, idempotent: false, handler: () => { calls.push("left"); } },
+        { name, idempotent: false, handler: () => { calls.push("right"); } },
+      ]);
+      try {
+        engine.startEventBus();
+        if (deliver === undefined) throw new Error("event bus did not start");
+        await deliver([{ id: 42, name: "shared", payload: {}, payloadJson: "{}" }]);
+        expect(await engine.processNextQueueJob()).not.toBeNull();
+        expect(calls).toEqual(["left", "right"]);
+        expect(await engine.processNextQueueJob()).toBeNull();
+      } finally { engine.stopEventBus(); db.close(); }
+    });
+  }
+
+  test("external async events persist separate named deliveries for partial handler sets", async () => {
+    let deliver: ChimpbaseEventBusCallback | undefined;
+    const { db, engine, registry } = await createTestEngine({
+      publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+    }, "async");
+    const calls: string[] = [];
+    const entries = ["left", "right"].map((name) => ({
+      name, idempotent: false, handler: () => { calls.push(name); },
+    }));
+    registry.subscriptions.set("shared", entries);
+    try {
+      engine.startEventBus();
+      if (deliver === undefined) throw new Error("event bus did not start");
+      await deliver([{ id: 42, name: "shared", payload: {}, payloadJson: "{}" }]);
+      registry.subscriptions.set("shared", entries.filter((entry) => entry.name === "left"));
+      expect(await engine.processNextQueueJob()).not.toBeNull();
+      expect(await engine.processNextQueueJob()).toBeNull();
+      expect(calls).toEqual(["left"]);
+      expect(db.query("SELECT json_extract(payload_json, '$.subscriptionName') AS subscription, attempt_count FROM _chimpbase_queue_jobs WHERE status = 'pending'").all())
+        .toEqual([{ subscription: "right", attempt_count: 0 }]);
+      registry.subscriptions.set("shared", entries.filter((entry) => entry.name === "right"));
+      expect(await engine.processNextQueueJob()).not.toBeNull();
+      expect(calls).toEqual(["left", "right"]);
+    } finally { engine.stopEventBus(); db.close(); }
+  });
+
   test("an async subscription override queues delivery under a sync host default", async () => {
     const { db, engine, registry } = await createTestEngine(new NoopEventBus());
     const calls: string[] = [];

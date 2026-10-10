@@ -5,7 +5,7 @@ import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEvent
 import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
-import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, worker } from "../packages/runtime/index.ts";
+import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, worker, type ChimpbaseContext } from "../packages/runtime/index.ts";
 
 class TestHost extends ChimpbaseHost<{ port: number }> {}
 
@@ -85,6 +85,46 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  for (const transactional of [true, false]) {
+    test(`onStop ${transactional ? "rolls back its writes by default" : "can commit an action independently of cleanup errors"}`, async () => {
+      const { library } = createTrackedRuntime();
+      const failure = new Error("resource cleanup failed");
+      let delivered = 0;
+      let cleanedUp = false;
+      const write = async (ctx: ChimpbaseContext) => {
+        await ctx.kv.set("shutdown.write", true);
+        ctx.pubsub.publish("shutdown.written", {});
+      };
+      const reported = spyOn(console, "error").mockImplementation(() => {});
+      const host = await library.createChimpbase({
+        storage: { engine: "memory" }, registrations: [
+          action("shutdownWrite", write),
+          action("shutdownRead", async (ctx) => await ctx.kv.get("shutdown.write")),
+          subscription("shutdown.written", () => { delivered += 1; }),
+          onStop("failure", async (ctx) => {
+            if (transactional) await write(ctx);
+            else await ctx.action("shutdownWrite");
+            throw failure;
+          }, transactional ? undefined : { transactional: false }),
+          onStop("cleanup", () => { cleanedUp = true; }),
+        ],
+      });
+      try {
+        const started = await host.start({ serve: false, runWorker: false });
+        await started.stop();
+        expect(cleanedUp).toBe(true);
+        expect((await host.executeAction("shutdownRead")).result).toBe(transactional ? null : true);
+        expect(delivered).toBe(transactional ? 0 : 1);
+        expect(reported).toHaveBeenCalledTimes(1);
+        const error: unknown = reported.mock.calls[0]?.[1];
+        expect(error).toBe(failure);
+      } finally {
+        reported.mockRestore();
+        await host.close();
+      }
+    });
+  }
+
   test("a request whose preparation finishes after stop cannot execute", async () => {
     const { library } = createTrackedRuntime();
     const entered = Promise.withResolvers<void>();

@@ -64,13 +64,15 @@ Runs after the engine is initialized, before serving requests. The handler recei
 
 Use cases: seed data, validate config, warm caches, run health checks.
 
-### `onStop(name, handler)`
+### `onStop(name, handler, options?)`
 
-Runs during graceful shutdown, before the server and worker stop.
+Runs during graceful shutdown, after event listeners and workers stop and active operations drain, before the HTTP server stops.
 
 Use cases: flush buffers, close connections, log final metrics.
 
 Hooks run in registration order. If an `onStop` hook throws, the error is logged but shutdown continues.
+
+Hooks run in a database transaction by default. Set `{ transactional: false }` for resource cleanup that must run even when the database cannot open a transaction. In that mode, direct database writes are not grouped in a hook transaction; use `ctx.action(...)` for writes and published events so they commit in an action transaction. Mesh uses this mode to attempt every service's cleanup independently of registry availability.
 
 ## Plugin Dependencies
 

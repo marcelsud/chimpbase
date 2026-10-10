@@ -556,8 +556,9 @@ export class ChimpbaseHost<TServer> {
   registerOnStop(
     name: string,
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+    options?: { transactional?: boolean },
   ): void {
-    this.registry.onStopHooks.push({ handler, module: null, name });
+    this.registry.onStopHooks.push({ ...options, handler, module: null, name });
   }
 
   registerWorkflow<TInput = unknown, TState = unknown>(
@@ -664,7 +665,7 @@ export class ChimpbaseHost<TServer> {
           for (const hook of this.registry.onStopHooks) {
             try {
               await this.runEngineOperation(async () => {
-                await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+                await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name, hook.transactional);
               });
             } catch (err) {
               console.error(`onStop hook "${hook.name}" failed:`, err);

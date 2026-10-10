@@ -111,7 +111,7 @@ Methods:
 - `nodeId()` — this node's UUID (regenerated each boot).
 - `peers()` — current live peers from the local cache.
 
-Retries apply to remote transport failures, remote timeouts, unavailable nodes, and a host's explicit 503 rejection before action execution during shutdown or saturation. Ordinary application HTTP 503 responses and other application errors are not retried. Invalid results also bypass retry and fallback.
+Retries apply to remote transport failures, including a connection lost while reading the response body, remote timeouts, unavailable nodes, and a host's explicit 503 rejection before action execution during shutdown or saturation. Ordinary application HTTP 503 responses and other application errors are not retried. Complete responses containing malformed JSON are not retried. Result validation errors also bypass retry and fallback.
 
 A remote timeout does not guarantee that the receiving action stopped or rolled back. Retry remote actions only when repeated execution is safe, such as an operation that deduplicates by a request ID.
 
@@ -137,7 +137,10 @@ CREATE TABLE IF NOT EXISTS _chimpbase_mesh_nodes (
 - **Heartbeat** — `setInterval` updates `last_heartbeat_ms` and reloads live peers from the registry. PostgreSQL heartbeat queries use a separate adapter after startup, so active request transactions cannot hide or roll back them. Slow heartbeats do not overlap, and shutdown waits for the active heartbeat.
 - **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop. Shutdown rejects new HTTP routes with 503, stops event listeners and worker ticks, and waits for active operations before deleting this node's registry row.
 - **Cache** — every node replaces its in-memory peer snapshot from the registry on startup and each heartbeat. Announce/leave events can update it between refreshes; peers past `offlineAfterMs` expire locally.
+- **Routing** — remote calls, including calls pinned to a node, require a valid HTTP or HTTPS advertised URL. Nodes using `local-only` can participate in shared queues and events, but their actions are excluded from remote RPC selection.
 - **GC** — cron `* * * * *` sweeps rows older than `gcAfterMs`.
+
+Mesh shutdown runs without an enclosing database transaction so service cleanup can still run when PostgreSQL is unavailable. Deregistration uses its own action transaction. Every service's `stopped` hook is attempted even when deregistration or another hook fails; the host logs an aggregate of the failures and continues shutdown.
 
 ## Balanced events
 

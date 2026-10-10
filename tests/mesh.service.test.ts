@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { resolveService } from "../packages/mesh/src/service.ts";
 import type { AnyServiceDefinition } from "../packages/mesh/src/types.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { v } from "../packages/runtime/index.ts";
+import { action, v } from "../packages/runtime/index.ts";
 
 
 const cleanupDirs: string[] = [];
@@ -58,6 +58,63 @@ describe("@chimpbase/mesh service()", () => {
       expect(ready).toBe(false);
       expect(calls).toEqual(["start:consumer", "stop"]);
     } finally {
+      await host.close();
+    }
+  });
+
+  test("attempts every service cleanup and preserves successful deregistration when hooks fail", async () => {
+    const host = await createMeshHost();
+    const failures = [new Error("first cleanup failed"), new Error("second cleanup failed")];
+    const stopped: string[] = [];
+    const reported = spyOn(console, "error").mockImplementation(() => {});
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0, transport: "local-only", services: [
+        service({ name: "first", stopped: () => { stopped.push("first"); throw failures[0]; } }),
+        service({ name: "second", stopped: async () => { stopped.push("second"); throw failures[1]; } }),
+        service({ name: "last", stopped: () => { stopped.push("last"); } }),
+      ],
+    }), action("remainingMeshNodes", async (ctx) => await ctx.db.query("SELECT node_id FROM _chimpbase_mesh_nodes")));
+    try {
+      const started = await host.start({ serve: false, runWorker: false });
+      await started.stop();
+      expect(stopped).toEqual(["first", "second", "last"]);
+      expect((await host.executeAction("remainingMeshNodes")).result).toEqual([]);
+      expect(reported).toHaveBeenCalledTimes(1);
+      const error: unknown = reported.mock.calls[0]?.[1];
+      expect(error).toBeInstanceOf(AggregateError);
+      if (!(error instanceof AggregateError)) throw new Error("expected aggregate cleanup error");
+      expect(error.errors as unknown[]).toEqual(failures);
+    } finally {
+      reported.mockRestore();
+      await host.close();
+    }
+  });
+
+  test("cleans up every service after registry deletion fails", async () => {
+    const host = await createMeshHost();
+    const stopped: string[] = [];
+    const reported = spyOn(console, "error").mockImplementation(() => {});
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0, transport: "local-only", services: [
+        service({ name: "first", stopped: () => { stopped.push("first"); } }),
+        service({ name: "second", stopped: () => { stopped.push("second"); } }),
+      ],
+    }), action("blockMeshDeletion", async (ctx) => {
+      await ctx.db.query("CREATE TRIGGER block_mesh_deletion BEFORE DELETE ON _chimpbase_mesh_nodes BEGIN SELECT RAISE(ABORT, 'registry unavailable'); END");
+    }), action("remainingMeshNodes", async (ctx) => await ctx.db.query("SELECT node_id FROM _chimpbase_mesh_nodes")));
+    try {
+      const started = await host.start({ serve: false, runWorker: false });
+      await host.executeAction("blockMeshDeletion");
+      await started.stop();
+      expect(stopped).toEqual(["first", "second"]);
+      expect(reported).toHaveBeenCalledTimes(1);
+      const error: unknown = reported.mock.calls[0]?.[1];
+      expect(error).toBeInstanceOf(AggregateError);
+      if (!(error instanceof AggregateError)) throw new Error("expected aggregate shutdown error");
+      expect(error.errors as unknown[]).toMatchObject([{ message: "registry unavailable" }]);
+      expect((await host.executeAction("remainingMeshNodes")).result).toHaveLength(1);
+    } finally {
+      reported.mockRestore();
       await host.close();
     }
   });

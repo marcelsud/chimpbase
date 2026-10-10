@@ -212,7 +212,7 @@ export interface ChimpbaseRegistry {
   httpHandler: ChimpbaseRouteHandler | null;
   moduleInterfaces: Map<string, ChimpbaseModuleInterface>;
   onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
-  onStopHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
+  onStopHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string; transactional?: boolean }>;
   registrationOwnership: Map<string, string>;
   routes: ChimpbaseRouteRegistration[];
   subscriptions: Map<string, ChimpbaseSubscriptionEntry[]>;
@@ -450,6 +450,7 @@ export {
   type ChimpbaseEventRecord,
   type ChimpbaseExecutionScope,
   type ChimpbasePreparedRoute,
+  type ChimpbaseQueueClaimTargets,
   type ChimpbaseQueueExecutionResult,
   type ChimpbaseQueueJobRecord,
   type ChimpbaseRouteExecutionResult,

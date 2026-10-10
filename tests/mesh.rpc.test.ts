@@ -54,7 +54,11 @@ async function withRpcHost(
     try {
       await run(host);
     } finally {
-      await started.stop();
+      try {
+        await host.engine.getBlobsAdapter().kvDelete("rpc.write");
+      } finally {
+        await started.stop();
+      }
     }
   } finally {
     await host.close();
