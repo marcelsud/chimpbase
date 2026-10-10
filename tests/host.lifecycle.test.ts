@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 
 import { defineChimpbaseApp } from "../packages/core/index.ts";
 import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
@@ -8,16 +9,17 @@ import { action, onStart, onStop, plugin, worker } from "../packages/runtime/ind
 
 class TestHost extends ChimpbaseHost<{ port: number }> {}
 
-function cleanupSink(shutdown: () => void) {
+function cleanupSink(shutdown: () => void | Promise<void>) {
   const span = { setAttribute() {}, end() {} };
   return {
     onLog() {}, onMetric() {}, startSpan: () => span, startHandlerSpan: () => span,
-    async shutdown() { shutdown(); },
+    async shutdown() { await shutdown(); },
   };
 }
 
 function createTrackedRuntime(errors: {
-  serverStart?: Error; serverStop?: Error; busStart?: Error; storageClose?: Error; secrets?: Error;
+  serverStart?: Error; serverStop?: Error; busStart?: Error; busStop?: Error;
+  storageClose?: Error; secrets?: Error; adapterCreate?: Error;
 } = {}) {
   const calls = { serverStart: 0, serverStop: 0, busStart: 0, busStop: 0, storageClose: 0 };
   const runtime: ChimpbaseRuntimeShim<{ port: number }> = {
@@ -45,13 +47,20 @@ function createTrackedRuntime(errors: {
         const resources = await bunRuntimeShim.storage.open(...args);
         return {
           ...resources,
+          createAdapter() {
+            if (errors.adapterCreate) throw errors.adapterCreate;
+            return resources.createAdapter();
+          },
           eventBus: {
             async publish() {},
             start() {
               calls.busStart += 1;
               if (errors.busStart) throw errors.busStart;
             },
-            stop() { calls.busStop += 1; },
+            stop() {
+              calls.busStop += 1;
+              if (errors.busStop) throw errors.busStop;
+            },
           },
           storage: {
             async close() {
@@ -188,16 +197,112 @@ describe("host lifecycle cleanup", () => {
     let sinkClosed = 0;
     await expect(library.createChimpbase({
       registrations: [plugin({ name: "broken", dependsOn: ["missing"] })],
-      storage: { engine: "memory" }, sinks: [cleanupSink(() => { sinkClosed += 1; throw new Error("sink failed"); })],
+      storage: { engine: "memory" }, sinks: [
+        cleanupSink(() => { sinkClosed += 1; throw new Error("sink failed"); }),
+        cleanupSink(() => { sinkClosed += 1; }),
+      ],
     })).rejects.toThrow("missing");
     expect(calls.storageClose).toBe(1);
-    expect(sinkClosed).toBe(1);
+    expect(sinkClosed).toBe(2);
   });
 
   test("secret-loading failure closes storage before an engine exists", async () => {
     const failure = new Error("secrets unavailable");
     const { calls, library } = createTrackedRuntime({ secrets: failure, storageClose: new Error("cleanup failed") });
     await expect(library.createChimpbase({ storage: { engine: "memory" } })).rejects.toBe(failure);
+    expect(calls.storageClose).toBe(1);
+  });
+
+  for (const phase of ["secrets", "adapterCreate"] as const) {
+    test(`failed ${phase} closes every supplied sink before an engine exists`, async () => {
+      const failure = new Error(`${phase} unavailable`);
+      const { calls, library } = createTrackedRuntime({ [phase]: failure, storageClose: new Error("cleanup failed") });
+      const closed: number[] = [];
+      await expect(library.createChimpbase({
+        storage: { engine: "memory" }, sinks: [
+          cleanupSink(() => { closed.push(1); throw new Error("sink failed"); }),
+          cleanupSink(() => { closed.push(2); }),
+        ],
+      })).rejects.toBe(failure);
+      expect(calls.storageClose).toBe(1);
+      expect(closed).toEqual([1, 2]);
+    });
+  }
+
+  for (const phase of ["named migrations", "inline migrations"] as const) {
+    test(`failed SQLite ${phase} closes the database and supplied sinks`, async () => {
+      const { library } = createTrackedRuntime();
+      const close = spyOn(Database.prototype, "close");
+      let sinkClosed = 0;
+      try {
+        await expect(library.createChimpbase({
+          storage: { engine: "memory" },
+          ...(phase === "named migrations"
+            ? { migrations: { sqlite: [{ name: "invalid", sql: "INVALID MIGRATION" }] } }
+            : { migrationsSql: ["INVALID MIGRATION"] }),
+          sinks: [cleanupSink(() => { sinkClosed += 1; throw new Error("sink failed"); })],
+        })).rejects.toThrow("INVALID");
+        expect(sinkClosed).toBe(1);
+        expect(close).toHaveBeenCalledTimes(1);
+      } finally {
+        close.mockRestore();
+      }
+    });
+  }
+
+  test("failed event-bus startup closes sinks and storage even when bus stop throws", async () => {
+    const failure = new Error("bus unavailable");
+    const { calls, library } = createTrackedRuntime({ busStart: failure, busStop: new Error("bus stop failed") });
+    let sinkClosed = 0;
+    await expect(library.startChimpbaseApp({
+      app: defineChimpbaseApp({}), storage: { engine: "memory" }, serve: true, runWorker: true,
+      sinks: [cleanupSink(() => { sinkClosed += 1; })],
+    })).rejects.toBe(failure);
+    expect(calls.serverStop).toBe(1);
+    expect(calls.storageClose).toBe(1);
+    expect(sinkClosed).toBe(1);
+  });
+
+  test("direct close reports a bus-stop failure after closing sinks and storage", async () => {
+    const failure = new Error("bus stop failed");
+    const { calls, library } = createTrackedRuntime({ busStop: failure });
+    let sinkClosed = 0;
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, sinks: [cleanupSink(() => { sinkClosed += 1; })],
+    });
+    await expect(host.close()).rejects.toBe(failure);
+    expect(calls.storageClose).toBe(1);
+    expect(sinkClosed).toBe(1);
+  });
+
+  test("direct close reports all sink failures after attempting every shutdown", async () => {
+    const { calls, library } = createTrackedRuntime();
+    const failures = [new Error("first sink failed"), new Error("second sink failed")];
+    const closed: number[] = [];
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, sinks: [
+        ...failures.map((failure, index) => cleanupSink(() => { closed.push(index); throw failure; })),
+        cleanupSink(() => { closed.push(2); }),
+      ],
+    });
+    const error: unknown = await host.close().catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AggregateError);
+    if (!(error instanceof AggregateError)) throw new Error("expected aggregate cleanup error");
+    expect(error.errors as unknown[]).toEqual(failures);
+    expect(closed).toEqual([0, 1, 2]);
+    expect(calls.storageClose).toBe(1);
+  });
+
+  test("direct close retains independent bus, sink, and storage failures", async () => {
+    const failures = [new Error("bus failed"), new Error("sink failed"), new Error("storage failed")];
+    const { calls, library } = createTrackedRuntime({ busStop: failures[0], storageClose: failures[2] });
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, sinks: [cleanupSink(() => { throw failures[1]; })],
+    });
+    const error: unknown = await host.close().catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AggregateError);
+    if (!(error instanceof AggregateError)) throw new Error("expected aggregate cleanup error");
+    expect(error.errors as unknown[]).toEqual(failures);
     expect(calls.storageClose).toBe(1);
   });
 });

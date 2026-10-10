@@ -117,20 +117,29 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
       }
 
       const db = await openSqliteDatabase(_projectDir, config);
-      await applySqlMigrations(db, resolvedMigrations);
-      await applyInlineSqlMigrations(db, migrationsSql);
-      await ensureSqliteInternalTables(db);
-      return {
-        createAdapter() {
-          return createSqliteEngineAdapter(db, platform);
-        },
-        storage: {
-          close() {
-            db.close();
+      try {
+        await applySqlMigrations(db, resolvedMigrations);
+        await applyInlineSqlMigrations(db, migrationsSql);
+        await ensureSqliteInternalTables(db);
+        return {
+          createAdapter() {
+            return createSqliteEngineAdapter(db, platform);
           },
-        },
-        supportsConcurrentWorkers: false,
-      };
+          storage: {
+            close() {
+              db.close();
+            },
+          },
+          supportsConcurrentWorkers: false,
+        };
+      } catch (error) {
+        try {
+          db.close();
+        } catch {
+          // Preserve the initialization error after attempting database cleanup.
+        }
+        throw error;
+      }
     },
   },
 };

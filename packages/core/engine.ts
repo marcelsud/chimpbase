@@ -1099,9 +1099,10 @@ export class ChimpbaseEngine {
   }
 
   async shutdownSinks(): Promise<void> {
-    for (const sink of this.sinks) {
-      await sink.shutdown?.();
-    }
+    const results = await Promise.allSettled(this.sinks.map(async (sink) => await sink.shutdown?.()));
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "telemetry sink cleanup failed");
   }
 
   private async flushTelemetryToStreams(scope?: ChimpbaseExecutionScope, fromIndex = 0): Promise<void> {

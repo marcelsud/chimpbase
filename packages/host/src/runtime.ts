@@ -787,21 +787,14 @@ export class ChimpbaseHost<TServer> {
   }
 
   async close(): Promise<void> {
-    this.engine.stopEventBus();
-    const [sinkResult, storageResult] = await Promise.allSettled([
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => this.engine.stopEventBus()),
       Promise.resolve().then(() => this.engine.shutdownSinks()),
       Promise.resolve().then(() => this.storage.close()),
     ]);
-
-    if (sinkResult.status === "rejected" && storageResult.status === "rejected") {
-      throw new AggregateError([sinkResult.reason as unknown, storageResult.reason as unknown], "runtime cleanup failed");
-    }
-    if (sinkResult.status === "rejected") {
-      throw sinkResult.reason as unknown;
-    }
-    if (storageResult.status === "rejected") {
-      throw storageResult.reason as unknown;
-    }
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "runtime cleanup failed");
     this.debug("runtime closed");
   }
 
@@ -914,19 +907,20 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
   const projectDir = resolve(options.projectDir ?? ".");
   const platform = options.platform ?? createDefaultChimpbasePlatformShim();
   const registry = createChimpbaseRegistry();
-  const storageResources = await runtime.storage.open(
-    projectDir,
-    options.config,
-    platform,
-    listChimpbaseMigrationsForEngine(options.app?.migrations ?? options.migrations, options.config.storage.engine),
-    options.migrationSource
-      ?? ((options.app !== undefined)
-        ? createStaticMigrationSource([])
-        : createLocalMigrationSource(projectDir, options.config, options.migrationsDir ?? null)),
-    options.migrationsSql ?? [],
-  );
-  let engine: ChimpbaseEngine | null = null;
+  let storage: StorageHandle | undefined;
   try {
+    const storageResources = await runtime.storage.open(
+      projectDir,
+      options.config,
+      platform,
+      listChimpbaseMigrationsForEngine(options.app?.migrations ?? options.migrations, options.config.storage.engine),
+      options.migrationSource
+        ?? ((options.app !== undefined)
+          ? createStaticMigrationSource([])
+          : createLocalMigrationSource(projectDir, options.config, options.migrationsDir ?? null)),
+      options.migrationsSql ?? [],
+    );
+    storage = storageResources.storage;
     const secrets = options.secrets ?? await loadLocalSecretStore(projectDir, options.config, {
       env: runtime.env.toObject(),
       envFileDefault: runtime.env.get("CHIMPBASE_ENV_FILE") ?? ".env",
@@ -936,7 +930,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     const blobsEngineConfig: ChimpbaseBlobsEngineConfig | undefined = (options.blobs !== undefined)
       ? { driver: options.blobs.driver, buckets: options.blobs.buckets, signer: options.blobs.signer }
       : undefined;
-    engine = new ChimpbaseEngine({
+    const engine = new ChimpbaseEngine({
       adapter: storageResources.createAdapter(),
       createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter() : undefined,
       blobs: blobsEngineConfig,
@@ -993,8 +987,8 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     return host;
   } catch (error) {
     await Promise.allSettled([
-      Promise.resolve().then(() => engine?.shutdownSinks()),
-      Promise.resolve().then(() => storageResources.storage.close()),
+      ...(options.sinks ?? []).map(async (sink) => await sink.shutdown?.()),
+      Promise.resolve().then(() => storage?.close()),
     ]);
     throw error;
   }
