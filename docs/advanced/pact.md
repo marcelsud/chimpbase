@@ -21,28 +21,7 @@ No external broker is needed. Pacts are plain data structures or JSON files.
 
 ## Defining a Pact
 
-A pact describes what one service expects from another:
-
-```ts
-import { pact, interaction } from "chimpbase/pact";
-import { v } from "chimpbase/runtime";
-
-const inventoryPact = pact({
-  consumer: "order-service",
-  provider: "inventory-service",
-  interactions: [
-    interaction.action("reserveStock", {
-      states: ["product SKU-001 has 10 units in stock"],
-      args: v.object({ sku: v.string(), quantity: v.number() }),
-      result: v.object({ reservationId: v.string(), expiresAt: v.string() }),
-      example: {
-        args: [{ sku: "SKU-001", quantity: 2 }],
-        result: { reservationId: "res-abc", expiresAt: "2026-04-12T00:00:00Z" },
-      },
-    }),
-  ],
-});
-```
+A pact names the consumer, provider, and expected interactions. In the [full example](#full-example), the order service exports `inventoryPact` with a `reserveStock` action and a `stock.reserved` event. The inventory service imports that same contract for verification.
 
 ### Interaction Types
 
@@ -107,42 +86,7 @@ States are set up by the provider during verification — the consumer only decl
 
 ## Provider Verification
 
-The provider verifies the pact against their real application:
-
-```ts
-import { describe, expect, test } from "bun:test";
-import { verifyPact } from "chimpbase/pact";
-import { createChimpbase } from "chimpbase/runtime/bun";
-import { defineChimpbaseApp } from "chimpbase/core";
-import app from "../chimpbase.app";
-
-describe("pact verification", () => {
-  test("satisfies order-service contract", async () => {
-    const host = await createChimpbase({
-      app,
-      storage: { engine: "memory" },
-    });
-
-    try {
-      const result = await verifyPact({
-        host,
-        pact: inventoryPact,
-        states: {
-          "product SKU-001 has 10 units in stock": async (host) => {
-            await host.executeAction("seedProduct", [
-              { sku: "SKU-001", stock: 10 },
-            ]);
-          },
-        },
-      });
-
-      expect(result.failed).toBe(0);
-    } finally {
-      await host.close();
-    }
-  });
-});
-```
+The provider imports the consumer's pact, creates a host with its real application, and passes both to `verifyPact` with the required state setup functions. See the [provider side of the full example](#provider-side-inventory-service) for the complete test and host cleanup.
 
 ### How Verification Works
 
@@ -234,31 +178,27 @@ The serialized format stores validator schemas as JSON Schema objects. Serialize
 
 ### Serialized Format
 
+The `reserveStock` interaction from the [full example](#full-example) serializes as:
+
 ```json
 {
-  "consumer": "order-service",
-  "provider": "inventory-service",
-  "interactions": [
-    {
-      "kind": "action",
-      "name": "reserveStock",
-      "states": ["product SKU-001 has 10 units in stock"],
-      "argsSchema": {
-        "type": "object",
-        "properties": { "sku": { "type": "string" }, "quantity": { "type": "number" } },
-        "required": ["sku", "quantity"]
-      },
-      "resultSchema": {
-        "type": "object",
-        "properties": { "reservationId": { "type": "string" } },
-        "required": ["reservationId"]
-      },
-      "example": {
-        "args": [{ "sku": "SKU-001", "quantity": 2 }],
-        "result": { "reservationId": "res-abc" }
-      }
-    }
-  ]
+  "kind": "action",
+  "name": "reserveStock",
+  "states": ["product SKU-001 has 10 units in stock"],
+  "argsSchema": {
+    "type": "object",
+    "properties": { "sku": { "type": "string" }, "quantity": { "type": "number" } },
+    "required": ["sku", "quantity"]
+  },
+  "resultSchema": {
+    "type": "object",
+    "properties": { "reservationId": { "type": "string" }, "expiresAt": { "type": "string" } },
+    "required": ["reservationId", "expiresAt"]
+  },
+  "example": {
+    "args": [{ "sku": "SKU-001", "quantity": 2 }],
+    "result": { "reservationId": "res-abc", "expiresAt": "2026-04-12T00:00:00Z" }
+  }
 }
 ```
 
@@ -285,6 +225,7 @@ export const inventoryPact = pact({
       result: v.object({ reservationId: v.string(), expiresAt: v.string() }),
       example: {
         args: [{ sku: "SKU-001", quantity: 2 }],
+        result: { reservationId: "res-abc", expiresAt: "2026-04-12T00:00:00Z" },
       },
     }),
 
