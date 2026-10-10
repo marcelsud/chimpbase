@@ -21,6 +21,41 @@ import { defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/c
 const cleanupDirs: string[] = [];
 
 for (const engine of ["memory", "sqlite"] as const) {
+  test(`shared SQLite Kysely preserves query results, streaming and transaction restrictions (${engine})`, async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-kysely-"));
+    cleanupDirs.push(projectDir);
+    const host = await createChimpbase({
+      projectDir, storage: { engine },
+      registrations: [action("verifyKysely", async (ctx) => {
+        const db = ctx.db.kysely<{ kysely_items: { id: number; label: string } }>();
+        await db.schema.createTable("kysely_items")
+          .addColumn("id", "integer", (column) => column.primaryKey())
+          .addColumn("label", "text", (column) => column.notNull()).execute();
+        const inserted = await db.insertInto("kysely_items")
+          .values(Array.from({ length: 5 }, (_, i) => ({ id: i + 1, label: `item-${i + 1}` }))).executeTakeFirst();
+        expect(inserted.numInsertedOrUpdatedRows).toBe(5n);
+        expect(inserted.insertId).toBe(5n);
+        const updated = await db.updateTable("kysely_items").set({ label: "updated" }).where("id", "=", 1).executeTakeFirst();
+        expect(updated.numUpdatedRows).toBe(1n);
+        const deleted = await db.deleteFrom("kysely_items").where("id", "=", 5).executeTakeFirst();
+        expect(deleted.numDeletedRows).toBe(1n);
+        const expected = [{ id: 1, label: "updated" }, ...[2, 3, 4].map((id) => ({ id, label: `item-${id}` }))];
+        expect(await db.selectFrom("kysely_items").selectAll().orderBy("id").execute()).toEqual(expected);
+        for (const chunkSize of [0, 2, 20]) {
+          const rows: { id: number; label: string }[] = [];
+          for await (const row of db.selectFrom("kysely_items").selectAll().orderBy("id").stream(chunkSize)) rows.push(row);
+          expect(rows).toEqual(expected);
+        }
+        await expect(db.transaction().execute(async () => {})).rejects.toThrow("runtime-managed transactions");
+        await db.destroy();
+      })],
+    });
+    try { await host.executeAction("verifyKysely"); }
+    finally { await host.close(); }
+  });
+}
+
+for (const engine of ["memory", "sqlite"] as const) {
   for (const scenario of ["single failure", "exhausted retries", "recovered retry"] as const) {
     test(`workflow ${scenario} persists status and clears leases (${engine})`, async () => {
       const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-workflow-failure-"));

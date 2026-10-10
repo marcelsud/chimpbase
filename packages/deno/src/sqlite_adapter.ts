@@ -15,7 +15,7 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
-import { createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "@chimpbase/core";
+import { createChimpbaseEventDeliveryPayloads, createSqliteKysely, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -30,7 +30,6 @@ import type {
 } from "@chimpbase/runtime";
 import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord, v } from "@chimpbase/runtime";
 
-import { createSqliteKysely } from "./kysely.ts";
 
 type SqliteBinding = unknown;
 

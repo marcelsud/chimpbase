@@ -398,6 +398,7 @@ export {
 } from "./modules.ts";
 
 export { registerChimpbaseModuleImplementations } from "./module-registration.ts";
+export { createSqliteKysely } from "./sqlite-kysely.ts";
 
 export {
   assertChimpbaseModuleCompiledSql,
