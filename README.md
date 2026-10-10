@@ -10,21 +10,55 @@ Install the single public package:
 bun add chimpbase
 ```
 
-Follow [Getting Started](docs/getting-started.md) to create a small notes API, then run it with:
+Save this as `chimpbase.app.ts`:
+
+```ts
+import { action, route } from "chimpbase/runtime";
+
+const listNotes = action({
+  name: "listNotes",
+  async handler(ctx) {
+    return await ctx.collection.find("notes");
+  },
+});
+
+const notes = route("GET", "/notes", async (_request, env) => {
+  return Response.json(await env.action(listNotes));
+});
+
+export default {
+  project: { name: "my-app" },
+  registrations: [listNotes, notes],
+};
+```
+
+Run it with:
 
 ```bash
 bunx chimpbase dev
 ```
 
-The CLI loads `chimpbase.app.ts` and starts HTTP plus the background worker. The tutorial uses local SQLite and needs no database server or HTTP framework.
+The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. The app uses local SQLite and needs no database server or HTTP framework.
 
-## Build your backend
+Call `GET /notes` to list the stored notes:
 
-- [Actions](docs/actions.md) validate inputs and run business operations in transactions.
-- [HTTP routes](docs/routes.md) expose actions with standard `Request` and `Response` objects.
-- [Collections](docs/collections.md) store JSON documents; [database access](docs/database.md) supports SQL and Kysely.
-- [Subscriptions](docs/subscriptions.md) react to events; [workers](docs/workers.md) process queued jobs with retries.
-- [Cron](docs/cron.md) runs recurring jobs.
+```bash
+curl http://localhost:3000/notes
+```
+
+Follow [Getting Started](docs/getting-started.md) to add an action and a `POST /notes` route for creating notes.
+
+## Primitives
+
+| Primitive | What it does |
+|-----------|--------------|
+| [`action(...)`](docs/actions.md) | Runs a business operation in a transaction. |
+| [`route(method, path, handler)`](docs/routes.md) | Exposes actions over HTTP using standard `Request` and `Response` objects. |
+| [`subscription(...)`](docs/subscriptions.md) | Reacts to internal events. |
+| [`ctx.enqueue(...)` + `worker(...)`](docs/workers.md) | Queues durable background jobs and processes them with retries. |
+| [`cron(...)`](docs/cron.md) | Runs recurring jobs. |
+
+Use [collections](docs/collections.md) to store JSON documents or [database access](docs/database.md) for SQL and Kysely.
 
 See [Configuration](docs/configuration.md) for storage, CLI commands and runtime hosts. Application code imports the portable DSL from `chimpbase/runtime` and selects a host only when starting a runtime:
 
