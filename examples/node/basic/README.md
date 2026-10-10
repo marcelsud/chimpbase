@@ -1,39 +1,32 @@
-# examples/node/basic
+# Node basic example
 
-Smallest runnable Chimpbase app on Node.js. Two actions + one HTTP route over SQLite. Zero plugins.
-
-**Requires Node 22+** (uses built-in `node:sqlite`, stable `fetch`, native `--test` runner, stable `--import` loader).
+A runnable orders app with actions and HTTP routes over SQLite. Requires Node 22+; `tsx` loads the repository's TypeScript source.
 
 ## Run
 
+From the repository root:
+
 ```bash
-bun install                      # at repo root
-bun run dev:node:basic           # or: cd examples/node/basic && node --import tsx/esm app.ts
+bun install
+bun run dev:node:basic
 ```
 
-Server listens on port 3000 by default.
+The server listens on port 3000; set `PORT` to change it.
 
 ```bash
-curl -X POST localhost:3000/orders \
+curl -X POST http://localhost:3000/orders \
   -H "Content-Type: application/json" \
   -d '{"customer":"alice@example.com","amount":4200}'
-
-curl localhost:3000/orders
-curl localhost:3000/health       # built-in: { "ok": true }
+curl http://localhost:3000/orders
+curl http://localhost:3000/health
 ```
 
-## What each file teaches
+`chimpbase.app.ts` defines actions and routes, `chimpbase.migrations.ts` defines the table, and `app.ts` starts the runtime.
 
-- **`chimpbase.migrations.ts`** — one SQLite migration. `defineChimpbaseMigrations` returns a definition the host replays on boot. `node:sqlite` powers local storage.
-- **`chimpbase.app.ts`** — actions + `route()` + default-exported app definition. Identical to the Bun basic example: the runtime DSL is runtime-agnostic.
-- **`app.ts`** — `createChimpbase` from `@chimpbase/node` accepts the same options. `projectDir` via `fileURLToPath(new URL(".", import.meta.url))` is the Node equivalent of Bun's `import.meta.dir`.
-- **`tests/app.test.ts`** — `node:test` + `node:assert/strict`. Boots the host with `storage: { engine: "memory" }`, drives `POST /orders` + `GET /orders`, confirms the built-in `/health`.
+## Tests
 
-## Why tsx
+```bash
+bun run --cwd examples/node/basic test
+```
 
-Node's `@chimpbase/node` package only exports its compiled `dist/` output. Loading the workspace source directly via `node --import tsx/esm app.ts` lets the `tsconfig.json` path alias (`@chimpbase/node` → `packages/node/src/library.ts`) resolve during development without a build step.
-
-## Next steps
-
-- `examples/node/intermediate` — subscriptions, workers, cron, Postgres.
-- `examples/node/advanced` — workflows, plugins, multi-replica Docker Compose.
+This runs `tests/app.nodetest.ts` with Node's test runner and in-memory storage. For public package setup, see [Getting Started](../../../docs/getting-started.md). Continue with [background work](../intermediate/README.md) when you need queues or subscriptions.

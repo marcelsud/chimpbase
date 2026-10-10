@@ -1,155 +1,87 @@
 # Getting Started
 
-Chimpbase is a PostgreSQL-backed runtime for building backends that need more than request-response — background jobs, durable queues, cron schedules, workflows — without adding a distributed systems stack before it's necessary.
+Build a small notes API with Bun. It uses SQLite locally, so you do not need a database server or HTTP framework.
 
 ## Install
 
-Choose your runtime:
+In a new project directory, install the single public package:
 
-::: code-group
-
-```bash [Bun]
-bun add @chimpbase/bun
+```bash
+bun add chimpbase
 ```
 
-```bash [Deno]
-deno add npm:@chimpbase/deno
-```
+## Create the app
 
-```bash [Node]
-npm install @chimpbase/node
-```
+Save this as `chimpbase.app.ts`:
 
-:::
+```ts chimpbase-check:getting-started
+import type { ChimpbaseAppDefinitionInput } from "chimpbase/core";
+import { action, route, v } from "chimpbase/runtime";
 
-## Create Your App
-
-Create a `chimpbase.app.ts`. This is the only file you need:
-
-```ts
-import type { ChimpbaseAppDefinitionInput } from "@chimpbase/bun";
-import { action, subscription, worker, v } from "@chimpbase/runtime";
-import { Hono } from "hono";
-import type { ChimpbaseRouteEnv } from "@chimpbase/runtime";
-
-// ── Actions ─────────────────────────────────────────────────────────────
-
-const createCustomer = action({
-  name: "createCustomer",
-  args: v.object({
-    email: v.string(),
-    name: v.string(),
-  }),
+const createNote = action({
+  name: "createNote",
+  args: v.object({ body: v.string() }),
   async handler(ctx, input) {
-    const [customer] = await ctx.db.query(
-      "INSERT INTO customers (email, name) VALUES (?1, ?2) RETURNING id",
-      [input.email, input.name],
-      v.object({ id: v.number() }),
-    );
-
-    ctx.pubsub.publish("customer.created", {
-      customerId: customer.id,
-      email: input.email,
-    });
-
-    return customer;
+    const id = await ctx.collection.insert("notes", input);
+    return { id, ...input };
   },
 });
 
-// ── Subscriptions ───────────────────────────────────────────────────────
-
-const onCustomerCreated = subscription(
-  "customer.created",
-  async (ctx, payload) => {
-    await ctx.enqueue("customer.welcome", payload);
+const listNotes = action({
+  name: "listNotes",
+  async handler(ctx) {
+    return await ctx.collection.find("notes");
   },
-  { idempotent: true, name: "enqueueWelcome" },
-);
-
-// ── Workers ─────────────────────────────────────────────────────────────
-
-const sendWelcome = worker("customer.welcome", async (ctx, payload) => {
-  ctx.log.info("sending welcome email", { email: payload.email });
 });
 
-// ── HTTP Routes ─────────────────────────────────────────────────────────
-
-const api = new Hono<{ Bindings: ChimpbaseRouteEnv }>();
-
-api.post("/customers", async (c) => {
-  const body = await c.req.json();
-  const customer = await c.env.action(createCustomer, body);
-  return c.json(customer, 201);
+const notes = route("GET", "/notes", async (_request, env) => {
+  return Response.json(await env.action(listNotes));
 });
 
-// ── App Definition ──────────────────────────────────────────────────────
+const addNote = route("POST", "/notes", async (request, env) => {
+  const note = await env.action(createNote, await request.json());
+  return Response.json(note, { status: 201 });
+});
 
 export default {
   project: { name: "my-app" },
-  httpHandler: api,
-  migrations: {
-    sqlite: [{
-      name: "001_init",
-      sql: "CREATE TABLE customers (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, name TEXT NOT NULL)",
-    }],
-  },
-  registrations: [
-    createCustomer,
-    onCustomerCreated,
-    sendWelcome,
-  ],
+  registrations: [createNote, listNotes, notes, addNote],
 } satisfies ChimpbaseAppDefinitionInput;
 ```
 
-## Run It
+Actions validate input and run inside a transaction. Routes call those actions over HTTP. Collections store JSON documents without application migrations.
+
+## Run it
 
 ```bash
-bun run chimpbase.app.ts
+bunx chimpbase dev
 ```
 
-The server starts on port 3000 with:
-- A `/health` endpoint
-- Your HTTP routes (via Hono)
-- A background worker processing queued jobs
+The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. SQLite data is stored in `data/my-app.db`. The app file exports a definition; the CLI starts it.
 
-## Choose a Storage Engine
-
-### SQLite (development)
-
-Default — no configuration needed. Data stored in `data/{project-name}.db`.
-
-### PostgreSQL (production)
-
-Set the environment variable:
+In another terminal:
 
 ```bash
-CHIMPBASE_STORAGE_ENGINE=postgres
-DATABASE_URL=postgresql://localhost/mydb
+curl http://localhost:3000/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"First note"}'
+
+curl http://localhost:3000/notes
+curl http://localhost:3000/health
 ```
 
-PostgreSQL supports concurrent workers and coordination across multiple instances.
+The POST returns a note with a generated `id`; GET returns the stored notes. `/health` returns `{"ok":true}`.
 
-### Memory (testing)
+You can also call an action from the CLI:
 
 ```bash
-CHIMPBASE_STORAGE_ENGINE=memory
+bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
 ```
 
-Data is lost on restart. Used for unit tests.
+## Next steps
 
-## What's Next
+- [Actions](/actions), [HTTP routes](/routes) and [collections](/collections) explain the API above.
+- [Workers and queues](/workers) add background jobs; [cron](/cron) adds schedules.
+- [Configuration](/configuration) covers PostgreSQL, Node, Deno and CLI options.
 
-- [Actions](/actions) — define business operations
-- [Subscriptions](/subscriptions) — react to events
-- [Workers & Queues](/workers) — durable background jobs
-- [Cron](/cron) — scheduled tasks
-- [Workflows](/workflows) — long-running processes
-- [HTTP Routes](/routes) — handle HTTP requests with Hono
-- [Database](/database) — raw SQL and Kysely
-- [Configuration](/configuration) — environment variables, custom entry points, and advanced options
-
-### Plugins
-
-- [Auth](/auth) — API key authentication, user management, scopes, rate limiting
-- [Webhooks](/webhooks) — outbound + inbound webhooks with HMAC
-- [REST Collections](/rest-collections) — expose collections as REST APIs
+When you need workflows, framework integrations, plugins or deployment recipes, use the separate [advanced guides](/advanced/).

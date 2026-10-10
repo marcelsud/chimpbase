@@ -1,147 +1,97 @@
 # Configuration
 
-Chimpbase is configured through your app definition (`chimpbase.app.ts`) and environment variables.
+`chimpbase.app.ts` describes your application. The CLI loads it; environment variables select the server and storage settings.
 
-## App Definition
+## App definition
 
-The main entry point is your `chimpbase.app.ts`:
+The [Getting Started](/getting-started) app only needs `project` and `registrations`. Other application settings are optional:
 
-```ts
-import type { ChimpbaseAppDefinitionInput } from "@chimpbase/bun";
+| Field | Purpose |
+|-------|---------|
+| `project.name` | Project identifier; defaults to `chimpbase-app` |
+| `registrations` | Actions, routes, subscriptions, workers and cron jobs |
+| `migrations` | Application SQL migrations; see [database access](/database) |
+| `worker.maxAttempts` | Maximum job attempts; defaults to `5` |
+| `worker.retryDelayMs` | Retry delay; defaults to `1000` |
 
-export default {
-  project: { name: "my-app" },
-  httpHandler: myHonoApp,
-  migrations: { /* ... */ },
-  registrations: [ /* actions, workers, subscriptions, crons, plugins */ ],
-  worker: {
-    maxAttempts: 5,
-    retryDelayMs: 1000,
-  },
-  telemetry: {
-    minLevel: "info",
-    persist: { log: true, metric: true, trace: true },
-  },
-  workflows: {
-    contractsDir: "./workflow-contracts",
-  },
-} satisfies ChimpbaseAppDefinitionInput;
-```
+For telemetry, workflows, modules or a custom HTTP framework, see [advanced guides](/advanced/).
 
-## Environment Variables
+## Storage
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CHIMPBASE_STORAGE_ENGINE` | Storage engine (`postgres`, `sqlite`, `memory`) | `sqlite` |
-| `CHIMPBASE_DATABASE_URL` or `DATABASE_URL` | PostgreSQL connection URL | — |
-| `CHIMPBASE_STORAGE_PATH` | SQLite file path | `data/{name}.db` |
-| `CHIMPBASE_WORKER_CONCURRENCY` | Worker concurrency | `1` |
-| `CHIMPBASE_WORKER_POLL_INTERVAL_MS` | Worker poll interval | `250` |
-| `CHIMPBASE_WORKER_LEASE_MS` | Worker lease duration | `30000` |
-| `CHIMPBASE_ENV_FILE` | Path to `.env` file | `.env` |
-| `CHIMPBASE_SECRETS_DIR` | Path to secrets directory | `/run/secrets` |
+Without configuration, the CLI uses SQLite at `data/{project-name}.db`. SQLite runs in one process and is suitable for local development or a single-runtime deployment.
 
-## Storage Engines
-
-### PostgreSQL (recommended for production)
-
-```ts
-const chimpbase = await createChimpbase({
-  storage: { engine: "postgres", url: process.env.DATABASE_URL! },
-});
-```
-
-Supports concurrent workers, event bus coordination across instances, and is the recommended choice for production.
-
-### SQLite (development)
-
-```ts
-const chimpbase = await createChimpbase({
-  storage: { engine: "sqlite" },
-  // path defaults to data/{project-name}.db
-});
-```
-
-Single-process only. Good for development and testing.
-
-### Memory (testing)
-
-```ts
-const chimpbase = await createChimpbase({
-  storage: { engine: "memory" },
-});
-```
-
-Data is lost on restart. Used for unit tests.
-
-## Runtime Hosts
-
-| Runtime | Package | Install | HTTP Server |
-|---------|---------|---------|-------------|
-| Bun | `@chimpbase/bun` | `bun add @chimpbase/bun` | `Bun.serve()` |
-| Deno | `@chimpbase/deno` | `deno add npm:@chimpbase/deno` | `Deno.serve()` |
-| Node | `@chimpbase/node` | `npm install @chimpbase/node` | `node:http.createServer()` |
-
-All three hosts expose the same API surface: `createChimpbase`, `loadChimpbaseApp`, `startChimpbaseApp`, `runChimpbaseAction`, `syncChimpbaseSchema`, and `syncChimpbaseWorkflowContracts`. Bun ships TypeScript directly with no build step. Node automatically adapts between its callback-based HTTP API and the Web standard `Request`/`Response` that Chimpbase expects.
-
-### Bun CLI
+For PostgreSQL, export a connection URL before starting the CLI:
 
 ```bash
-# Run the app
-bun run chimpbase.app.ts
-
-# Execute an action
-bun run chimpbase.app.ts action -- seedDemoWorkspace '[]'
-
-# Schema management
-bun run chimpbase.app.ts schema generate
-bun run chimpbase.app.ts schema check
+export DATABASE_URL=postgresql://localhost/mydb
+bunx chimpbase dev
 ```
 
-### Deno CLI
+A nonempty `DATABASE_URL` or `CHIMPBASE_DATABASE_URL` selects PostgreSQL automatically. Use PostgreSQL when multiple processes need to share queues or other coordination state.
 
-Deno includes a built-in `runDenoCli()`:
+For temporary data in tests:
 
-```ts
-import { runDenoCli } from "@chimpbase/deno";
-
-await runDenoCli();
+```bash
+CHIMPBASE_STORAGE_ENGINE=memory bunx chimpbase dev
 ```
 
-## Custom Entry Point
+Memory data is lost when the process stops.
 
-By default, `chimpbase.app.ts` is both your app definition and your entry point. For advanced scenarios (custom secrets loading, separate worker processes, environment-specific setup), create a separate `app.ts`:
+## Environment variables
 
-```ts
-import { createChimpbase } from "@chimpbase/bun";
-import { loadLocalSecretStore } from "@chimpbase/tooling/secrets";
-import { normalizeProjectConfig } from "@chimpbase/core";
-import appDefinition from "./chimpbase.app.ts";
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `CHIMPBASE_SERVER_PORT` or `PORT` | HTTP port | `3000` |
+| `CHIMPBASE_STORAGE_ENGINE` | `sqlite`, `postgres` or `memory` | SQLite unless a database URL is set |
+| `CHIMPBASE_DATABASE_URL` or `DATABASE_URL` | PostgreSQL connection URL | Unset |
+| `CHIMPBASE_STORAGE_PATH` | SQLite file path | `data/{project-name}.db` |
+| `CHIMPBASE_WORKER_CONCURRENCY` | PostgreSQL worker concurrency | `1` |
+| `CHIMPBASE_WORKER_POLL_INTERVAL_MS` | Worker poll interval | `250` |
+| `CHIMPBASE_WORKER_LEASE_MS` | Worker lease duration | `30000` |
+| `CHIMPBASE_ENV_FILE` | File loaded for `ctx.secret(...)` | `.env` |
+| `CHIMPBASE_SECRETS_DIR` | Directory loaded for `ctx.secret(...)` | `/run/secrets` |
 
-const secrets = await loadLocalSecretStore(
-  import.meta.dir,
-  normalizeProjectConfig({ secrets: { dir: "run/secrets", envFile: ".env" } }),
-);
+`CHIMPBASE_DATABASE_URL` takes precedence over `DATABASE_URL`; `CHIMPBASE_SERVER_PORT` takes precedence over `PORT`. `memory` explicitly selects memory storage. A database URL takes precedence over `CHIMPBASE_STORAGE_ENGINE=sqlite`; use a programmatic `storage.engine` override to force SQLite in that case.
 
-const chimpbase = await createChimpbase({
-  ...appDefinition,
-  projectDir: import.meta.dir,
-  secrets,
-  storage: { engine: "postgres", url: process.env.DATABASE_URL! },
-});
+The secret loader combines `.env`, process environment and mounted secret files, in that order; later values win. It does not copy `.env` values into the process environment. Export runtime configuration variables in your shell or provide them through your process manager.
 
-await chimpbase.start();
+## CLI
+
+Run these commands from the directory containing `chimpbase.app.ts`. Use `--project-dir PATH` for another directory.
+
+```bash
+# HTTP server and background worker
+bunx chimpbase dev
+
+# HTTP server only
+bunx chimpbase dev --serve
+
+# Background worker only
+bunx chimpbase dev --worker
+
+# Call an action; --args is JSON
+bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
 ```
 
-### Start Options
+The schema commands create or check `db/schema.snapshot.json` and `db/schema.generated.ts` from application migrations. They use a temporary PostgreSQL database through Docker; they do not generate migration SQL.
 
-```ts
-// Start both HTTP server and background worker (default)
-chimpbase.start();
-
-// HTTP server only (no background worker)
-chimpbase.start({ serve: true, runWorker: false });
-
-// Worker only (no HTTP server)
-chimpbase.start({ serve: false, runWorker: true });
+```bash
+bunx chimpbase schema generate
+bunx chimpbase schema check
 ```
+
+Workflow contract and module commands are documented in [advanced guides](/advanced/).
+
+## Runtime hosts
+
+All hosts use the same `chimpbase` package and portable `chimpbase/runtime` API:
+
+| Host | Host import | Start command |
+|------|-------------|---------------|
+| Bun | `chimpbase/runtime/bun` | `bunx chimpbase dev` |
+| Node | `chimpbase/runtime/node` | `npx chimpbase-node dev` |
+| Deno | `npm:chimpbase/runtime/deno` | `deno run -A npm:chimpbase/runtime/deno/cli dev` |
+
+For Node, install with `npm install chimpbase` and use a Node release that supports loading `.ts` files and `node:sqlite`. For Deno, install with `deno add npm:chimpbase`; the CLI needs permissions to open the database, load project files and serve HTTP.
+
+For a custom entry point or separate HTTP and worker processes, see [app composition](/advanced/app-composition).

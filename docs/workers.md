@@ -25,7 +25,7 @@ await ctx.enqueue("reminder.send", { userId: 42 }, {
 ## Defining Workers
 
 ```ts
-import { worker } from "@chimpbase/runtime";
+import { worker } from "chimpbase/runtime";
 
 const sendEmail = worker("email.send", async (ctx, payload) => {
   ctx.log.info("sending email", { to: payload.to });
@@ -54,7 +54,7 @@ PostgreSQL holds the claimed job's row lock throughout execution, so an expired 
 When a job fails after all retry attempts, it's moved to a DLQ. Register a DLQ worker to handle failed jobs:
 
 ```ts
-import { worker, type ChimpbaseDlqEnvelope } from "@chimpbase/runtime";
+import { worker, type ChimpbaseDlqEnvelope } from "chimpbase/runtime";
 
 const emailWorker = worker("email.send", sendEmailHandler);
 

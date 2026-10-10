@@ -1,8 +1,6 @@
-# examples/deno/basic
+# Deno basic example
 
-Smallest runnable Chimpbase app on Deno. Two actions + one HTTP route over SQLite. Zero plugins.
-
-**Requires Deno 2.0+** (`node:sqlite` built-in, stable `fetch`, `Deno.serve`).
+A runnable orders app with actions and HTTP routes over SQLite. Requires Deno 2+. The local `deno.json` imports repository source; this example is outside the Bun workspace.
 
 ## Run
 
@@ -11,35 +9,24 @@ cd examples/deno/basic
 deno task dev
 ```
 
-Or from the repo root:
+The server listens on port 3000; set `PORT` to change it.
 
 ```bash
-bun run dev:deno:basic
-```
-
-Server listens on port 3000 by default.
-
-```bash
-curl -X POST localhost:3000/orders \
+curl -X POST http://localhost:3000/orders \
   -H "Content-Type: application/json" \
   -d '{"customer":"alice@example.com","amount":4200}'
-
-curl localhost:3000/orders
-curl localhost:3000/health       # built-in: { "ok": true }
+curl http://localhost:3000/orders
+curl http://localhost:3000/health
 ```
+
+`chimpbase.app.ts` defines actions and routes, `chimpbase.migrations.ts` defines the table, and `app.ts` starts the runtime.
 
 ## Tests
 
+From the same example directory:
+
 ```bash
-cd examples/deno/basic
 deno task test
 ```
 
-## Why this example lives outside the Bun workspace
-
-Deno does not participate in the root `package.json` workspace. Instead, `deno.json` carries an `imports` map that resolves `@chimpbase/*` to the workspace source in `../../../packages/*` and npm specifiers (`pg`, `kysely`) to Deno's npm compatibility layer. `nodeModulesDir: "auto"` lets Deno hydrate a local `node_modules/` so the Postgres driver can read native bindings if Postgres storage is selected.
-
-## Next steps
-
-- `examples/deno/intermediate` — subscriptions, workers, cron, Postgres.
-- `examples/deno/advanced` — workflows, plugins, multi-replica Docker Compose.
+Tests use in-memory storage. For public package setup, see [Getting Started](../../../docs/getting-started.md). Continue with [background work](../intermediate/README.md) when you need queues or subscriptions.

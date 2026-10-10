@@ -7,7 +7,7 @@ Actions are the core unit of business logic in Chimpbase. They can be called fro
 ### Simple (tuple args)
 
 ```ts
-import { action } from "@chimpbase/runtime";
+import { action } from "chimpbase";
 
 const greetUser = action("greetUser", async (ctx, name: string) => {
   ctx.log.info("greeting user", { name });
@@ -18,7 +18,7 @@ const greetUser = action("greetUser", async (ctx, name: string) => {
 ### With validation (object args)
 
 ```ts
-import { action, v } from "@chimpbase/runtime";
+import { action, v } from "chimpbase";
 
 const createTodo = action({
   name: "createTodo",
@@ -48,29 +48,14 @@ Every action handler receives a `ChimpbaseContext` as its first argument:
 (ctx: ChimpbaseContext, ...args) => TResult | Promise<TResult>
 ```
 
-The context provides access to all Chimpbase primitives:
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `ctx.db` | `ChimpbaseDbClient` | Raw SQL + Kysely queries |
-| `ctx.collection` | `ChimpbaseCollectionClient` | Document CRUD |
-| `ctx.kv` | `ChimpbaseKvClient` | Key-value store |
-| `ctx.stream` | `ChimpbaseStreamClient` | Append-only event streams |
-| `ctx.queue` | `ChimpbaseQueueClient` | Enqueue worker jobs |
-| `ctx.workflow` | `ChimpbaseWorkflowClient` | Start/signal workflows |
-| `ctx.pubsub` | `ChimpbasePubSubClient` | Publish events |
-| `ctx.log` | `ChimpbaseLogger` | Structured logging |
-| `ctx.metric()` | method | Record metrics |
-| `ctx.trace()` | method | Distributed tracing |
-| `ctx.secret()` | method | Read secrets |
-| `ctx.action()` | method | Call other actions |
+The context provides database access, collections, event publication and job queues. See [Context](/context) for the API reference.
 
 ## Calling Actions
 
 ### From another action
 
 ```ts
-const dashboard = action("getDashboard", async (ctx) => {
+const getDashboard = action("getDashboard", async (ctx) => {
   const todos = await ctx.action("listTodos", { status: "backlog" });
   return { backlog: todos.length };
 });
@@ -79,10 +64,12 @@ const dashboard = action("getDashboard", async (ctx) => {
 ### From an HTTP route
 
 ```ts
-app.post("/todos", async (c) => {
-  const body = await c.req.json();
-  const todo = await c.env.action(createTodo, body);
-  return c.json(todo, 201);
+import { route } from "chimpbase/runtime";
+
+const todosRoute = route("todos", async (request, env) => {
+  if (new URL(request.url).pathname !== "/todos" || request.method !== "POST") return null;
+  const todo = await env.action(createTodo, await request.json());
+  return Response.json(todo, { status: 201 });
 });
 ```
 
@@ -94,26 +81,14 @@ When you store an action in a variable, you can pass the reference directly inst
 const result = await ctx.action(createTodo, { title: "Ship it", projectSlug: "core" });
 ```
 
-## Telemetry
-
-Control per-action telemetry persistence:
-
-```ts
-const noisyAction = action("pollStatus", async (ctx) => {
-  // ...
-}, { telemetry: false }); // suppress all telemetry
-
-const importantAction = action("chargeCustomer", async (ctx) => {
-  // ...
-}, { telemetry: { log: true, metric: true, trace: true } });
-```
+For per-action persistence and export options, see [Telemetry](/advanced/telemetry).
 
 ## Validators
 
 The `v` namespace provides runtime input validation:
 
-```ts
-import { v } from "@chimpbase/runtime";
+```ts chimpbase-check:validators
+import { v } from "chimpbase";
 
 v.string()                          // string
 v.number()                          // number
@@ -121,7 +96,7 @@ v.boolean()                         // boolean
 v.null()                            // null
 v.unknown()                         // unknown
 v.optional(v.string())              // string | undefined
-v.nullable(v.string())              // string | null
+v.string().nullable()               // string | null
 v.array(v.string())                 // string[]
 v.union(v.string(), v.null())       // string | null
 v.enum(["low", "medium", "high"])   // "low" | "medium" | "high"

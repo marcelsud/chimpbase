@@ -63,16 +63,6 @@
         "hono": "^4.12.5",
       },
     },
-    "examples/docs-validation": {
-      "name": "@chimpbase/docs-validation",
-      "dependencies": {
-        "@chimpbase/auth": "workspace:*",
-        "@chimpbase/bun": "workspace:*",
-        "@chimpbase/rest-collections": "workspace:*",
-        "@chimpbase/runtime": "workspace:*",
-        "@chimpbase/webhooks": "workspace:*",
-      },
-    },
     "examples/node/advanced": {
       "name": "@chimpbase/example-node-advanced",
       "dependencies": {
@@ -334,8 +324,6 @@
     "@chimpbase/core": ["@chimpbase/core@workspace:packages/core"],
 
     "@chimpbase/deno": ["@chimpbase/deno@workspace:packages/deno"],
-
-    "@chimpbase/docs-validation": ["@chimpbase/docs-validation@workspace:examples/docs-validation"],
 
     "@chimpbase/example-bun-advanced": ["@chimpbase/example-bun-advanced@workspace:examples/bun/advanced"],
 

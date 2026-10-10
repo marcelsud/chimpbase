@@ -850,6 +850,11 @@ export type ChimpbaseRouteHandler<TActions extends ChimpbaseActionMap = Chimpbas
   env: ChimpbaseRouteEnv<TActions>,
 ) => Response | null | Promise<Response | null>;
 
+export type ChimpbaseMatchedRouteHandler<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> = (
+  request: Request,
+  env: ChimpbaseRouteEnv<TActions> & { readonly params: Readonly<Record<string, string>> },
+) => Response | null | Promise<Response | null>;
+
 export interface ChimpbaseRegistrationTarget {
   bindActionInvoker?(reference: ChimpbaseActionRegistrationLike): void;
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
@@ -1290,11 +1295,58 @@ export function cron<TResult = unknown>(
 export function route<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
   name: string,
   handler: ChimpbaseRouteHandler<TActions>,
+): ChimpbaseRouteRegistration<TActions>;
+export function route<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
+  method: string,
+  path: string,
+  handler: ChimpbaseMatchedRouteHandler<TActions>,
+): ChimpbaseRouteRegistration<TActions>;
+export function route<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
+  nameOrMethod: string,
+  pathOrHandler: string | ChimpbaseRouteHandler<TActions>,
+  handler?: ChimpbaseMatchedRouteHandler<TActions>,
 ): ChimpbaseRouteRegistration<TActions> {
+  if (typeof pathOrHandler === "string") {
+    if (handler === undefined) throw new TypeError("route(method, path, handler) requires a handler");
+    if (!pathOrHandler.startsWith("/") || /[?#]/.test(pathOrHandler)) {
+      throw new TypeError("route path must be an absolute pathname without a query or fragment");
+    }
+    const method = nameOrMethod.toUpperCase();
+    const pattern = new URL("http://localhost");
+    pattern.pathname = pathOrHandler;
+    const segments = pattern.pathname.split("/");
+    const names = segments.filter((segment) => segment.startsWith(":")).map((segment) => segment.slice(1));
+    if (names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) || new Set(names).size !== names.length) {
+      throw new TypeError("route parameter names must be unique identifiers");
+    }
+
+    return route<TActions>(`${method} ${pathOrHandler}`, (request, env) => {
+      if (request.method !== method) return null;
+      const requested = new URL(request.url).pathname.split("/");
+      if (requested.length !== segments.length) return null;
+
+      const params: Record<string, string> = Object.create(null);
+      for (let index = 0; index < segments.length; index++) {
+        const segment = segments[index];
+        if (segment.startsWith(":")) {
+          if (requested[index] === "") return null;
+          try {
+            params[segment.slice(1)] = decodeURIComponent(requested[index]);
+          } catch {
+            return null;
+          }
+        } else if (segment !== requested[index]) {
+          return null;
+        }
+      }
+      return handler(request, { ...env, params });
+    });
+  }
+
   return {
-    handler,
+    handler: pathOrHandler,
     kind: "route",
-    name,
+    name: nameOrMethod,
   };
 }
 

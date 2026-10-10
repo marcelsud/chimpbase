@@ -5,7 +5,7 @@ Every handler has access to the database via `ctx.db`. Chimpbase supports Postgr
 ## Raw SQL
 
 ```ts
-import { v } from "@chimpbase/runtime";
+import { v } from "chimpbase/runtime";
 
 const users = await ctx.db.query(
   "SELECT id, email FROM users WHERE status = ?1",
@@ -35,15 +35,6 @@ await ctx.db.query(
 ### Return type
 
 `ctx.db.query(sql, params, validator)` validates every returned row at the database boundary and returns the validator's inferred type. Invalid rows throw with their exact row and field path.
-
-### Engine adapters
-
-Custom `ChimpbaseEngineAdapter` implementations must implement `persistEvents(events)` separately
-from `commitTransaction()`. Move event insertion, ID assignment, and durable subscription job
-insertion out of the old `commitTransaction(events)` method into `persistEvents(events)`, which
-runs inside the open transaction and may be called for multiple batches of cascading events.
-`commitTransaction()` now only commits that transaction. This lets synchronous subscriptions
-use persisted event IDs while their writes and idempotency markers still roll back with the publisher.
 
 ## Kysely (type-safe queries)
 
@@ -130,27 +121,6 @@ still run on every startup.
 
 ## Storage Configuration
 
-Custom storage adapters implementing `ChimpbaseEngineAdapter` must provide
-`kvSetIfAbsent(key, value, ttlMs?)`: atomically write an absent or expired key and
-return `true`, or preserve an existing live key and return `false`. The write must
-use the adapter's current transaction so rollback also releases the reservation.
-Built-in adapters provide this operation for `ctx.kv.setIfAbsent` and inbound webhook deduplication.
+Storage is selected by the host, separately from your app definition. See [Configuration](/configuration) for SQLite, PostgreSQL, and memory settings.
 
-Configure storage in your app definition:
-
-```ts
-const chimpbase = await createChimpbase({
-  storage: {
-    engine: "postgres",                       // "postgres" | "sqlite" | "memory"
-    url: "postgresql://localhost/mydb",        // for postgres
-    // path: "./data/app.db",                 // for sqlite
-  },
-});
-```
-
-Or via environment variables:
-
-```
-CHIMPBASE_STORAGE_ENGINE=postgres
-CHIMPBASE_DATABASE_URL=postgresql://localhost/mydb
-```
+For engine integrations, see [Custom storage adapters](/advanced/storage-adapters).

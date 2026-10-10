@@ -182,7 +182,7 @@
   "scripts": {
     "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host deno node bun rest-collections otel auth blobs webhooks pact mesh",
     "build:check": "node ./scripts/build-package.mjs --check",
-    "ci:check": "bun run modules:check && bun run typecheck && bun run check:any && bun run test && bun run publish:dry-run",
+    "ci:check": "bun run modules:check && bun run typecheck && bun run check:any && bun run test && bun run docs:check && bun run docs:build && bun run publish:dry-run",
     "check:any": "node ./scripts/check-any.mjs",
     "modules:check": "bun packages/bun/src/cli.ts modules check --project-dir examples/modular-monolith",
     "dev:bun:basic": "bun run --filter @chimpbase/example-bun-basic dev",
@@ -200,6 +200,7 @@
     "release:publish": "npm publish",
     "smoke:package": "node ./scripts/smoke-package.mjs",
     "docs:dev": "vitepress dev docs",
+    "docs:check": "bun run build:publish:packages && node ./scripts/check-docs.mjs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "docs:deploy": "vitepress build docs && wrangler pages deploy docs/.vitepress/dist --project-name chimpbase-docs",
