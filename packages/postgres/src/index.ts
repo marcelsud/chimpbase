@@ -16,6 +16,7 @@ import type {
 import {
   assertChimpbaseModuleCompiledSql,
   createChimpbaseEventDeliveryPayloads,
+  paginateChimpbaseBlobMetadata,
 } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
@@ -919,44 +920,43 @@ export function createPostgresEngineAdapter(
       options: ChimpbaseBlobListOptions,
     ): Promise<ChimpbaseBlobListMetaResult> {
       const prefix = options.prefix ?? "";
-      const delimiter = options.delimiter ?? null;
-      const limit = Math.min(Math.max(options.limit ?? 1000, 1), 1000);
-      const cursor = options.cursor ?? "";
-      const result = await queryable().query<{
-        bucket: string;
-        key: string;
-        size: string;
-        etag: string;
-        content_type: string;
-        metadata: string;
-        driver_ref: string;
-        created_at: string;
-        updated_at: string;
-      }>(
-        `
-          SELECT bucket, key, size::text AS size, etag, content_type,
-                 metadata::text AS metadata, driver_ref,
-                 created_at::text AS created_at, updated_at::text AS updated_at
-          FROM _chimpbase_blobs
-          WHERE bucket = $1
-            AND key LIKE $2
-            AND key > $3
-          ORDER BY key ASC
-          LIMIT $4
-        `,
-        [bucket, `${prefix}%`, cursor, limit + 1],
-      );
-      return sliceBlobList(result.rows.map((row) => ({
-        bucket: row.bucket,
-        key: row.key,
-        size: Number(row.size),
-        etag: row.etag,
-        contentType: row.content_type,
-        metadata: parseStringRecord(row.metadata, "blob metadata"),
-        driverRef: row.driver_ref,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      })), prefix, delimiter, limit);
+      return await paginateChimpbaseBlobMetadata(options, async (cursor, limit) => {
+        const result = await queryable().query<{
+          bucket: string;
+          key: string;
+          size: string;
+          etag: string;
+          content_type: string;
+          metadata: string;
+          driver_ref: string;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `
+            SELECT bucket, key, size::text AS size, etag, content_type,
+                   metadata::text AS metadata, driver_ref,
+                   created_at::text AS created_at, updated_at::text AS updated_at
+            FROM _chimpbase_blobs
+            WHERE bucket = $1
+              AND key LIKE $2
+              AND key > $3
+            ORDER BY key ASC
+            LIMIT $4
+          `,
+          [bucket, `${prefix}%`, cursor, limit],
+        );
+        return result.rows.map((row) => ({
+          bucket: row.bucket,
+          key: row.key,
+          size: Number(row.size),
+          etag: row.etag,
+          contentType: row.content_type,
+          metadata: parseStringRecord(row.metadata, "blob metadata"),
+          driverRef: row.driver_ref,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }));
+      });
     },
     async blobInitUpload(row: ChimpbaseBlobUploadRow): Promise<void> {
       await queryable().query(
@@ -1166,40 +1166,6 @@ export function createPostgresEngineAdapter(
   };
 }
 
-function sliceBlobList(
-  rows: ChimpbaseBlobMetaRow[],
-  prefix: string,
-  delimiter: string | null,
-  limit: number,
-): ChimpbaseBlobListMetaResult {
-  const entries: ChimpbaseBlobMetaRow[] = [];
-  const commonPrefixes = new Set<string>();
-  let nextCursor: string | null = null;
-  for (const row of rows) {
-    if (entries.length + commonPrefixes.size >= limit) {
-      nextCursor = entries.length > 0 ? entries[entries.length - 1].key : row.key;
-      break;
-
-    }
-    if ((delimiter !== null && delimiter.length > 0)) {
-      const after = row.key.slice(prefix.length);
-      const idx = after.indexOf(delimiter);
-      if (idx >= 0) {
-        commonPrefixes.add(prefix + after.slice(0, idx + delimiter.length));
-        continue;
-      }
-    }
-    entries.push(row);
-  }
-  if (!(nextCursor !== null && nextCursor.length > 0) && rows.length > limit) {
-    nextCursor = rows[limit - 1]?.key ?? null;
-  }
-  return {
-    entries,
-    commonPrefixes: [...commonPrefixes].sort(),
-    nextCursor,
-  };
-}
 
 function normalizePostgresSql(sql: string): string {
   return sql.replace(/\?(\d+)/g, (_match: string, index: string) => `$${index}`);

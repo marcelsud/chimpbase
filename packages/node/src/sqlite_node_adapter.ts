@@ -16,7 +16,7 @@ import type {
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
-import { createChimpbaseEventDeliveryPayloads } from "@chimpbase/core";
+import { createChimpbaseEventDeliveryPayloads, paginateChimpbaseBlobMetadata } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobUploadListOptions,
@@ -949,30 +949,28 @@ export function createSqliteEngineAdapter(
       options: ChimpbaseBlobListOptions,
     ): Promise<ChimpbaseBlobListMetaResult> {
       const prefix = options.prefix ?? "";
-      const delimiter = options.delimiter ?? null;
-      const cursor = options.cursor ?? "";
-      const limit = Math.min(Math.max(options.limit ?? 1000, 1), 1000);
-      const rows = parseRows(db.query(
-        `
-          SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
-          FROM _chimpbase_blobs
-          WHERE bucket = ?1 AND key LIKE ?2 AND key > ?3
-          ORDER BY key ASC
-          LIMIT ?4
-        `,
-      ).all(bucket, `${prefix}%`, cursor, limit + 1), blobMetadataRowValidator, "blob metadata rows");
-      const mapped: ChimpbaseBlobMetaRow[] = rows.map((row) => ({
-        bucket: row.bucket,
-        key: row.key,
-        size: Number(row.size),
-        etag: row.etag,
-        contentType: row.content_type,
-        metadata: parseStringRecord(row.metadata_json, "blob metadata"),
-        driverRef: row.driver_ref,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }));
-      return sliceBlobList(mapped, prefix, delimiter, limit);
+      return await paginateChimpbaseBlobMetadata(options, async (cursor, limit) => {
+        const rows = parseRows(db.query(
+          `
+            SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
+            FROM _chimpbase_blobs
+            WHERE bucket = ?1 AND key LIKE ?2 AND key > ?3
+            ORDER BY key ASC
+            LIMIT ?4
+          `,
+        ).all(bucket, `${prefix}%`, cursor, limit), blobMetadataRowValidator, "blob metadata rows");
+        return rows.map((row) => ({
+          bucket: row.bucket,
+          key: row.key,
+          size: Number(row.size),
+          etag: row.etag,
+          contentType: row.content_type,
+          metadata: parseStringRecord(row.metadata_json, "blob metadata"),
+          driverRef: row.driver_ref,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }));
+      });
     },
     async blobInitUpload(row: ChimpbaseBlobUploadRow): Promise<void> {
       db.query(
@@ -1118,39 +1116,6 @@ export function createSqliteEngineAdapter(
   };
 }
 
-function sliceBlobList(
-  rows: ChimpbaseBlobMetaRow[],
-  prefix: string,
-  delimiter: string | null,
-  limit: number,
-): ChimpbaseBlobListMetaResult {
-  const entries: ChimpbaseBlobMetaRow[] = [];
-  const commonPrefixes = new Set<string>();
-  let nextCursor: string | null = null;
-  for (const row of rows) {
-    if (entries.length + commonPrefixes.size >= limit) {
-      nextCursor = entries.length > 0 ? entries[entries.length - 1].key : row.key;
-      break;
-    }
-    if ((delimiter !== null && delimiter.length > 0)) {
-      const after = row.key.slice(prefix.length);
-      const idx = after.indexOf(delimiter);
-      if (idx >= 0) {
-        commonPrefixes.add(prefix + after.slice(0, idx + delimiter.length));
-        continue;
-      }
-    }
-    entries.push(row);
-  }
-  if (!(nextCursor !== null && nextCursor.length > 0) && rows.length > limit) {
-    nextCursor = rows[limit - 1]?.key ?? null;
-  }
-  return {
-    entries,
-    commonPrefixes: [...commonPrefixes].sort(),
-    nextCursor,
-  };
-}
 
 function createSqliteDatabase(db: DatabaseSync): SqliteDatabase {
   return {

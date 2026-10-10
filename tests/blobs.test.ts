@@ -15,6 +15,60 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 const cleanupDirs: string[] = [];
 
+const paginationFixtures = [
+  { name: "folders", keys: ["a/one", "b/one", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
+  { name: "large folder", keys: [...Array.from({ length: 1002 }, (_, i) => `a/${String(i).padStart(4, "0")}`), "b/one", "b/two", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
+  { name: "one full batch", keys: Array.from({ length: 1000 }, (_, i) => `a/${String(i).padStart(4, "0")}`), delimiter: "/", expected: ["a/"] },
+  { name: "mixed files and folders", keys: ["a.txt", "b/one", "b/two", "c.txt", "d/one", "d/two", "e.txt"], delimiter: "/", expected: ["a.txt", "b/", "c.txt", "d/", "e.txt"] },
+  { name: "files", keys: ["a/one", "a/two", "b/one"], delimiter: "", expected: ["a/one", "a/two", "b/one"] },
+  { name: "custom prefix and delimiter", keys: ["docs::a::one", "docs::a::two", "docs::b::one", "docs::file", "other"], prefix: "docs::", delimiter: "::", expected: ["docs::a::", "docs::b::", "docs::file"] },
+  { name: "empty", keys: [], delimiter: "/", expected: [] },
+];
+
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
+  for (const fixture of paginationFixtures) {
+    for (const limit of [1, 2]) {
+      const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+      const runTest = engine === "postgres" && !pgUrl ? test.skip : test;
+      runTest(`blob pagination walks ${fixture.name} with limit ${limit} (${engine})`, async () => {
+        const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-blobs-pagination-"));
+        cleanupDirs.push(projectDir);
+        const bucket = `pagination-${crypto.randomUUID()}`;
+        const host = await createChimpbase({
+          projectDir,
+          storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+          blobs: { driver: memoryBlobDriver(), buckets: [bucket] },
+          registrations: [action("seedPagination", async (ctx) => {
+            for (const key of fixture.keys) await ctx.blobs.put(bucket, key, new Uint8Array([1]));
+          }), action("cleanupPagination", async (ctx) => await ctx.blobs.deleteMany(bucket, fixture.keys))],
+        });
+        try {
+          await host.executeAction("seedPagination");
+          const returned: string[] = [];
+          let cursor: string | undefined;
+          const blobs = host.routeEnv().blobs;
+          for (let pageNumber = 0; pageNumber <= fixture.expected.length; pageNumber++) {
+            const page = await blobs.list(bucket, { prefix: fixture.prefix, delimiter: fixture.delimiter, limit, cursor });
+            const results = [...page.entries.map((entry) => entry.key), ...page.commonPrefixes];
+            expect(results.length).toBeLessThanOrEqual(limit);
+            returned.push(...results);
+            if (page.nextCursor === null) break;
+            expect(results.length).toBe(limit);
+            expect(page.nextCursor > (cursor ?? "")).toBe(true);
+            cursor = page.nextCursor;
+            if (pageNumber === fixture.expected.length) throw new Error("pagination did not terminate");
+          }
+          expect(returned.sort()).toEqual(fixture.expected);
+          expect(new Set(returned).size).toBe(returned.length);
+        } finally {
+          try { await host.executeAction("cleanupPagination"); }
+          finally { await host.close(); }
+        }
+      });
+    }
+  }
+}
+
 afterEach(async () => {
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();

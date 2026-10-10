@@ -425,6 +425,39 @@ export interface ChimpbaseBlobListMetaResult {
   nextCursor: string | null;
 }
 
+export async function paginateChimpbaseBlobMetadata(
+  options: ChimpbaseBlobListOptions,
+  fetchRows: (cursor: string, limit: number) => Promise<ChimpbaseBlobMetaRow[]>,
+): Promise<ChimpbaseBlobListMetaResult> {
+  const prefix = options.prefix ?? "";
+  const delimiter = options.delimiter ?? "";
+  const limit = Math.min(Math.max(options.limit ?? 1000, 1), 1000);
+  const batchSize = delimiter.length > 0 ? 1000 : limit + 1;
+  const entries: ChimpbaseBlobMetaRow[] = [];
+  const commonPrefixes = new Set<string>();
+  let cursor = options.cursor ?? "";
+  while (true) {
+    const rows = await fetchRows(cursor, batchSize);
+    for (const row of rows) {
+      const index = delimiter.length > 0 ? row.key.indexOf(delimiter, prefix.length) : -1;
+      const group = index >= 0 ? row.key.slice(0, index + delimiter.length) : null;
+      if (group !== null && commonPrefixes.has(group)) {
+        cursor = row.key;
+        continue;
+      }
+      if (entries.length + commonPrefixes.size >= limit) {
+        return { entries, commonPrefixes: [...commonPrefixes].sort(), nextCursor: cursor };
+      }
+      if (group !== null) commonPrefixes.add(group);
+      else entries.push(row);
+      cursor = row.key;
+    }
+    if (rows.length < batchSize) {
+      return { entries, commonPrefixes: [...commonPrefixes].sort(), nextCursor: null };
+    }
+  }
+}
+
 export interface ChimpbaseBlobUploadListMetaResult {
   uploads: ChimpbaseBlobUploadRow[];
   nextCursor: string | null;
