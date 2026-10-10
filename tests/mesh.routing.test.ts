@@ -13,7 +13,8 @@ import {
   service,
   type NodeRecord,
 } from "../packages/mesh/src/index.ts";
-import { onStart, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { action, onStart, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
 
 const actionName = "v1.identity.get";
 
@@ -84,6 +85,54 @@ function dispatcherFor(
 }
 
 describe("@chimpbase/mesh routing", () => {
+  test("retries a draining HTTP host on a healthy replica before executing the target", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-mesh-failover-"));
+    const hosts = await Promise.all([0, 1].map(() => createChimpbase({
+      projectDir, storage: { engine: "memory" }, secrets: { get: () => "failover-token" },
+    })));
+    const visited: number[] = [];
+    const calls = [0, 0];
+    const servers = hosts.map((host, index) => Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch: async (request) => {
+        visited.push(index);
+        return (await host.executeRoute(request)).response ?? new Response("not found", { status: 404 });
+      },
+    }));
+    const active = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    for (const [index, host] of hosts.entries()) {
+      host.register(chimpbaseMesh({
+        advertisedUrl: `http://127.0.0.1:${servers[index].port}`,
+        meshToken: "TOKEN", heartbeatMs: 0,
+        services: [service({ name: "identity", actions: { get: () => { calls[index]++; return "ok"; } } })],
+      }));
+    }
+    hosts[0].register(action("hold", async () => { active.resolve(); await release.promise; }));
+    const started = await Promise.all(hosts.map(host => host.start({ serve: false, runWorker: false })));
+    const held = hosts[0].executeAction("hold");
+    await active.promise;
+    const stopping = started[0].stop();
+    try {
+      await withContext(async (ctx) => {
+        const dispatch = dispatcherFor(servers.map((server, index) => ({
+          ...peer(`replica-${index}`), advertisedUrl: `http://127.0.0.1:${server.port}`,
+        })), createHttpDispatcher({ callerNodeId: "caller", rpcPath: "/__chimpbase/mesh/rpc", tokenProvider: () => "failover-token" }));
+        expect(await dispatch(ctx, actionName, {}, v.string(), { retry: { attempts: 1, delayMs: 0 } })).toBe("ok");
+      });
+      expect(visited).toEqual([0, 1]);
+      expect(calls).toEqual([0, 1]);
+    } finally {
+      release.resolve();
+      await held;
+      await stopping;
+      await started[1].stop();
+      for (const server of servers) server.stop(true);
+      for (const host of hosts) await host.close();
+      await rm(projectDir, { recursive: true, force: true });
+    }
+  });
+
   test("local-first retries another remote node and resets exclusions for each call", async () => {
     await withContext(async (ctx) => {
       const visited: string[] = [];

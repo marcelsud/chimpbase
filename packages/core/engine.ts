@@ -32,6 +32,8 @@ import type {
   ChimpbaseLogger,
   ChimpbaseQueueEnqueueOptions,
   ChimpbaseRouteEnv,
+  ChimpbaseRouteHandler,
+  ChimpbaseRouteRegistration,
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
   ChimpbaseTelemetryAttributes,
@@ -170,6 +172,12 @@ export interface ChimpbaseQueueExecutionResult {
 export interface ChimpbaseRouteExecutionResult {
   emittedEvents: ChimpbaseEventRecord[];
   response: Response | null;
+}
+
+export interface ChimpbasePreparedRoute {
+  handlers: ReadonlyMap<ChimpbaseRouteRegistration, ChimpbaseRouteHandler | Response | null>;
+  response: Response | null;
+  concurrencyGroup?: "rpc";
 }
 
 export interface ChimpbaseCronScheduleExecutionResult {
@@ -711,7 +719,37 @@ export class ChimpbaseEngine {
     }
   }
 
-  async executeRoute(request: Request): Promise<ChimpbaseRouteExecutionResult> {
+  async prepareRoute(request: Request): Promise<ChimpbasePreparedRoute> {
+    const handlers = new Map<ChimpbaseRouteRegistration, ChimpbaseRouteHandler | Response | null>();
+    let canRespondEarly = true;
+    let concurrencyGroup: "rpc" | undefined;
+    for (const route of this.registry.routes) {
+      if (route.prepare === undefined) {
+        canRespondEarly = false;
+        continue;
+      }
+      // Guards, later preparers and fallthrough handlers may still inspect the original body.
+      const input = request.clone();
+      const prepared = await route.prepare(input, { secret: (name) => this.secrets.get(name) });
+      if (prepared === null || prepared instanceof Response) {
+        void input.body?.cancel().catch(() => {});
+      }
+      handlers.set(route, prepared);
+      if (prepared instanceof Response) {
+        if (canRespondEarly) void request.body?.cancel().catch(() => {});
+        return { handlers, response: canRespondEarly ? prepared : null, concurrencyGroup };
+      }
+      if (prepared !== null) {
+        canRespondEarly = false;
+        concurrencyGroup ??= route.concurrencyGroup;
+      }
+    }
+    return { handlers, response: null, concurrencyGroup };
+  }
+
+  async executeRoute(request: Request, prepared?: ChimpbasePreparedRoute): Promise<ChimpbaseRouteExecutionResult> {
+    const preparation = prepared ?? await this.prepareRoute(request);
+    if (preparation.response !== null) return { emittedEvents: [], response: preparation.response };
     const telemetryStart = this.telemetryRecords.length;
     const url = new URL(request.url, "http://localhost");
     const scope: ChimpbaseExecutionScope = {
@@ -726,10 +764,15 @@ export class ChimpbaseEngine {
       const routeContext = new Map<string, unknown>();
       let invoke = async () => {
         for (const route of this.registry.routes) {
+          const handler = preparation.handlers.has(route)
+            ? preparation.handlers.get(route)
+            : route.handler;
+          if (handler === null || handler === undefined) continue;
+          if (handler instanceof Response) return handler;
           const moduleName = this.registry.registrationOwnership.get(`route:${route.name}`) ?? null;
           const routeEnv = this.createRouteEnv(moduleName, routeContext);
           const matched = await this.runInTransaction(async () => await this.runWithActionInvoker(
-            async () => await route.handler(request, routeEnv),
+            async () => await handler(request, routeEnv),
             moduleName,
           ));
           if (matched !== null && matched !== undefined) {

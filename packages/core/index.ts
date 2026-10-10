@@ -46,6 +46,8 @@ export interface ChimpbaseProjectConfig {
     engine: "memory" | "postgres" | "sqlite";
     path: string | null;
     url: string | null;
+    connectionTimeoutMs?: number;
+    queryTimeoutMs?: number;
   };
   subscriptions: {
     dispatch: "async" | "sync";
@@ -88,6 +90,8 @@ export interface ChimpbaseProjectConfigInput {
     engine?: "memory" | "postgres" | "sqlite";
     path?: string | null;
     url?: string | null;
+    connectionTimeoutMs?: number;
+    queryTimeoutMs?: number;
   };
   subscriptions?: {
     dispatch?: "async" | "sync";
@@ -244,7 +248,11 @@ export interface ChimpbaseEntrypointTarget {
     schedule: string,
     handler: ChimpbaseCronHandler<TResult>,
   ): ChimpbaseCronHandler<TResult>;
-  registerRoute(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler;
+  registerRoute(
+    name: string,
+    handler: ChimpbaseRouteHandler,
+    options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
+  ): ChimpbaseRouteHandler;
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
   ): ChimpbaseWorkflowDefinition<TInput, TState>;
@@ -265,6 +273,8 @@ export function normalizeProjectConfig(
       engine: input.storage?.engine ?? "sqlite",
       path: input.storage?.path ?? null,
       url: input.storage?.url ?? null,
+      ...(input.storage?.connectionTimeoutMs === undefined ? {} : { connectionTimeoutMs: input.storage.connectionTimeoutMs }),
+      ...(input.storage?.queryTimeoutMs === undefined ? {} : { queryTimeoutMs: input.storage.queryTimeoutMs }),
     },
     subscriptions: {
       dispatch: input.subscriptions?.dispatch ?? "sync",
@@ -439,6 +449,7 @@ export {
   type ChimpbaseEventDeliveryPayload,
   type ChimpbaseEventRecord,
   type ChimpbaseExecutionScope,
+  type ChimpbasePreparedRoute,
   type ChimpbaseQueueExecutionResult,
   type ChimpbaseQueueJobRecord,
   type ChimpbaseRouteExecutionResult,

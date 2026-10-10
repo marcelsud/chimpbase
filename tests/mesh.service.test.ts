@@ -33,6 +33,48 @@ async function createMeshHost() {
 }
 
 describe("@chimpbase/mesh service()", () => {
+  test("inherits lifecycle hooks from nested mixins for service resource initialization and cleanup", async () => {
+    const host = await createMeshHost();
+    let ready = false;
+    const calls: string[] = [];
+    const base = service({
+      name: "resource",
+      started: (_ctx, self) => { ready = true; calls.push(`start:${self.name}`); },
+      stopped: () => { ready = false; calls.push("stop"); },
+      actions: { available: () => ready },
+    });
+    host.register(chimpbaseMesh({
+      services: [service({ name: "consumer", mixins: [service({ name: "nested", mixins: [base] })] })],
+      transport: "local-only", heartbeatMs: 0,
+    }));
+    try {
+      const started = await host.start({ serve: false, runWorker: false });
+      try {
+        expect((await host.executeAction("v1.consumer.available")).result).toBe(true);
+        expect(calls).toEqual(["start:consumer"]);
+      } finally {
+        await started.stop();
+      }
+      expect(ready).toBe(false);
+      expect(calls).toEqual(["start:consumer", "stop"]);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("lifecycle hooks use the last defined mixin then service precedence", () => {
+    const first = service({ name: "first", started: () => {}, stopped: () => {} });
+    const second = service({ name: "second", started: () => {}, stopped: () => {} });
+    const noHooks = service({ name: "empty" });
+    const inherited = resolveService(service({ name: "inherited", mixins: [first, second, noHooks] }));
+    expect(inherited.started).toBe(second.started);
+    expect(inherited.stopped).toBe(second.stopped);
+    const own = service({ name: "own", mixins: [first, second], started: () => {}, stopped: () => {} });
+    const resolved = resolveService(own);
+    expect(resolved.started).toBe(own.started);
+    expect(resolved.stopped).toBe(own.stopped);
+  });
+
   test("shared mixin ancestors merge without being treated as cycles", async () => {
     const host = await createMeshHost();
     try {

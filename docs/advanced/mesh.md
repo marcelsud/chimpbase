@@ -39,7 +39,7 @@ const users = service({
 });
 ```
 
-`mixins` merge actions, events, methods, and settings before registration. Multiple mixins may share a base; circular references are rejected. Later mixins take precedence, followed by the service's own definitions.
+`mixins` merge actions, events, methods, settings, and lifecycle hooks before registration. Multiple mixins may share a base; circular references are rejected. Later mixins take precedence, followed by the service's own definitions. Lifecycle hooks are inherited individually from the last mixin defining that hook; hooks are not composed.
 
 ## `chimpbaseMesh(options)`
 
@@ -72,6 +72,8 @@ host.register(
 | `advertisedUrl` | env/hostname fallback | URL peers use to reach this node's RPC endpoint. |
 | `meshToken` | — | Secret name (via `ctx.secret`) for authenticating inbound RPC. Required when `transport: "http"`. |
 | `rpcPath` | `/__chimpbase/mesh/rpc` | Route registered on this node to receive RPC. |
+| `rpcBodyTimeoutMs` | 5000 | Maximum time to read an authenticated inbound RPC body before starting its transaction. |
+| `rpcMaxBodyBytes` | 1048576 | Maximum inbound RPC body size in bytes (1 MiB). |
 | `heartbeatMs` | 10000 | Interval between heartbeats. |
 | `offlineAfterMs` | 30000 | Peers with no heartbeat within this window are treated as offline. |
 | `gcAfterMs` | 600000 | Cron sweep removes rows older than this. |
@@ -109,7 +111,7 @@ Methods:
 - `nodeId()` — this node's UUID (regenerated each boot).
 - `peers()` — current live peers from the local cache.
 
-Retries apply to remote transport failures, remote timeouts, and unavailable nodes. Application errors and invalid results are not retried. Result validation errors also bypass fallback.
+Retries apply to remote transport failures, remote timeouts, unavailable nodes, and a host's explicit 503 rejection before action execution during shutdown or saturation. Ordinary application HTTP 503 responses and other application errors are not retried. Invalid results also bypass retry and fallback.
 
 A remote timeout does not guarantee that the receiving action stopped or rolled back. Retry remote actions only when repeated execution is safe, such as an operation that deduplicates by a request ID.
 
@@ -160,6 +162,8 @@ When `transport: "http"`, the plugin registers:
 
 - Route `POST /__chimpbase/mesh/rpc` — validates the `x-chimpbase-mesh-token` header (timing-safe compare against `ctx.secret(meshToken)`) and forwards to the target action.
 - Action `__chimpbase.mesh.rpc.execute` — the per-call dispatch invoked by the RPC route.
+
+The route authenticates the token before reading JSON. Body preparation runs before opening a database transaction: invalid tokens receive 401, oversized bodies 413, and stalled bodies 408. Readers are cancelled on rejection. Authenticated actions still execute in a transaction and recheck the token, action allowlist, and absolute deadline; failures roll back their writes and emitted events. Earlier registered route guards retain their order, including prepared rejections.
 
 ### Interaction with `chimpbase/auth`
 
