@@ -15,6 +15,135 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 const cleanupDirs: string[] = [];
 
+for (const engine of ["sqlite", "postgres"] as const) {
+  for (const condition of ["ifNoneMatch", "ifMatch"] as const) {
+    const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+    (engine === "postgres" && !pgUrl ? test.skip : test)(`parallel conditional puts in one transaction retain only the winner (${engine}, ${condition})`, async () => {
+      const driver = memoryBlobDriver();
+      const bucket = `parallel-${crypto.randomUUID()}`;
+      const host = await createChimpbase({
+        storage: engine === "postgres" ? { engine, url: pgUrl } : { engine, path: ":memory:" },
+        blobs: { driver, buckets: [bucket] },
+      });
+      const put = driver.put.bind(driver);
+      const refs: string[] = [];
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      let writes = 0;
+      try {
+        const options = condition === "ifNoneMatch" ? { ifNoneMatch: "*" }
+          : { ifMatch: (await host.routeEnv().blobs.put(bucket, "key", new Uint8Array([0]))).etag };
+        driver.put = async (...args) => {
+          const first = ++writes === 1;
+          if (first) await blocked;
+          const result = await put(...args);
+          refs.push(result.driverRef);
+          if (!first) release();
+          return result;
+        };
+        host.register(action("parallelPuts", async (ctx) => {
+          const results = await Promise.allSettled([
+            ctx.blobs.put(bucket, "key", new Uint8Array([1]), options),
+            ctx.blobs.put(bucket, "key", new Uint8Array([2]), options),
+          ]);
+          expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") {
+            const reason: unknown = failure.reason;
+            expect(reason).toMatchObject({ name: "ChimpbasePreconditionFailedError" });
+          }
+        }));
+        await host.executeAction("parallelPuts");
+        const row = await host.engine.getBlobsAdapter().blobGetMetadata(bucket, "key");
+        expect(row).not.toBeNull();
+        for (const ref of refs) {
+          const object = await driver.get(bucket, "key", ref);
+          if (ref === row?.driverRef) expect(object === null ? null : [...new Uint8Array(await new Response(object.body).arrayBuffer())]).toEqual([2]);
+          else expect(object).toBeNull();
+        }
+      } finally {
+        release();
+        await host.routeEnv().blobs.delete(bucket, "key");
+        await host.close();
+      }
+    });
+  }
+}
+
+describe("PostgreSQL blob concurrency", () => {
+  const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+  const pgTest = pgUrl ? test : test.skip;
+
+  for (const condition of ["ifNoneMatch", "ifMatch"] as const) {
+    pgTest(`concurrent ${condition} puts accept only one writer`, async () => {
+      const driver = memoryBlobDriver();
+      const bucket = `conditional-${crypto.randomUUID()}`;
+      const a = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, blobs: { driver, buckets: [bucket] } });
+      const b = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, blobs: { driver, buckets: [bucket] } });
+      let firstStarted!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { firstStarted = resolve; });
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const put = driver.put.bind(driver);
+      let writes = 0;
+      let running: Promise<unknown>[] = [];
+      try {
+        const options = condition === "ifNoneMatch"
+          ? { ifNoneMatch: "*" }
+          : { ifMatch: (await a.routeEnv().blobs.put(bucket, "key", new Uint8Array([0]))).etag };
+        driver.put = async (...args) => {
+          if (++writes === 1) { firstStarted(); await blocked; }
+          return await put(...args);
+        };
+        const first = a.routeEnv().blobs.put(bucket, "key", new Uint8Array([1]), options);
+        running = [first];
+        await entered;
+        const second = b.routeEnv().blobs.put(bucket, "key", new Uint8Array([2]), options);
+        running.push(second);
+        const results = Promise.allSettled(running);
+        await Bun.sleep(100);
+        release();
+        const settled = await results;
+        expect(settled.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+        const rejected = settled[1];
+        if (rejected?.status === "rejected") {
+          const reason: unknown = rejected.reason;
+          expect(reason).toMatchObject({ name: "ChimpbasePreconditionFailedError" });
+        }
+        const object = await b.routeEnv().blobs.get(bucket, "key");
+        expect(object === null ? null : [...new Uint8Array(await new Response(object.body).arrayBuffer())]).toEqual([1]);
+        expect(writes).toBe(1);
+      } finally {
+        release();
+        await Promise.allSettled(running);
+        await a.routeEnv().blobs.delete(bucket, "key");
+        await a.close();
+        await b.close();
+      }
+    });
+  }
+
+  pgTest("separate filesystem drivers share bytes and survive one host closing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "chimpbase-shared-blobs-"));
+    cleanupDirs.push(root);
+    const bucket = `shared-${crypto.randomUUID()}`;
+    const a = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, blobs: { driver: fsBlobDriver({ root }), buckets: [bucket] } });
+    const b = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, blobs: { driver: fsBlobDriver({ root }), buckets: [bucket] } });
+    let closed = false;
+    try {
+      await a.routeEnv().blobs.put(bucket, "key", new TextEncoder().encode("shared file"));
+      await a.close();
+      closed = true;
+      const object = await b.routeEnv().blobs.get(bucket, "key");
+      expect(object === null ? null : await new Response(object.body).text()).toBe("shared file");
+    } finally {
+      if (!closed) await a.close();
+      await b.routeEnv().blobs.delete(bucket, "key");
+      await b.close();
+    }
+  });
+});
+
 describe("filesystem blob path containment", () => {
   test("bucket traversal and outside references cannot read, write or delete outside the root", async () => {
     const dir = await mkdtemp(join(tmpdir(), "chimpbase-blobs-containment-"));

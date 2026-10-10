@@ -127,6 +127,8 @@ restCollections({
 });
 ```
 
+Versions are stored in collection metadata; legacy documents can still provide a `schemaVersion` field. Metadata is read only when a transform needs it. A list with `onRead` fetches the collection's metadata in one batch; a list without `onRead` skips that read.
+
 ## Registration
 
 ```ts

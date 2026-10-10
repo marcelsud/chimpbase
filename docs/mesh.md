@@ -1,6 +1,6 @@
 # Mesh
 
-`@chimpbase/mesh` adds Moleculer-style services with a distributed registry built on Chimpbase primitives — no broker required. Every participating node advertises itself into a Postgres registry table and discovers peers via `LISTEN/NOTIFY`. Actions can be called locally or routed to a peer over HTTP.
+`@chimpbase/mesh` adds Moleculer-style services with a distributed registry built on Chimpbase primitives — no broker required. Every participating node advertises itself into a Postgres registry table and refreshes its peers from that registry on startup and each heartbeat. Actions can be called locally or routed to a peer over HTTP.
 
 Install:
 
@@ -39,7 +39,7 @@ const users = service({
 });
 ```
 
-`mixins` deep-merge actions, events, methods, and settings before registration.
+`mixins` merge actions, events, methods, and settings before registration. Multiple mixins may share a base; circular references are rejected. Later mixins take precedence, followed by the service's own definitions.
 
 ## `chimpbaseMesh(options)`
 
@@ -124,9 +124,9 @@ CREATE TABLE IF NOT EXISTS _chimpbase_mesh_nodes (
 );
 ```
 
-- **Heartbeat** — `setInterval` updates `last_heartbeat_ms` and publishes `__chimpbase.mesh.info.heartbeat`.
-- **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop (reuses `PostgresListenEventBus`).
-- **Cache** — every node keeps a live in-memory peer cache refreshed by announce/leave/heartbeat events; falls back to a direct `SELECT` on startup.
+- **Heartbeat** — `setInterval` updates `last_heartbeat_ms` and reloads live peers from the registry. PostgreSQL heartbeat queries use a separate adapter after startup, so active request transactions cannot hide or roll back them. Slow heartbeats do not overlap, and shutdown waits for the active heartbeat.
+- **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop. Shutdown waits for active host operations before deleting this node's registry row.
+- **Cache** — every node replaces its in-memory peer snapshot from the registry on startup and each heartbeat. Announce/leave/heartbeat events can update it between refreshes; peers past `offlineAfterMs` expire locally.
 - **GC** — cron `* * * * *` sweeps rows older than `gcAfterMs`.
 
 ## Balanced events

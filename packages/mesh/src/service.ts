@@ -53,7 +53,7 @@ export function resolveService(
   };
 
   for (const mixin of def.mixins ?? []) {
-    const resolved = resolveService(mixin, seen);
+    const resolved = resolveService(mixin, new Set(seen));
     Object.assign(merged.actions, resolved.actions);
     Object.assign(merged.events, resolved.events);
     Object.assign(merged.methods, resolved.methods);

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { isArrayValue } from "@chimpbase/runtime";
 import type { ChimpbaseContext, ChimpbaseValidator } from "@chimpbase/runtime";
 
@@ -36,6 +38,7 @@ export type RemoteDispatcher = (params: {
 const roundRobinCounters = new Map<string, number>();
 
 export function createCallDispatcher(options: CallResolverOptions) {
+  const contexts = new AsyncLocalStorage<ChimpbaseContext>();
   const core = async <TResult>(
     ctx: ChimpbaseContext,
     actionName: string,
@@ -122,12 +125,12 @@ export function createCallDispatcher(options: CallResolverOptions) {
     wrapped = options.middleware[i](wrapped);
   }
 
-  let ctxSlot: ChimpbaseContext | null = null;
   const currentCtx = (): ChimpbaseContext => {
-    if (!(ctxSlot !== null)) {
+    const ctx = contexts.getStore();
+    if (ctx === undefined) {
       throw new MeshCallError("", null, "mesh dispatcher invoked without an active context");
     }
-    return ctxSlot;
+    return ctx;
   };
 
   return async <TResult>(
@@ -137,13 +140,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
     result: ChimpbaseValidator<TResult>,
     callOpts: CallOptions,
   ): Promise<TResult> => {
-    const previous = ctxSlot;
-    ctxSlot = ctx;
-    try {
-      return await wrapped(actionName, args, result, callOpts);
-    } finally {
-      ctxSlot = previous;
-    }
+    return await contexts.run(ctx, () => wrapped(actionName, args, result, callOpts));
   };
 }
 

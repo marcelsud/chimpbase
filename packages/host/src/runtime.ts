@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
   ChimpbaseEngine,
@@ -177,6 +178,7 @@ export interface RuntimeHostInstanceOptions<TServer> {
 }
 
 const IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX = "_chimpbase.sub.seen:";
+const engineOperationContext = new AsyncLocalStorage<{ active: boolean; host: object }>();
 const POSTGRES_WORKER_QUEUE_BATCH_SIZE = 8;
 const RESERVED_ENGINE_QUEUE_NAMES = new Set([
   "__chimpbase.cron.run",
@@ -613,7 +615,9 @@ export class ChimpbaseHost<TServer> {
     const runServe = options.serve ?? !(options.runWorker === true);
     const runWorker = options.runWorker ?? !(options.serve === true);
     for (const hook of this.registry.onStartHooks) {
-      await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+      await this.runEngineOperation(async () => {
+        await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+      });
     }
 
     const worker = runWorker ? this.startWorker() : null;
@@ -625,7 +629,7 @@ export class ChimpbaseHost<TServer> {
       runWorker,
       storage: this.config.storage.engine,
     });
-    this.engine.startEventBus();
+    this.engine.startEventBus(async (operation) => await this.runEngineOperation(operation));
 
     return {
       host: this,
@@ -633,7 +637,9 @@ export class ChimpbaseHost<TServer> {
       stop: async () => {
         for (const hook of this.registry.onStopHooks) {
           try {
-            await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+            await this.runEngineOperation(async () => {
+              await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+            });
           } catch (err) {
             console.error(`onStop hook "${hook.name}" failed:`, err);
           }
@@ -784,9 +790,18 @@ export class ChimpbaseHost<TServer> {
   }
 
   private async runEngineOperation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    const current = engineOperationContext.getStore();
+    if (current?.host === this && current.active) return await operation();
     const queued = this.serializedEngineOperations
       .catch(() => undefined)
-      .then(operation);
+      .then(async () => {
+        const context = { active: true, host: this };
+        try {
+          return await engineOperationContext.run(context, operation);
+        } finally {
+          context.active = false;
+        }
+      });
 
     this.serializedEngineOperations = queued.then(() => undefined, () => undefined);
     return await queued;
@@ -905,6 +920,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
     : undefined;
   const createPrimaryEngine = () => new ChimpbaseEngine({
     adapter: storageResources.createAdapter(),
+    createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter() : undefined,
     blobs: blobsEngineConfig,
     eventBus: storageResources.eventBus,
     platform,

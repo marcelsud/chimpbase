@@ -146,7 +146,10 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   const cache = new MeshPeerCache(offlineAfterMs);
   const startedAtMs = Date.now();
-  const heartbeatState: { timer: ReturnType<typeof setInterval> | null } = { timer: null };
+  const heartbeatState: {
+    running: Promise<void> | null;
+    timer: ReturnType<typeof setInterval> | null;
+  } = { running: null, timer: null };
 
   const remoteDispatcher: RemoteDispatcher | null = transport === "http"
     ? createHttpDispatcher({
@@ -292,10 +295,15 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
       if (heartbeatMs > 0) {
         heartbeatState.timer = setInterval(() => {
-          void emitHeartbeat({
+          if (heartbeatState.running !== null) return;
+          heartbeatState.running = refreshHeartbeat({
+            cache,
             ctx,
             metadata,
             nodeId,
+            offlineAfterMs,
+          }).finally(() => {
+            heartbeatState.running = null;
           });
         }, heartbeatMs);
         if (hasUnref(heartbeatState.timer)) {
@@ -306,11 +314,13 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   );
 
   entries.push(
-    onStop("__chimpbase.mesh.shutdown", async () => {
+    onStop("__chimpbase.mesh.shutdown", async (ctx) => {
       if ((heartbeatState.timer !== null)) {
         clearInterval(heartbeatState.timer);
         heartbeatState.timer = null;
       }
+      await heartbeatState.running;
+      await ctx.action("__chimpbase.mesh.deregister");
 
       for (const svc of services) {
         if ((svc.stopped !== undefined)) {
@@ -360,21 +370,18 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 }
 
 interface HeartbeatArgs {
+  cache: MeshPeerCache;
   ctx: ChimpbaseContext;
   metadata: Record<string, unknown>;
   nodeId: string;
+  offlineAfterMs: number;
 }
 
-async function emitHeartbeat(args: HeartbeatArgs): Promise<void> {
+async function refreshHeartbeat(args: HeartbeatArgs): Promise<void> {
   try {
-    const heartbeatAt = await touchHeartbeat(args.ctx, args.nodeId, args.metadata);
-    if (heartbeatAt > 0) {
-      args.ctx.pubsub.publish(INFO_EVENT_HEARTBEAT, {
-        lastHeartbeatMs: heartbeatAt,
-        metadata: args.metadata,
-        nodeId: args.nodeId,
-      } satisfies HeartbeatPayload);
-    }
+    await touchHeartbeat(args.ctx, args.nodeId, args.metadata);
+    const live = await listLiveNodes(args.ctx, Date.now() - args.offlineAfterMs);
+    args.cache.seed(live.filter((peer) => peer.nodeId !== args.nodeId));
   } catch (error) {
     args.ctx.log.warn("mesh heartbeat failed", {
       error: error instanceof Error ? error.message : String(error),

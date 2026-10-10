@@ -25,6 +25,8 @@ const notes = await ctx.collection.find("notes", { todoId: 42 });
 const recent = await ctx.collection.find("notes", {}, { limit: 10 });
 ```
 
+Filters compare top-level fields with strict equality. Strings, numbers, booleans and `null` match their JSON values; `undefined` matches a missing field. Objects and arrays are not compared structurally. Results are ordered by document ID. PostgreSQL applies filters and limits in the database.
+
 ## Find One
 
 ```ts
@@ -42,6 +44,8 @@ const updated = await ctx.collection.update(
 );
 // returns number of documents updated
 ```
+
+Patches replace top-level fields; nested objects are replaced rather than merged. Setting a field to `undefined` removes it from the stored JSON. PostgreSQL merges each patch atomically, so concurrent patches to different fields preserve both changes.
 
 ## Delete
 

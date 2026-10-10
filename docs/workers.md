@@ -47,6 +47,8 @@ A completion or commit failure rolls them back before retrying. Telemetry or eve
 failures after commit do not reopen a completed job. External effects such as sending
 email still need idempotency because they cannot roll back with the database.
 
+PostgreSQL holds the claimed job's row lock throughout execution, so an expired lease cannot reclaim a job while its handler transaction is active. After a host disconnects, the lock releases and the expired lease can be recovered. Batched claims check their attempt number before execution; a stale claim or failure callback cannot overwrite a newer attempt's state.
+
 ## Dead Letter Queue (DLQ)
 
 When a job fails after all retry attempts, it's moved to a DLQ. Register a DLQ worker to handle failed jobs:

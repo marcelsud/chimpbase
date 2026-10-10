@@ -11,7 +11,9 @@ import {
   type MeshCallMiddleware,
 } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { v } from "../packages/runtime/index.ts";
+import { onStart, v, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { createCallDispatcher } from "../packages/mesh/src/call.ts";
+import { MeshPeerCache } from "../packages/mesh/src/discovery.ts";
 import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
 
 
@@ -73,6 +75,61 @@ test("HTTP dispatcher wraps malformed JSON as MeshCallError", async () => {
 });
 
 describe("@chimpbase/mesh ctx.mesh.call", () => {
+  test("overlapping middleware calls keep their own action context", async () => {
+    const hostA = await createMeshHost();
+    const hostB = await createMeshHost();
+    let ctxA: ChimpbaseContext | undefined;
+    let ctxB: ChimpbaseContext | undefined;
+    hostA.register(
+      chimpbaseMesh({ services: [service({ name: "identity", actions: { get: () => "a" } })], transport: "local-only" }),
+      onStart("capture-a", (ctx) => { ctxA = ctx; }),
+    );
+    hostB.register(
+      chimpbaseMesh({ services: [service({ name: "identity", actions: { get: () => "b" } })], transport: "local-only" }),
+      onStart("capture-b", (ctx) => { ctxB = ctx; }),
+    );
+
+    const startedA = await hostA.start({ serve: false, runWorker: false });
+    const startedB = await hostB.start({ serve: false, runWorker: false });
+    let releaseA = () => {};
+    let releaseB = () => {};
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    try {
+      if (ctxA === undefined || ctxB === undefined) throw new Error("contexts missing");
+      const dispatcher = createCallDispatcher({
+        cache: new MeshPeerCache(30_000),
+        defaultRetries: 0,
+        defaultStrategy: "local-first",
+        defaultTimeoutMs: 1_000,
+        localActionNames: new Set(["v1.identity.get"]),
+        localNodeId: "local",
+        middleware: [(next) => async (name, args, validator, options) => {
+          await (args === "a" ? gateA : gateB);
+          return await next(name, args, validator, options);
+        }],
+        remoteDispatcher: null,
+      });
+      const first = dispatcher(ctxA, "v1.identity.get", "a", v.string(), {});
+      const second = dispatcher(ctxB, "v1.identity.get", "b", v.string(), {});
+      try {
+        releaseA();
+        expect(await first).toBe("a");
+        releaseB();
+        expect(await second).toBe("b");
+      } finally {
+        releaseA();
+        releaseB();
+        await Promise.allSettled([first, second]);
+      }
+    } finally {
+      await startedA.stop();
+      await startedB.stop();
+      await hostA.close();
+      await hostB.close();
+    }
+  });
+
   test("uses fallback when no node serves the action", async () => {
     const host = await createMeshHost();
     try {

@@ -45,7 +45,7 @@ The handler receives the full `ChimpbaseContext` and the event payload.
 
 ## Idempotency
 
-Mark subscriptions as idempotent when replay safety matters. The framework stores a marker in KV after successful execution — if the same event is delivered again, the handler is skipped.
+Mark subscriptions as idempotent when replay safety matters. The framework atomically reserves a KV marker before invoking the handler, in the same database transaction. Concurrent deliveries wait for that transaction and skip the handler after a successful commit; a rollback removes the reservation so delivery can retry. External effects still need their own idempotency key when a handler can fail after sending them.
 
 ```ts
 subscription("payment.captured", handlePayment, {
@@ -100,6 +100,10 @@ engine.startEventBus();
 ```
 
 Each process gets a unique `originId` — events published by a process are filtered out of its own `LISTEN` stream, so in-process subscriptions are not double-dispatched.
+
+Hosts serialize bus deliveries with their actions, routes, and worker drains. When using `ChimpbaseEngine` directly, pass the same operation scheduler used for those calls to `startEventBus(runOperation)`. Nested `ctx.action` calls keep using the current transaction.
+
+The polling transport filters the IDs committed by its own process without skipping earlier peer events. It advances its cursor after successful delivery, so failed callbacks retry on the next poll.
 
 ### Payload size
 

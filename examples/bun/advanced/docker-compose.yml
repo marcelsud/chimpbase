@@ -37,8 +37,14 @@ services:
       OTEL_SERVICE_NAME: bun-advanced
       CHIMPBASE_WORKER_CONCURRENCY: "5"
       CHIMPBASE_WORKER_POLL_INTERVAL_MS: "500"
+      ATTACHMENTS_ROOT: /var/chimpbase/attachments
       PORT: "3000"
+    volumes:
+      - attachments:/var/chimpbase/attachments
     ports:
       - "3000-3002:3000"
     deploy:
       replicas: 3
+
+volumes:
+  attachments:

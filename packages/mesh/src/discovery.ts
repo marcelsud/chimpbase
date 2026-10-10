@@ -28,6 +28,7 @@ export class MeshPeerCache {
   constructor(private readonly offlineAfterMs: number) {}
 
   seed(records: readonly NodeRecord[]): void {
+    this.peers.clear();
     for (const record of records) {
       this.peers.set(record.nodeId, record);
     }

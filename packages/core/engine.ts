@@ -340,6 +340,7 @@ export interface ChimpbaseEngineAdapter {
   ): Promise<number>;
   commitTransaction(): Promise<void>;
   completeQueueJob(jobId: number): Promise<void>;
+  lockQueueJob?(jobId: number, attempt: number): Promise<boolean>;
   deleteCronSchedule(scheduleName: string): Promise<void>;
   getQueueJobPayload(jobId: number): Promise<string | null>;
   insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean>;
@@ -375,7 +376,8 @@ export interface ChimpbaseEngineAdapter {
     cronExpression: string,
     nextFireAtMs: number,
   ): Promise<void>;
-  blobPutMetadata(row: ChimpbaseBlobMetaRow): Promise<void>;
+  blobLockMetadata?(bucket: string, key: string): Promise<void>;
+  blobPutMetadata(row: ChimpbaseBlobMetaRow, conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">): Promise<void>;
   blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null>;
   blobDeleteMetadata(bucket: string, key: string): Promise<boolean>;
   blobListMetadata(bucket: string, options: ChimpbaseBlobListOptions): Promise<ChimpbaseBlobListMetaResult>;
@@ -532,6 +534,7 @@ export interface ChimpbaseBlobSigner {
 
 export interface ChimpbaseEngineOptions {
   adapter: ChimpbaseEngineAdapter;
+  createDetachedAdapter?: () => ChimpbaseEngineAdapter;
   blobs?: ChimpbaseBlobsEngineConfig;
   eventBus?: ChimpbaseEventBus;
   platform?: ChimpbasePlatformShim;
@@ -554,6 +557,7 @@ export interface ChimpbaseEngineOptions {
 
 export class ChimpbaseEngine {
   private readonly adapter: ChimpbaseEngineAdapter;
+  private readonly createDetachedAdapter: ChimpbaseEngineOptions["createDetachedAdapter"];
   private readonly blobsConfig: ChimpbaseBlobsEngineConfig | null;
   private blobsBucketsReady = false;
   private readonly blobCommitCleanups: (() => Promise<void>)[] = [];
@@ -574,6 +578,7 @@ export class ChimpbaseEngine {
 
   constructor(options: ChimpbaseEngineOptions) {
     this.adapter = options.adapter;
+    this.createDetachedAdapter = options.createDetachedAdapter;
     this.blobsConfig = options.blobs ?? null;
     this.eventBus = options.eventBus ?? new NoopEventBus();
     this.platform = options.platform ?? createDefaultChimpbasePlatformShim();
@@ -634,9 +639,12 @@ export class ChimpbaseEngine {
     });
   }
 
-  startEventBus(): void {
-    this.eventBus.start(async (events, ack) => {
+  startEventBus(
+    runOperation: (operation: () => Promise<void>) => Promise<void> = async (operation) => await operation(),
+  ): void {
+    this.eventBus.start(async (events, ack) => await runOperation(async () => {
       const telemetryStart = this.telemetryRecords.length;
+      const committedEventsStart = this.committedEvents.length;
       try {
         this.telemetryExecutionDepth += 1;
         const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
@@ -644,14 +652,14 @@ export class ChimpbaseEngine {
           await this.enqueueSubscriptionDispatchJobs(legacyEvents);
         } else {
           await this.runInTransaction(async () => await this.dispatchSubscriptions(legacyEvents));
-          this.takeCommittedEvents();
+          this.committedEvents.splice(committedEventsStart);
           await this.flushTelemetryToStreams(undefined, telemetryStart);
         }
         await ack?.();
       } finally {
         this.finishTelemetryExecution();
       }
-    });
+    }));
   }
 
   stopEventBus(): void {
@@ -872,7 +880,8 @@ export class ChimpbaseEngine {
 
     const results: ChimpbaseQueueExecutionResult[] = [];
     for (const job of claimedJobs) {
-      results.push(await this.processClaimedQueueJob(job));
+      const result = await this.processClaimedQueueJob(job);
+      if (result !== null) results.push(result);
     }
 
     return results;
@@ -910,7 +919,7 @@ export class ChimpbaseEngine {
     return queueNames;
   }
 
-  private async processClaimedQueueJob(job: ChimpbaseQueueJobRecord): Promise<ChimpbaseQueueExecutionResult> {
+  private async processClaimedQueueJob(job: ChimpbaseQueueJobRecord): Promise<ChimpbaseQueueExecutionResult | null> {
     const telemetryStart = this.telemetryRecords.length;
     const worker = this.registry.workers.get(job.queue_name);
     if (!(worker !== undefined)) {
@@ -926,6 +935,7 @@ export class ChimpbaseEngine {
     };
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
     let committed = false;
+    let executed = false;
 
     try {
       this.telemetryExecutionDepth += 1;
@@ -937,6 +947,8 @@ export class ChimpbaseEngine {
 
       let invoke = async () => {
         await this.runInTransaction(async () => {
+          if (this.adapter.lockQueueJob !== undefined && !await this.adapter.lockQueueJob(job.id, job.attempt_count)) return;
+          executed = true;
           await this.runWithActionInvoker(async () => {
             await workerHandler(this.createContext(scope), payload, { attempt: job.attempt_count });
           });
@@ -955,6 +967,11 @@ export class ChimpbaseEngine {
 
       await invoke();
 
+      if (!executed) {
+        for (const span of handlerSpans) span.end("ok");
+        return null;
+      }
+
       const emittedEvents = this.takeCommittedEvents();
       await this.flushTelemetryToStreams(scope, telemetryStart);
 
@@ -968,15 +985,13 @@ export class ChimpbaseEngine {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const onFailure = worker.definition.onFailure;
-      if (!committed && onFailure !== undefined) {
-        await this.runInTransaction(async () => {
-          await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null);
-          await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
-        });
-        this.takeCommittedEvents();
-        await this.flushTelemetryToStreams(scope, telemetryStart);
-      } else if (!committed) {
-        await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count);
+      if (!committed) {
+        await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count, onFailure === undefined ? undefined :
+          async () => await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null));
+        if (onFailure !== undefined) {
+          this.takeCommittedEvents();
+          await this.flushTelemetryToStreams(scope, telemetryStart);
+        }
       }
       for (const span of handlerSpans) span.end("error", message);
       throw error;
@@ -1198,13 +1213,17 @@ export class ChimpbaseEngine {
     moduleName: string | null = null,
     name = "__lifecycle",
   ): Promise<void> {
+    const detachedAdapter = this.createDetachedAdapter?.();
+    let active = true;
     try {
       this.telemetryExecutionDepth += 1;
       await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
-        const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name });
+        const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name },
+          () => active ? this.adapter : detachedAdapter ?? this.adapter);
         await handler(ctx);
       }, moduleName));
     } finally {
+      active = false;
       this.finishTelemetryExecution();
     }
   }
@@ -1263,7 +1282,10 @@ export class ChimpbaseEngine {
     }
   }
 
-  private createContext(scope: ChimpbaseExecutionScope): ChimpbaseContext {
+  private createContext(
+    scope: ChimpbaseExecutionScope,
+    queryAdapter: () => ChimpbaseEngineAdapter = () => this.adapter,
+  ): ChimpbaseContext {
     const moduleName = scope.module;
     const schema = moduleName === null ? null : chimpbaseModuleSchemaName(moduleName);
     const qualify = (kind: string, name: string): string =>
@@ -1290,6 +1312,7 @@ export class ChimpbaseEngine {
       params: readonly unknown[] = [],
       validator?: ChimpbaseValidator<T>,
     ): Promise<T[] | Record<string, unknown>[]> {
+      const adapter = queryAdapter();
       if (moduleName !== null && schema !== null) {
         assertChimpbaseModuleRuntimeSql(moduleName, schema, sql);
       }
@@ -2718,24 +2741,21 @@ export class ChimpbaseEngine {
         await this.runInTransaction(async () => {
           if (sub.idempotent && event.id !== undefined) {
             const key = `_chimpbase.sub.seen:${event.id}:${sub.name}`;
-            if ((await this.adapter.kvGet(key, v.boolean()) === true)) return;
-            await this.runWithActionInvoker(async () => {
-              await subscriptionHandler(this.createContext({
-                kind: "subscription",
-                module: sub.module ?? null,
-                name: `${event.name}:${sub.name}`,
-              }), payload);
-            }, sub.module ?? null);
-            await this.adapter.kvSet(key, true);
-          } else {
-            await this.runWithActionInvoker(async () => {
-              await subscriptionHandler(this.createContext({
-                kind: "subscription",
-                module: sub.module ?? null,
-                name: `${event.name}:${sub.name}`,
-              }), payload);
-            }, sub.module ?? null);
+            const reserved = await this.adapter.query(
+              `INSERT INTO _chimpbase_kv (key, value_json) VALUES (?1, ?2)
+               ON CONFLICT(key) DO NOTHING RETURNING key`,
+              [key, "true"],
+              v.object({ key: v.string() }),
+            );
+            if (reserved.length === 0) return;
           }
+          await this.runWithActionInvoker(async () => {
+            await subscriptionHandler(this.createContext({
+              kind: "subscription",
+              module: sub.module ?? null,
+              name: `${event.name}:${sub.name}`,
+            }), payload);
+          }, sub.module ?? null);
         });
       }
     }
@@ -2850,39 +2870,40 @@ export class ChimpbaseEngine {
     queueName: string,
     errorMessage: string,
     attempts: number,
+    onFailure?: () => Promise<void>,
   ): Promise<void> {
-    const worker = this.registry.workers.get(queueName);
-    const dlqName = worker?.definition.dlq;
-    const shouldDlq = typeof dlqName === "string" && attempts >= this.worker.maxAttempts;
+    await this.runInTransaction(async () => {
+      if (this.adapter.lockQueueJob !== undefined && !await this.adapter.lockQueueJob(jobId, attempts)) return;
+      await onFailure?.();
+      const worker = this.registry.workers.get(queueName);
+      const dlqName = worker?.definition.dlq;
+      const shouldDlq = typeof dlqName === "string" && attempts >= this.worker.maxAttempts;
 
-    if (shouldDlq && worker !== undefined) {
-      const payloadJson = await this.adapter.getQueueJobPayload(jobId);
-      if ((payloadJson !== null && payloadJson.length > 0)) {
-        const envelope: ChimpbaseDlqEnvelope = {
-          attempts,
-          error: errorMessage,
-          failedAt: this.timestampNow(),
-          payload: JSON.parse(payloadJson) as unknown,
-          queue: queueName,
-        };
-        await this.adapter.queueEnqueue(dlqName, envelope);
+      if (shouldDlq && worker !== undefined) {
+        const payloadJson = await this.adapter.getQueueJobPayload(jobId);
+        if ((payloadJson !== null && payloadJson.length > 0)) {
+          const envelope: ChimpbaseDlqEnvelope = {
+            attempts,
+            error: errorMessage,
+            failedAt: this.timestampNow(),
+            payload: JSON.parse(payloadJson) as unknown,
+            queue: queueName,
+          };
+          await this.adapter.queueEnqueue(dlqName, envelope);
+        }
       }
-    }
 
-    const nextStatus = shouldDlq ? "dlq" : (attempts >= this.worker.maxAttempts ? "failed" : "pending");
-    const nextAvailableAtMs = this.platform.now() + this.worker.retryDelayMs;
-    if (queueName === INTERNAL_WORKFLOW_QUEUE_NAME && attempts >= this.worker.maxAttempts) {
-      await this.runInTransaction(async () => {
+      const nextStatus = shouldDlq ? "dlq" : (attempts >= this.worker.maxAttempts ? "failed" : "pending");
+      const nextAvailableAtMs = this.platform.now() + this.worker.retryDelayMs;
+      if (queueName === INTERNAL_WORKFLOW_QUEUE_NAME && attempts >= this.worker.maxAttempts) {
         const payloadJson = await this.adapter.getQueueJobPayload(jobId);
         const payload = payloadJson === null ? null : tryParseJson(payloadJson);
         if (isJsonObject(payload) && typeof payload.workflowId === "string" && payload.workflowId.length > 0) {
           await this.failWorkflowInstance(payload.workflowId, errorMessage);
         }
-        await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
-      });
-      return;
-    }
-    await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
+      }
+      await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
+    });
   }
 
   private recordLog(
@@ -2961,10 +2982,18 @@ export class ChimpbaseEngine {
       write: (existing: ChimpbaseBlobMetaRow | null) => Promise<ChimpbaseBlobDriverPutResult>,
       save: (payload: ChimpbaseBlobDriverPutResult) => Promise<TResult>,
     ): Promise<TResult> => await this.runInTransaction(async () => {
+      await adapter.blobLockMetadata?.(bucket, key);
       const existing = await adapter.blobGetMetadata(bucket, key);
       const payload = await write(existing);
-      this.blobRollbackCleanups.push(() => driver.delete(bucket, key, payload.driverRef));
-      const result = await save(payload);
+      const cleanup = () => driver.delete(bucket, key, payload.driverRef);
+      this.blobRollbackCleanups.push(cleanup);
+      let result: TResult;
+      try {
+        result = await save(payload);
+      } catch (error) {
+        this.blobCommitCleanups.push(cleanup);
+        throw error;
+      }
       if (existing !== null) {
         this.blobCommitCleanups.push(() => driver.delete(bucket, key, existing.driverRef));
       }
@@ -2972,6 +3001,7 @@ export class ChimpbaseEngine {
     });
     const deleteObject = async (bucket: string, key: string): Promise<boolean> =>
       await this.runInTransaction(async () => {
+        await adapter.blobLockMetadata?.(bucket, key);
         const row = await adapter.blobGetMetadata(bucket, key);
         if (row === null) return false;
         const deleted = await adapter.blobDeleteMetadata(bucket, key);
@@ -3109,7 +3139,7 @@ export class ChimpbaseEngine {
             driverRef: driverResult.driverRef,
             createdAt: nowIso,
             updatedAt: nowIso,
-          });
+          }, options);
           return { bucket, key, size: driverResult.size, etag: driverResult.sha256 };
         });
       },

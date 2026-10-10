@@ -242,7 +242,8 @@ describe("telemetry sink interface", () => {
     );
     const started = await host.start({ serve: false, runWorker: false });
     try {
-      await host.executeAction("burst");
+      const outcome = await host.executeAction("burst");
+      expect(outcome.emittedEvents.map((event) => event.name)).toEqual(["origin"]);
       expect((await host.executeAction("inspect")).result).toEqual([{ count: 10_005 }]);
       expect(host.drainTelemetryRecords()).toHaveLength(10_000);
     } finally {
