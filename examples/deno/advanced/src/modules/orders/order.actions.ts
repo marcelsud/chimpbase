@@ -1,13 +1,13 @@
 import { action, v } from "@chimpbase/runtime";
 
-import { assertTransition, normalizeAmount, normalizeCustomer } from "./order.domain.ts";
+import { assertTransition, normalizeAmount, normalizeCustomer } from "../../../../../shared/orders/order.domain.ts";
 import {
   getOrder,
   insertOrder,
   listOrders as listOrdersQuery,
   updateOrderStatus,
-} from "./order.repository.ts";
-import type { OrderRecord } from "./order.types.ts";
+} from "../../../../../shared/orders/order.repository.ts";
+import type { OrderRecord } from "../../../../../shared/orders/order.types.ts";
 
 export const createOrder = action({
   name: "createOrder",

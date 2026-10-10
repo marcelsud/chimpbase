@@ -32,6 +32,19 @@ const allowedPortableImports = [
 ] as const;
 
 describe("portable package guards", () => {
+  test("importing the host leaves the TypeScript compiler unloaded", () => {
+    const result = Bun.spawnSync([
+      process.execPath,
+      "--eval",
+      `await import("./packages/host/src/library.ts");
+       if (Object.keys(require.cache).some(path => path.endsWith("/typescript/lib/typescript.js"))) {
+         throw new Error("host import loaded the TypeScript compiler");
+       }`,
+    ], { cwd: repoRoot, stdout: "pipe", stderr: "pipe" });
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
   for (const packageName of ["core", "runtime", "postgres", "rest-collections"] as const) {
     test(`@chimpbase/${packageName} stays free of host-specific APIs`, async () => {
       const packageDir = resolve(repoRoot, "packages", packageName);

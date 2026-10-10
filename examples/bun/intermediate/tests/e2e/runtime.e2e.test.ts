@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createChimpbase } from "@chimpbase/bun";
 
 import app from "../../chimpbase.app.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 type StartedHost = Awaited<ReturnType<Awaited<ReturnType<typeof createChimpbase>>["start"]>>;
 

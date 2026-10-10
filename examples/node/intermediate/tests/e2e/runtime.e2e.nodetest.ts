@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { createChimpbase } from "@chimpbase/node";
 
 import app from "../../chimpbase.app.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 type Host = Awaited<ReturnType<typeof createChimpbase>>;
 type StartedHost = Awaited<ReturnType<Host["start"]>>;

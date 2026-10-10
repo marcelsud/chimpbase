@@ -1,7 +1,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 
 import { authedGet, authedPost, bootAdvanced } from "../support/harness.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 Deno.test("deno/advanced — workflow completes on quality approval", async () => {
   const booted = await bootAdvanced();

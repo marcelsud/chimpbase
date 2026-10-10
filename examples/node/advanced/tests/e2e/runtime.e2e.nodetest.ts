@@ -2,7 +2,7 @@ import { after, before, describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { authedGet, authedPost, bootAdvanced } from "../support/harness.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 describe("node/advanced example — lifecycle", () => {
   let booted: Awaited<ReturnType<typeof bootAdvanced>>;

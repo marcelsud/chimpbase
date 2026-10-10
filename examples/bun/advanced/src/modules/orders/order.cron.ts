@@ -1,7 +1,7 @@
 import { action, v } from "@chimpbase/runtime";
 import type { ChimpbaseContext } from "@chimpbase/runtime";
 
-import { countByStatus, insertBacklogSnapshot, listBacklogSnapshots } from "./order.repository.ts";
+import { countByStatus, insertBacklogSnapshot, listBacklogSnapshots } from "../../../../../shared/orders/order.repository.ts";
 
 export async function captureOrderBacklogSnapshot(ctx: ChimpbaseContext): Promise<void> {
   const counts = await countByStatus(ctx);

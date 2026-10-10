@@ -1,12 +1,9 @@
-import { join, resolve } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import {
-  normalizeProjectConfig,
-  type ChimpbaseAppDefinition,
   type ChimpbaseMigration,
   type ChimpbaseMigrationSource,
   type ChimpbasePlatformShim,
@@ -15,10 +12,6 @@ import {
 import {
   ChimpbaseHost,
   createRuntimeHost,
-  inferNumberEnv,
-  inferServerPort,
-  inferStorageEngine,
-  inferSubscriptionDispatchMode,
   type ActionExecutionResult,
   type ChimpbaseRuntimeEnvironment,
   type ChimpbaseRuntimeShim,
@@ -30,15 +23,7 @@ import {
   type StartedHost,
   type TelemetryRecord,
 } from "@chimpbase/host";
-import { loadProjectAppDefinition } from "@chimpbase/tooling/app";
-import {
-  applyInlinePostgresMigrations,
-  applyPostgresSqlMigrations,
-  createPostgresEngineAdapter,
-  ensurePostgresInternalTables,
-  openPostgresPool,
-  PostgresPollingEventBus,
-} from "@chimpbase/postgres";
+import { openPostgresStorage } from "@chimpbase/postgres";
 
 import {
   applyInlineSqlMigrations,
@@ -128,23 +113,7 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
           throw new Error("@chimpbase/node requires storage.url for postgres storage");
         }
 
-        const pool = openPostgresPool(config);
-        await applyPostgresSqlMigrations(pool, resolvedMigrations);
-        await applyInlinePostgresMigrations(pool, migrationsSql);
-        await ensurePostgresInternalTables(pool);
-        const eventBus = new PostgresPollingEventBus({ pool });
-        return {
-          createAdapter() {
-            return createPostgresEngineAdapter(pool, platform);
-          },
-          eventBus,
-          storage: {
-            close() {
-              return pool.end();
-            },
-          },
-          supportsConcurrentWorkers: true,
-        };
+        return await openPostgresStorage(config, platform, resolvedMigrations, migrationsSql);
       }
 
       const db = await openSqliteDatabase(_projectDir, config);
@@ -171,65 +140,9 @@ export class ChimpbaseNodeHost extends ChimpbaseHost<NodeServeHandle> {
     super(options);
   }
 
-  static async load(projectDirInput: string): Promise<ChimpbaseNodeHost> {
-    const projectDir = resolve(projectDirInput);
-    const app = await loadProjectAppDefinitionOrThrow(projectDir);
-    const config = buildConfigFromApp(app);
-    return await ChimpbaseNodeHost.create({
-      app,
-      config,
-      projectDir,
-    });
-  }
-
   static async create(options: CreateHostOptions): Promise<ChimpbaseNodeHost> {
     return await createRuntimeHost(ChimpbaseNodeHost, nodeRuntimeShim, options);
   }
-}
-
-function buildConfigFromApp(app: ChimpbaseAppDefinition): ChimpbaseProjectConfig {
-  const storageEngine = inferStorageEngine(nodeEnvironment, {});
-  return normalizeProjectConfig({
-    project: {
-      name: app.project.name,
-    },
-    server: {
-      port: inferServerPort(nodeEnvironment),
-    },
-    storage: {
-      engine: storageEngine,
-      path: storageEngine === "memory" || storageEngine === "postgres"
-        ? null
-        : nodeEnvironment.get("CHIMPBASE_STORAGE_PATH") ?? join("data", `${app.project.name}.db`),
-      url: nodeEnvironment.get("CHIMPBASE_DATABASE_URL") ?? nodeEnvironment.get("DATABASE_URL") ?? null,
-    },
-    subscriptions: {
-      dispatch: inferSubscriptionDispatchMode(nodeEnvironment),
-    },
-    telemetry: {
-      minLevel: app.telemetry.minLevel,
-      persist: app.telemetry.persist,
-    },
-    worker: {
-      concurrency: inferNumberEnv(nodeEnvironment, "CHIMPBASE_WORKER_CONCURRENCY"),
-      leaseMs: inferNumberEnv(nodeEnvironment, "CHIMPBASE_WORKER_LEASE_MS"),
-      maxAttempts: app.worker.maxAttempts,
-      pollIntervalMs: inferNumberEnv(nodeEnvironment, "CHIMPBASE_WORKER_POLL_INTERVAL_MS"),
-      retryDelayMs: app.worker.retryDelayMs,
-    },
-    workflows: {
-      contractsDir: app.workflows.contractsDir ?? undefined,
-    },
-  });
-}
-
-async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<ChimpbaseAppDefinition> {
-  const app = await loadProjectAppDefinition(projectDir);
-  if (!(app !== null)) {
-    throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
-  }
-
-  return app;
 }
 
 function isByteReadableStream(value: unknown): value is ReadableStream<Uint8Array> {

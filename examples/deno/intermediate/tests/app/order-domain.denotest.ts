@@ -5,7 +5,7 @@ import {
   isTerminal,
   normalizeAmount,
   normalizeCustomer,
-} from "../../src/modules/orders/order.domain.ts";
+} from "../../../../shared/orders/order.domain.ts";
 
 Deno.test("order domain — normalizes customer", () => {
   assertEquals(normalizeCustomer("  Alice@Example.com  "), "alice@example.com");

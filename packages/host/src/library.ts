@@ -13,10 +13,9 @@ import type { ChimpbaseTelemetrySink } from "@chimpbase/runtime";
 import { loadProjectAppDefinition } from "@chimpbase/tooling/app";
 import type { ChimpbaseSchemaSyncOptions, ChimpbaseSchemaSyncResult } from "@chimpbase/tooling/schema";
 import { syncChimpbaseSchemaArtifacts } from "@chimpbase/tooling/schema";
-import {
-  syncChimpbaseModuleArtifacts,
-  type SyncChimpbaseModuleArtifactsOptions,
-  type SyncChimpbaseModuleArtifactsResult,
+import type {
+  SyncChimpbaseModuleArtifactsOptions,
+  SyncChimpbaseModuleArtifactsResult,
 } from "@chimpbase/tooling/modules";
 import type { WorkflowContractSyncOptions, WorkflowContractSyncResult } from "@chimpbase/tooling/workflow_contracts";
 
@@ -238,6 +237,7 @@ export function createChimpbaseRuntimeLibrary<
   ): Promise<SyncChimpbaseModuleArtifactsResult> {
     const projectDir = resolve(options.projectDir ?? ".");
     const app = await loadProjectAppDefinitionOrThrow(projectDir);
+    const { syncChimpbaseModuleArtifacts } = await import("@chimpbase/tooling/modules");
     return await syncChimpbaseModuleArtifacts(app, projectDir, options);
   }
 
