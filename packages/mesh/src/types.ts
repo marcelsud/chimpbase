@@ -1,4 +1,4 @@
-import type { ChimpbaseContext, ChimpbaseRouteEnv, ChimpbaseValidator } from "@chimpbase/runtime";
+import type { ChimpbaseContext, ChimpbaseValidator } from "@chimpbase/runtime";
 
 /** The widest method shape a service can expose. */
 export type ServiceMethod = (...args: never[]) => unknown;
@@ -199,12 +199,14 @@ export class MeshCallError extends Error {
   readonly actionName: string;
   readonly nodeId: string | null;
   readonly cause?: unknown;
-  constructor(actionName: string, nodeId: string | null, message: string, cause?: unknown) {
+  readonly retryable: boolean;
+  constructor(actionName: string, nodeId: string | null, message: string, cause?: unknown, retryable = false) {
     super(message);
     this.name = "MeshCallError";
     this.actionName = actionName;
     this.nodeId = nodeId;
     this.cause = cause;
+    this.retryable = retryable;
   }
 }
 
@@ -214,5 +216,3 @@ export class MeshConfigurationError extends Error {
     this.name = "MeshConfigurationError";
   }
 }
-
-export type MeshRouteEnv = ChimpbaseRouteEnv & { mesh: ChimpbaseMeshClient };

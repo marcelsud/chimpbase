@@ -494,6 +494,7 @@ if (!dockerAvailable) {
           };
         },
       };
+      host.activeEngineOperations = new Set();
       host.serializedEngineOperations = Promise.resolve();
       if (!(host instanceof ChimpbaseDenoHost)) throw new Error("invalid Deno host fixture");
       const typedHost = host;

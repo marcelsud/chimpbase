@@ -2,7 +2,7 @@ import {
   action,
   contextExtension,
   cron,
-  isArrayValue,
+  isJsonObject,
   onStart,
   onStop,
   plugin,
@@ -23,11 +23,9 @@ import {
 } from "./call.ts";
 import {
   INFO_EVENT_ANNOUNCE,
-  INFO_EVENT_HEARTBEAT,
   INFO_EVENT_LEAVE,
   MeshPeerCache,
   type AnnouncePayload,
-  type HeartbeatPayload,
   type LeavePayload,
 } from "./discovery.ts";
 import { balancedWorkerName, meshEmit, type BalancedEnvelope } from "./emit.ts";
@@ -44,6 +42,7 @@ import {
   listLiveNodes,
   touchHeartbeat,
   upsertNode,
+  type UpsertNodeInput,
 } from "./registry.ts";
 import {
   prefixedActionName,
@@ -56,7 +55,6 @@ import {
   RPC_EXECUTE_ACTION,
   compareTokens,
   createHttpDispatcher,
-  type RpcEnvelope,
 } from "./transport-http.ts";
 import type {
   AnyServiceDefinition,
@@ -120,7 +118,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   const defaultRetries = options.defaultRetries ?? 0;
   const rpcPath = options.rpcPath ?? DEFAULT_RPC_PATH;
   const middleware = options.middleware ?? [];
-  const metaBase = options.meta ?? {};
+  const metadata = { ...options.meta };
 
   const services = options.services.map((def) => resolveService(def));
   if (services.length === 0) {
@@ -167,6 +165,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
     defaultStrategy,
     defaultTimeoutMs,
     localActionNames,
+    localMetadata: metadata,
     localNodeId: nodeId,
     middleware,
     remoteDispatcher,
@@ -183,7 +182,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       return await dispatcher(ctx, actionName, args, result, opts ?? {});
     },
     emit: async (event, payload, opts?: EmitOptions) => {
-      await meshEmit(ctx, event, payload, opts ?? {}, balancedEventSet);
+      await meshEmit(ctx, event, payload, opts ?? {});
     },
     nodeId: () => nodeId,
     peers: () => cache.all(),
@@ -213,7 +212,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
         services: payload.services ?? [],
         startedAtMs: payload.startedAtMs ?? Date.now(),
       });
-    }, { idempotent: false }),
+    }, { dispatch: "sync", idempotent: false }),
   );
 
   entries.push(
@@ -223,35 +222,35 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       }
 
       cache.remove(payload.nodeId);
-    }, { idempotent: false }),
-  );
-
-  entries.push(
-    subscription<HeartbeatPayload>(INFO_EVENT_HEARTBEAT, async (_ctx, payload) => {
-      if (typeof payload?.nodeId !== "string" || payload.nodeId.length === 0 || payload.nodeId === nodeId) {
-        return;
-      }
-
-      cache.touch(payload.nodeId, payload.lastHeartbeatMs ?? Date.now(), payload.metadata ?? {});
-    }, { idempotent: false }),
+    }, { dispatch: "sync", idempotent: false }),
   );
 
   if (transport === "http") {
     entries.push(
       action(
         RPC_EXECUTE_ACTION,
-        async (ctx, rawEnvelope: RpcEnvelope, providedToken: string | null) => {
+        async (ctx, rawEnvelope: unknown, providedToken: string | null) => {
           const expected = (options.meshToken !== undefined && options.meshToken.length > 0) ? ctx.secret(options.meshToken) : null;
           if (!compareTokens(expected, providedToken ?? null)) {
             throw new Error("unauthorized mesh rpc");
           }
 
-          if (!(rawEnvelope !== null && rawEnvelope !== undefined) || typeof rawEnvelope.actionName !== "string") {
+          if (!isJsonObject(rawEnvelope)
+            || typeof rawEnvelope.actionName !== "string" || rawEnvelope.actionName.length === 0
+            || typeof rawEnvelope.callerNodeId !== "string" || rawEnvelope.callerNodeId.length === 0
+            || typeof rawEnvelope.deadlineMs !== "number" || !Number.isFinite(rawEnvelope.deadlineMs)) {
             throw new Error("invalid rpc envelope");
           }
 
-          const invocationArgs = isArrayValue(rawEnvelope.args) ? rawEnvelope.args : [rawEnvelope.args];
-          return await ctx.action<unknown[], unknown>(rawEnvelope.actionName, ...invocationArgs);
+          if (!localActionNames.has(rawEnvelope.actionName)) {
+            throw new Error("mesh rpc action is not registered");
+          }
+
+          if (rawEnvelope.deadlineMs <= Date.now()) {
+            throw new Error("mesh rpc deadline exceeded");
+          }
+
+          return await ctx.action(rawEnvelope.actionName, rawEnvelope.args);
         },
       ),
     );
@@ -262,7 +261,6 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   entries.push(
     onStart("__chimpbase.mesh.bootstrap", async (ctx) => {
       await ensureRegistrySchema(ctx);
-      const metadata = { ...metaBase };
       await upsertNode(ctx, {
         advertisedUrl,
         metadata,
@@ -297,11 +295,14 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
         heartbeatState.timer = setInterval(() => {
           if (heartbeatState.running !== null) return;
           heartbeatState.running = refreshHeartbeat({
+            advertisedUrl,
             cache,
             ctx,
             metadata,
             nodeId,
             offlineAfterMs,
+            services: serviceEntries,
+            startedAtMs,
           }).finally(() => {
             heartbeatState.running = null;
           });
@@ -369,17 +370,15 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   );
 }
 
-interface HeartbeatArgs {
+interface HeartbeatArgs extends UpsertNodeInput {
   cache: MeshPeerCache;
   ctx: ChimpbaseContext;
-  metadata: Record<string, unknown>;
-  nodeId: string;
   offlineAfterMs: number;
 }
 
 async function refreshHeartbeat(args: HeartbeatArgs): Promise<void> {
   try {
-    await touchHeartbeat(args.ctx, args.nodeId, args.metadata);
+    await touchHeartbeat(args.ctx, args);
     const live = await listLiveNodes(args.ctx, Date.now() - args.offlineAfterMs);
     args.cache.seed(live.filter((peer) => peer.nodeId !== args.nodeId));
   } catch (error) {
@@ -433,7 +432,7 @@ function buildServiceRegistrations(
             throw new TypeError(`service ${svc.name} has an invalid event handler`);
           }
           await event.handler(ctx, payload, self);
-        }),
+        }, { dispatch: "sync" }),
       );
     }
   }
@@ -485,9 +484,9 @@ function createRpcRoute(rpcPath: string) {
 
     const token = request.headers.get(MESH_TOKEN_HEADER);
 
-    let envelope: RpcEnvelope;
+    let envelope: unknown;
     try {
-      envelope = (await request.json()) as RpcEnvelope;
+      envelope = await request.json();
     } catch {
       return new Response(JSON.stringify({ ok: false, error: "invalid json body" }), {
         headers: { "content-type": "application/json" },
@@ -503,8 +502,12 @@ function createRpcRoute(rpcPath: string) {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const status = message === "unauthorized mesh rpc" ? 401 : 500;
-      return new Response(
+      const status = message === "unauthorized mesh rpc" ? 401
+        : message === "invalid rpc envelope" ? 400
+        : message === "mesh rpc action is not registered" ? 403
+        : message === "mesh rpc deadline exceeded" ? 408
+        : 500;
+      throw new Response(
         JSON.stringify({ error: message, ok: false }),
         { headers: { "content-type": "application/json" }, status },
       );

@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { isJsonObject, type ChimpbaseContext } from "@chimpbase/runtime";
 
 import type { NodeRecord } from "./types.ts";
-import { MeshCallError } from "./types.ts";
+import { MeshCallError, MeshTimeoutError } from "./types.ts";
 
 export const RPC_EXECUTE_ACTION = "__chimpbase.mesh.rpc.execute";
 export const DEFAULT_RPC_PATH = "/__chimpbase/mesh/rpc";
@@ -53,16 +53,16 @@ export function createHttpDispatcher(
       callerNodeId: options.callerNodeId,
       deadlineMs,
     };
+    const requestBody = JSON.stringify(envelope);
 
     const url = joinUrl(peer.advertisedUrl, options.rpcPath);
     const controller = new AbortController();
     const timeoutMs = Math.max(deadlineMs - Date.now(), 1);
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    let response: Response;
     try {
-      response = await fetch(url, {
-        body: JSON.stringify(envelope),
+      const response = await fetch(url, {
+        body: requestBody,
         headers: {
           "content-type": "application/json",
           [MESH_TOKEN_HEADER]: token,
@@ -71,49 +71,53 @@ export function createHttpDispatcher(
         method: "POST",
         signal: controller.signal,
       });
+      if (!response.ok) {
+        const text = await safeText(response);
+        throw new MeshCallError(
+          actionName,
+          peer.nodeId,
+          `mesh RPC returned ${response.status}: ${text}`,
+        );
+      }
+
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        throw new MeshCallError(
+          actionName,
+          peer.nodeId,
+          "mesh RPC returned invalid JSON",
+          error,
+        );
+      }
+      if (!isJsonObject(body) || typeof body.ok !== "boolean") {
+        throw new MeshCallError(actionName, peer.nodeId, "mesh RPC returned an invalid response");
+      }
+      if (!body.ok) {
+        throw new MeshCallError(
+          actionName,
+          peer.nodeId,
+          typeof body.error === "string" ? body.error : "mesh RPC remote error",
+        );
+      }
+
+      return body.result;
     } catch (error) {
+      if (controller.signal.aborted) {
+        throw new MeshTimeoutError(actionName, peer.nodeId, timeoutMs);
+      }
+      if (error instanceof MeshCallError) throw error;
       throw new MeshCallError(
         actionName,
         peer.nodeId,
         `mesh RPC fetch failed: ${error instanceof Error ? error.message : String(error)}`,
         error,
+        true,
       );
     } finally {
       clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      const text = await safeText(response);
-      throw new MeshCallError(
-        actionName,
-        peer.nodeId,
-        `mesh RPC returned ${response.status}: ${text}`,
-      );
-    }
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch (error) {
-      throw new MeshCallError(
-        actionName,
-        peer.nodeId,
-        "mesh RPC returned invalid JSON",
-        error,
-      );
-    }
-    if (!isJsonObject(body) || typeof body.ok !== "boolean") {
-      throw new MeshCallError(actionName, peer.nodeId, "mesh RPC returned an invalid response");
-    }
-    if (!body.ok) {
-      throw new MeshCallError(
-        actionName,
-        peer.nodeId,
-        typeof body.error === "string" ? body.error : "mesh RPC remote error",
-      );
-    }
-
-    return body.result;
   };
 }
 

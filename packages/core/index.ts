@@ -192,6 +192,7 @@ export interface ChimpbaseCronRegistration {
 }
 
 export interface ChimpbaseSubscriptionEntry {
+  dispatch?: "async" | "sync";
   handler: ChimpbaseSubscriptionHandler<never, unknown>;
   module?: string | null;
   idempotent: boolean;

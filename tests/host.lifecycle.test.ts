@@ -1,11 +1,11 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import { defineChimpbaseApp } from "../packages/core/index.ts";
+import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord } from "../packages/core/index.ts";
 import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
-import { action, onStart, onStop, plugin, worker } from "../packages/runtime/index.ts";
+import { action, onStart, onStop, plugin, route, subscription, worker } from "../packages/runtime/index.ts";
 
 class TestHost extends ChimpbaseHost<{ port: number }> {}
 
@@ -22,6 +22,7 @@ function createTrackedRuntime(errors: {
   storageClose?: Error; secrets?: Error; adapterCreate?: Error;
 } = {}) {
   const calls = { serverStart: 0, serverStop: 0, busStart: 0, busStop: 0, storageClose: 0 };
+  let deliver: ChimpbaseEventBusCallback | undefined;
   const runtime: ChimpbaseRuntimeShim<{ port: number }> = {
     ...bunRuntimeShim,
     env: {
@@ -53,7 +54,8 @@ function createTrackedRuntime(errors: {
           },
           eventBus: {
             async publish() {},
-            start() {
+            start(callback) {
+              deliver = callback;
               calls.busStart += 1;
               if (errors.busStart) throw errors.busStart;
             },
@@ -73,10 +75,123 @@ function createTrackedRuntime(errors: {
       },
     },
   };
-  return { calls, library: createChimpbaseRuntimeLibrary(TestHost, runtime) };
+  return {
+    calls, library: createChimpbaseRuntimeLibrary(TestHost, runtime),
+    async deliverEvents(events: ChimpbaseEventRecord[]) {
+      if (!deliver) throw new Error("event bus did not start");
+      await deliver(events);
+    },
+  };
 }
 
 describe("host lifecycle cleanup", () => {
+  test("stop halts event sources, drains active delivery, and ignores late callbacks before onStop", async () => {
+    const { calls, deliverEvents, library } = createTrackedRuntime();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let deliveries = 0;
+    let hooks = 0;
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, registrations: [
+        subscription("external", async () => {
+          deliveries += 1;
+          entered.resolve();
+          await release.promise;
+        }),
+        onStop("cleanup", () => { hooks += 1; expect(calls.busStop).toBe(1); }),
+      ],
+    });
+    const started = await host.start({ serve: false, runWorker: false });
+    const event = { id: 1, name: "external", payload: {}, payloadJson: "{}" };
+    const activeDelivery = deliverEvents([event]);
+    let stopping: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      stopping = started.stop();
+      expect(calls.busStop).toBe(1);
+      await deliverEvents([event]);
+      expect(hooks).toBe(0);
+      release.resolve();
+      await activeDelivery;
+      await stopping;
+      await deliverEvents([event]);
+      expect(hooks).toBe(1);
+      expect(deliveries).toBe(1);
+    } finally {
+      release.resolve();
+      await activeDelivery;
+      await (stopping ?? started.stop());
+      await host.close();
+    }
+  });
+
+  test("stop rejects new routes and drains active routes before onStop hooks", async () => {
+    const { library } = createTrackedRuntime();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let hooks = 0;
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, registrations: [
+        action("inspect", () => "available"),
+        route("GET /hold", async () => { entered.resolve(); await release.promise; return new Response("finished"); }),
+        onStop("cleanup", () => { hooks += 1; }),
+      ],
+    });
+    const started = await host.start({ serve: false, runWorker: false });
+    let stopping: Promise<void> | undefined;
+    const request = host.executeRoute(new Request("http://localhost/hold"));
+    try {
+      await entered.promise;
+      stopping = started.stop();
+      expect((await host.executeRoute(new Request("http://localhost/hold"))).response?.status).toBe(503);
+      await Bun.sleep(10);
+      expect(hooks).toBe(0);
+      release.resolve();
+      expect(await (await request).response?.text()).toBe("finished");
+      await stopping;
+      expect(hooks).toBe(1);
+      expect((await host.executeAction("inspect")).result).toBe("available");
+    } finally {
+      release.resolve();
+      await request;
+      await (stopping ?? started.stop());
+      await host.close();
+    }
+  });
+
+  test("close waits for active operations before closing storage and sinks", async () => {
+    const { calls, library } = createTrackedRuntime();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let sinksClosed = 0;
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" }, sinks: [cleanupSink(() => { sinksClosed += 1; })],
+      registrations: [action("hold", async (ctx) => {
+        entered.resolve();
+        await release.promise;
+        await ctx.kv.set("finished", true);
+      })],
+    });
+    const operation = host.executeAction("hold");
+    let closing: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      closing = host.close();
+      await Bun.sleep(10);
+      expect(calls.storageClose).toBe(0);
+      expect(sinksClosed).toBe(0);
+      release.resolve();
+      await operation;
+      await closing;
+      expect(calls.storageClose).toBe(1);
+      expect(sinksClosed).toBe(1);
+    } finally {
+      release.resolve();
+      await operation;
+      await (closing ?? host.close());
+    }
+  });
+
   test("failed initialization runs onStop cleanup for resources acquired by earlier hooks", async () => {
     const failure = new Error("initialization failed");
     const { calls, library } = createTrackedRuntime();

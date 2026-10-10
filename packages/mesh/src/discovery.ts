@@ -2,7 +2,6 @@ import type { NodeRecord, NodeServiceEntry } from "./types.ts";
 
 export const INFO_EVENT_ANNOUNCE = "__chimpbase.mesh.info.announce";
 export const INFO_EVENT_LEAVE = "__chimpbase.mesh.info.leave";
-export const INFO_EVENT_HEARTBEAT = "__chimpbase.mesh.info.heartbeat";
 
 export interface AnnouncePayload {
   advertisedUrl: string | null;
@@ -10,12 +9,6 @@ export interface AnnouncePayload {
   nodeId: string;
   services: readonly NodeServiceEntry[];
   startedAtMs: number;
-}
-
-export interface HeartbeatPayload {
-  lastHeartbeatMs: number;
-  metadata: Record<string, unknown>;
-  nodeId: string;
 }
 
 export interface LeavePayload {
@@ -40,19 +33,6 @@ export class MeshPeerCache {
 
   remove(nodeId: string): void {
     this.peers.delete(nodeId);
-  }
-
-  touch(nodeId: string, lastHeartbeatMs: number, metadata: Record<string, unknown>): void {
-    const existing = this.peers.get(nodeId);
-    if (!(existing !== undefined)) {
-      return;
-    }
-
-    this.peers.set(nodeId, {
-      ...existing,
-      lastHeartbeatMs,
-      metadata: { ...existing.metadata, ...metadata },
-    });
   }
 
   all(now: number = Date.now()): NodeRecord[] {

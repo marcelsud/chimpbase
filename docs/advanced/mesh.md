@@ -76,7 +76,7 @@ host.register(
 | `offlineAfterMs` | 30000 | Peers with no heartbeat within this window are treated as offline. |
 | `gcAfterMs` | 600000 | Cron sweep removes rows older than this. |
 | `defaultStrategy` | `"local-first"` | `local-first` · `round-robin` · `random` · `cpu`. |
-| `defaultTimeoutMs` | 5000 | Per-call deadline. |
+| `defaultTimeoutMs` | 5000 | Per-attempt deadline. |
 | `defaultRetries` | 0 | Retry attempts on failure. |
 | `middleware` | `[]` | Functions wrapping `ctx.mesh.call` (circuit breakers, tracing). |
 | `meta` | `{}` | Published in the announce payload (e.g., `{ cpuLoad: 0.3 }`). |
@@ -109,6 +109,14 @@ Methods:
 - `nodeId()` — this node's UUID (regenerated each boot).
 - `peers()` — current live peers from the local cache.
 
+Retries apply to remote transport failures, remote timeouts, and unavailable nodes. Application errors and invalid results are not retried. Result validation errors also bypass fallback.
+
+A remote timeout does not guarantee that the receiving action stopped or rolled back. Retry remote actions only when repeated execution is safe, such as an operation that deduplicates by a request ID.
+
+Local actions share the caller's transaction. Their errors and timeouts bypass retry and fallback so the caller can roll back partial writes. A local timeout waits for the action to settle before raising `MeshTimeoutError`; it does not cancel the action. An action that never settles keeps the call and transaction open.
+
+PostgreSQL hosts give concurrent actions and HTTP requests separate engines and transactions. A chain such as `A.action → B.action → A.lookup` can complete while the first request on A is still active. Requests that contend for the same database locks can still wait for each other. SQLite and memory hosts serialize operations on their shared connection.
+
 ## Registry
 
 The plugin creates `_chimpbase_mesh_nodes` on start:
@@ -125,8 +133,8 @@ CREATE TABLE IF NOT EXISTS _chimpbase_mesh_nodes (
 ```
 
 - **Heartbeat** — `setInterval` updates `last_heartbeat_ms` and reloads live peers from the registry. PostgreSQL heartbeat queries use a separate adapter after startup, so active request transactions cannot hide or roll back them. Slow heartbeats do not overlap, and shutdown waits for the active heartbeat.
-- **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop. Shutdown waits for active host operations before deleting this node's registry row.
-- **Cache** — every node replaces its in-memory peer snapshot from the registry on startup and each heartbeat. Announce/leave/heartbeat events can update it between refreshes; peers past `offlineAfterMs` expire locally.
+- **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop. Shutdown rejects new HTTP routes with 503, stops event listeners and worker ticks, and waits for active operations before deleting this node's registry row.
+- **Cache** — every node replaces its in-memory peer snapshot from the registry on startup and each heartbeat. Announce/leave events can update it between refreshes; peers past `offlineAfterMs` expire locally.
 - **GC** — cron `* * * * *` sweeps rows older than `gcAfterMs`.
 
 ## Balanced events
@@ -142,9 +150,9 @@ events: {
 }
 ```
 
-`ctx.mesh.emit("order.paid", p, { balanced: true })` enqueues a job on `__chimpbase.mesh.balanced.order.paid`. PostgreSQL coordinates claims across the cluster. Failed attempts can retry, so external effects such as email or payments must tolerate repeated execution. See [Workers & Queues](/workers) for transaction and retry guarantees.
+`ctx.mesh.emit("order.paid", p, { balanced: true })` enqueues a job on `__chimpbase.mesh.balanced.order.paid`. The producer does not need a local handler; only nodes with the balanced worker registered can claim the job. PostgreSQL coordinates claims across the cluster. Failed attempts can retry, so external effects such as email or payments must tolerate repeated execution. See [Workers & Queues](/workers) for transaction and retry guarantees.
 
-Broadcast events use the existing pubsub path — every subscribed node processes them.
+Broadcast events use pubsub, with mesh subscriptions overriding delivery to `sync` even when the host uses `subscriptions.dispatch: "async"`. Each subscribed node processes the event through its event listener; ordinary subscriptions on the same event retain their configured dispatch mode. Broadcasts require nodes to be listening and do not provide the durable queue guarantees of balanced events.
 
 ## HTTP RPC
 

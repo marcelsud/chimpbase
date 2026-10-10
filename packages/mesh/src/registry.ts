@@ -7,6 +7,12 @@ const TABLE_NAME = "_chimpbase_mesh_nodes";
 const INDEX_NAME = "idx_chimpbase_mesh_nodes_heartbeat";
 
 export async function ensureRegistrySchema(ctx: ChimpbaseContext): Promise<void> {
+  const db = ctx.db.kysely();
+  // Startup's transaction holds the native dialect lock until the DDL commits.
+  await db.getExecutor().adapter.acquireMigrationLock(db, {
+    lockRowId: TABLE_NAME,
+    lockTable: TABLE_NAME,
+  });
   await ctx.db.query(
     `CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
       node_id            TEXT PRIMARY KEY,
@@ -57,18 +63,20 @@ export async function upsertNode(ctx: ChimpbaseContext, input: UpsertNodeInput):
 
 export async function touchHeartbeat(
   ctx: ChimpbaseContext,
-  nodeId: string,
-  metadata: Record<string, unknown>,
+  input: UpsertNodeInput,
 ): Promise<number> {
   const nowMs = Date.now();
-  await ctx.db.query(
+  const rows = await ctx.db.query(
     `UPDATE ${TABLE_NAME}
        SET last_heartbeat_ms = ?2,
            metadata_json = ?3
-     WHERE node_id = ?1`,
-    [nodeId, nowMs, JSON.stringify(metadata)],
+     WHERE node_id = ?1
+     RETURNING node_id`,
+    [input.nodeId, nowMs, JSON.stringify(input.metadata)],
+    nodeIdRowValidator,
   );
 
+  if (rows.length === 0) return await upsertNode(ctx, input);
   return nowMs;
 }
 
@@ -91,41 +99,14 @@ export async function listLiveNodes(
   return rows.map((row) => rowToNodeRecord(row));
 }
 
-export async function getNode(ctx: ChimpbaseContext, nodeId: string): Promise<NodeRecord | null> {
-  const rows = await ctx.db.query(
-    `SELECT node_id, advertised_url, metadata_json, services_json, started_at_ms, last_heartbeat_ms
-       FROM ${TABLE_NAME} WHERE node_id = ?1`,
-    [nodeId],
-    registryRowValidator,
-  );
-
-  if (rows.length === 0) {
-    return null;
-  }
-
-  return rowToNodeRecord(rows[0]);
-}
-
 export async function gcStaleNodes(
   ctx: ChimpbaseContext,
   olderThanMs: number,
-): Promise<number> {
-  const before = await ctx.db.query(
-    `SELECT node_id FROM ${TABLE_NAME} WHERE last_heartbeat_ms < ?1`,
-    [olderThanMs],
-    nodeIdRowValidator,
-  );
-
-  if (before.length === 0) {
-    return 0;
-  }
-
+): Promise<void> {
   await ctx.db.query(
     `DELETE FROM ${TABLE_NAME} WHERE last_heartbeat_ms < ?1`,
     [olderThanMs],
   );
-
-  return before.length;
 }
 
 interface RegistryRow {
