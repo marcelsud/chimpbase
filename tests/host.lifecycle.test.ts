@@ -68,6 +68,29 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  test("failed initialization runs onStop cleanup for resources acquired by earlier hooks", async () => {
+    const failure = new Error("initialization failed");
+    const { calls, library } = createTrackedRuntime();
+    let activeResources = 0;
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" },
+      registrations: [
+        onStart("acquire", () => { activeResources += 1; }),
+        onStart("fail", () => { throw failure; }),
+        onStop("release", () => { activeResources -= 1; }),
+      ],
+    });
+    try {
+      await expect(host.start({ serve: true, runWorker: true })).rejects.toBe(failure);
+      expect(activeResources).toBe(0);
+      expect(calls.serverStart).toBe(0);
+      expect(calls.busStart).toBe(0);
+      expect(calls.storageClose).toBe(0);
+    } finally {
+      await host.close();
+    }
+  });
+
   test("failed HTTP startup leaves queued work pending and no running worker", async () => {
     const failure = new Error("server unavailable");
     const { calls, library } = createTrackedRuntime({ serverStart: failure });
