@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -14,6 +14,63 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 
 const cleanupDirs: string[] = [];
+
+describe("filesystem blob path containment", () => {
+  test("bucket traversal and outside references cannot read, write or delete outside the root", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "chimpbase-blobs-containment-"));
+    cleanupDirs.push(dir);
+    const root = join(dir, "storage");
+    const outside = join(dir, "storage-other", "private.txt");
+    await mkdir(join(dir, "storage-other"));
+    await writeFile(outside, "private bytes");
+    const driver = fsBlobDriver({ root });
+    const body = () => new Response("blob bytes").body!;
+    const object = await driver.put("uploads", "../logical/key", body());
+    const source = { bucket: "uploads", key: "../logical/key", driverRef: object.driverRef };
+
+    for (const bucket of ["../escaped", join(dir, "escaped")]) {
+      await expect(driver.ensureBucket(bucket)).rejects.toThrow("storage root");
+      await expect(driver.put(bucket, "key", body())).rejects.toThrow("storage root");
+      await expect(driver.copy(source, { bucket, key: "key" })).rejects.toThrow("storage root");
+      await expect(driver.assemble("upload", [], bucket, "key")).rejects.toThrow("storage root");
+    }
+    const relativeOutside = `${root}/../storage-other/private.txt`;
+    for (const driverRef of [outside, relativeOutside]) {
+      await expect(driver.get("uploads", "key", driverRef)).rejects.toThrow("storage root");
+      await expect(driver.delete("uploads", "key", driverRef)).rejects.toThrow("storage root");
+      await expect(driver.copy({ ...source, driverRef }, { bucket: "uploads", key: "copy" })).rejects.toThrow("storage root");
+      await expect(driver.assemble("upload", [{ partNumber: 1, driverRef }], "uploads", "assembled")).rejects.toThrow("storage root");
+    }
+    expect(await Bun.file(outside).text()).toBe("private bytes");
+    await expect(stat(join(dir, "escaped"))).rejects.toMatchObject({ code: "ENOENT" });
+    const fetched = await driver.get("uploads", source.key, source.driverRef);
+    expect(fetched === null ? null : await new Response(fetched.body).text()).toBe("blob bytes");
+    const nested = await driver.put("nested/bucket", "../../logical\\key", body());
+    const nestedFetched = await driver.get("nested/bucket", "../../logical\\key", nested.driverRef);
+    expect(nestedFetched === null ? null : await new Response(nestedFetched.body).text()).toBe("blob bytes");
+  });
+
+  test("multipart paths stay inside staging and preserve part cleanup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "chimpbase-blobs-staging-containment-"));
+    cleanupDirs.push(dir);
+    const root = join(dir, "storage");
+    const driver = fsBlobDriver({ root });
+    const body = () => new Response("part bytes").body!;
+    const object = await driver.put("uploads", "key", body());
+
+    for (const uploadId of ["../../escaped", "../uploads", "..", ".", "", join(dir, "escaped")]) {
+      await expect(driver.putPart(uploadId, 1, body())).rejects.toThrow("storage root");
+      await expect(driver.abortUpload(uploadId)).rejects.toThrow("storage root");
+    }
+    const part = await driver.putPart("upload", 1, body());
+    await driver.delete("uploads", "key", part.driverRef);
+    await expect(stat(part.driverRef)).rejects.toMatchObject({ code: "ENOENT" });
+    await driver.abortUpload("upload");
+    const fetched = await driver.get("uploads", "key", object.driverRef);
+    expect(fetched === null ? null : await new Response(fetched.body).text()).toBe("part bytes");
+    await expect(stat(join(dir, "escaped"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
 
 for (const engine of ["memory", "sqlite", "postgres"] as const) {
   for (const useFs of [false, true]) {

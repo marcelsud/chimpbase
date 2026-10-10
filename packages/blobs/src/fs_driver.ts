@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import type { Stats } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -28,6 +28,15 @@ function shardPrefix(key: string, shardBytes: number): string {
 
 async function ensureDir(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
+}
+
+function childPath(directory: string, ...segments: string[]): string {
+  const path = resolve(directory, ...segments);
+  const child = relative(directory, path);
+  if (child === "" || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error("blob path must remain inside storage root");
+  }
+  return path;
 }
 
 function isByteReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
@@ -87,14 +96,14 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
   const root = resolve(options.root);
   const shardBytes = options.shardBytes ?? 2;
 
-  const bucketRoot = (bucket: string) => join(root, bucket, OBJECTS_DIR);
-  const uploadsRoot = (uploadId: string) => join(root, UPLOADS_DIR, uploadId);
+  const bucketRoot = (bucket: string) => childPath(root, bucket, OBJECTS_DIR);
+  const uploadsRoot = (uploadId: string) => childPath(join(root, UPLOADS_DIR), uploadId);
   const objectPath = (bucket: string, key: string) =>
     join(bucketRoot(bucket), shardPrefix(key, shardBytes), randomUUID());
 
   return {
     async ensureBucket(bucket: string) {
-      await ensureDir(join(root, bucket, OBJECTS_DIR));
+      await ensureDir(bucketRoot(bucket));
     },
     async put(bucket, key, body) {
       const target = objectPath(bucket, key);
@@ -119,9 +128,10 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       return { driverRef: target, size, sha256: hash.digest("hex") };
     },
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
+      const source = childPath(root, driverRef);
       let statResult: Stats;
       try {
-        statResult = await stat(driverRef);
+        statResult = await stat(source);
       } catch (error) {
         if (isErrnoException(error) && error.code === "ENOENT") return null;
         throw error;
@@ -134,18 +144,18 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       if (endExclusive <= start) {
         return { body: new ReadableStream<Uint8Array>({ start(c) { c.close(); } }), size: 0 };
       }
-      const nodeStream = createReadStream(driverRef, { start, end: endExclusive - 1 });
+      const nodeStream = createReadStream(source, { start, end: endExclusive - 1 });
       return { body: nodeToWeb(nodeStream), size: endExclusive - start };
     },
     async delete(_bucket, _key, driverRef) {
       try {
-        await rm(driverRef, { force: true });
+        await rm(childPath(root, driverRef), { force: true });
       } catch (error) {
         if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
       }
     },
     async copy(src, dst): Promise<ChimpbaseBlobDriverPutResult> {
-      const source = src.driverRef;
+      const source = childPath(root, src.driverRef);
       const target = objectPath(dst.bucket, dst.key);
       await ensureDir(dirname(target));
       const reader = createReadStream(source);
@@ -188,8 +198,9 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
     },
     async assemble(uploadId, parts, finalBucket, finalKey) {
       const target = objectPath(finalBucket, finalKey);
+      const ordered = parts.map((part) => ({ ...part, driverRef: childPath(root, part.driverRef) }))
+        .sort((a, b) => a.partNumber - b.partNumber);
       await ensureDir(dirname(target));
-      const ordered = parts.slice().sort((a, b) => a.partNumber - b.partNumber);
       const hash = createHash("sha256");
       let size = 0;
       const writer = createWriteStream(target);

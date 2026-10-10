@@ -609,6 +609,9 @@ describe("@chimpbase/auth", () => {
     { label: "default paths", options: {}, basePath: "/_auth" },
     { label: "restricted protectedPaths", options: { protectedPaths: ["//_auth//"] }, basePath: "/_auth" },
     { label: "custom management path", options: { managementBasePath: "//admin///auth//", protectedPaths: ["/admin/auth"] }, basePath: "/admin/auth" },
+    { label: "root management path", options: { managementBasePath: "/" }, basePath: "" },
+    { label: "normalized root management path", options: { managementBasePath: " /// " }, basePath: "" },
+    { label: "empty management path", options: { managementBasePath: "" }, basePath: "" },
   ]) {
     test(`equivalent auth management paths cannot escalate a write key (${label})`, async () => {
       const host = await createAuthHost(options);
@@ -659,6 +662,7 @@ describe("@chimpbase/auth", () => {
     { label: "default paths", options: {}, basePath: "/_webhooks" },
     { label: "restricted protectedPaths", options: { protectedPaths: ["/_webhooks"] }, basePath: "/_webhooks" },
     { label: "custom management path", options: { protectedPaths: ["//admin///webhooks//"], webhooksManagementPaths: ["//admin///webhooks//"] }, basePath: "/admin/webhooks" },
+    { label: "root management path", options: { webhooksManagementPaths: [" /// "], managementBasePath: null }, basePath: "" },
   ]) {
     test(`equivalent webhook management paths require management scope (${label})`, async () => {
       const host = await createAuthHost(options);
@@ -674,7 +678,7 @@ describe("@chimpbase/auth", () => {
           userId: user.id, scopes: ["webhooks:manage"],
         })).result);
 
-        for (const path of [basePath, `/${basePath}`, `${basePath.replaceAll("/", "///")}///`]) {
+        for (const path of [basePath || "/", `/${basePath}`, `${basePath.replaceAll("/", "///")}///`]) {
           const unauthenticated = await host.executeRoute(new Request(`http://test.local${path}`));
           expect(unauthenticated.response?.status).toBe(401);
 
@@ -684,6 +688,11 @@ describe("@chimpbase/auth", () => {
           const authorized = await host.executeRoute(new Request(`http://test.local${path}`, { headers: authHeaders(manager.key) }));
           expect(authorized.response?.status).toBe(200);
           expect(await readJsonResponse<unknown[]>(authorized.response)).toEqual([]);
+        }
+        if (basePath === "") {
+          const descendant = "http://test.local/nested/app/path";
+          expect((await host.executeRoute(new Request(descendant, { headers: authHeaders(writer.key) }))).response?.status).toBe(403);
+          expect((await host.executeRoute(new Request(descendant, { headers: authHeaders(manager.key) }))).response).toBeNull();
         }
       } finally {
         await host.close();
