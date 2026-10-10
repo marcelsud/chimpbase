@@ -1,4 +1,4 @@
-import { workflow } from "@chimpbase/runtime";
+import { v, workflow } from "@chimpbase/runtime";
 
 import { assignOrder, completeOrder, rejectOrder, startOrder } from "./order.actions.ts";
 
@@ -21,10 +21,10 @@ export interface OrderFulfilmentState {
   lastStepAt: string;
 }
 
-interface QualityDecisionPayload {
-  approved: boolean;
-  reason?: string;
-}
+const qualityDecisionValidator = v.object({
+  approved: v.boolean(),
+  reason: v.string().optional(),
+});
 
 const QUALITY_SIGNAL = "quality.decision";
 
@@ -53,7 +53,7 @@ export const orderFulfilmentWorkflow = workflow<OrderFulfilmentInput, OrderFulfi
           timeoutMs: 5 * 60_000,
           onTimeout: "fail",
           onSignal: ({ state: pending, payload }) => {
-            const decision = payload as QualityDecisionPayload;
+            const decision = qualityDecisionValidator.parse(payload, QUALITY_SIGNAL);
             return {
               ...pending,
               qualityApproved: decision.approved,
@@ -71,7 +71,7 @@ export const orderFulfilmentWorkflow = workflow<OrderFulfilmentInput, OrderFulfi
           timeoutMs: 5 * 60_000,
           onTimeout: "fail",
           onSignal: ({ state: pending, payload }) => {
-            const decision = payload as QualityDecisionPayload;
+            const decision = qualityDecisionValidator.parse(payload, QUALITY_SIGNAL);
             return {
               ...pending,
               qualityApproved: decision.approved,

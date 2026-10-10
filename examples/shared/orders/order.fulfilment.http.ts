@@ -8,12 +8,17 @@ import {
   listOrders,
   rejectOrder,
   startOrder,
-} from "../modules/orders/order.actions.ts";
+} from "./order.actions.ts";
 import {
   listOrderEvents,
   listOrderNotifications,
-} from "../modules/orders/order.audit.actions.ts";
-import { listOrderBacklogSnapshots } from "../modules/orders/order.cron.ts";
+} from "./order.audit.actions.ts";
+import { listOrderBacklogSnapshots } from "./order.cron.ts";
+import {
+  getFulfilmentStatus,
+  signalQualityDecision,
+  startOrderFulfilment,
+} from "./order.fulfilment.actions.ts";
 
 const app = new Hono<{ Bindings: ChimpbaseRouteEnv }>();
 
@@ -68,6 +73,26 @@ app.get("/notifications", async (context) => {
 app.get("/backlog/snapshots", async (context) => {
   const snapshots = await context.env.action(listOrderBacklogSnapshots);
   return context.json(snapshots);
+});
+
+app.post("/orders/:id/fulfilment", async (context) => {
+  const orderId = Number(context.req.param("id"));
+  const { assignee } = await context.req.json<{ assignee: string }>();
+  const result = await context.env.action(startOrderFulfilment, { orderId, assignee });
+  return context.json(result, 201);
+});
+
+app.get("/fulfilments/:workflowId", async (context) => {
+  const workflowId = context.req.param("workflowId");
+  const instance = await context.env.action(getFulfilmentStatus, { workflowId });
+  return context.json(instance);
+});
+
+app.post("/fulfilments/:workflowId/quality", async (context) => {
+  const workflowId = context.req.param("workflowId");
+  const body = await context.req.json<{ approved: boolean; reason?: string }>();
+  await context.env.action(signalQualityDecision, { workflowId, ...body });
+  return context.json({ ok: true });
 });
 
 export const orderApiApp = app;

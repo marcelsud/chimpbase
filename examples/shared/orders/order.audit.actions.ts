@@ -1,6 +1,6 @@
 import { action, v } from "@chimpbase/runtime";
 
-import { listNotifications, listOrderAudit } from "../../../../../shared/orders/order.repository.ts";
+import { listNotifications, listOrderAudit } from "./order.repository.ts";
 
 export const listOrderEvents = action({
   name: "listOrderEvents",

@@ -25,7 +25,6 @@ import {
   type SpanExporter,
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 
 import type {
@@ -83,7 +82,7 @@ export function createOtelSink(
     "chimpbase-app";
 
   const resource = resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: serviceName,
+    "service.name": serviceName,
   });
 
   // Set up AsyncLocalStorage-based context manager for proper span propagation

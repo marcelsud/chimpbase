@@ -1,13 +1,13 @@
 import { action, v } from "@chimpbase/runtime";
 
-import { assertTransition, normalizeAmount, normalizeCustomer } from "../../../../../shared/orders/order.domain.ts";
+import { assertTransition, normalizeAmount, normalizeCustomer } from "./order.domain.ts";
 import {
   getOrder,
   insertOrder,
   listOrders as listOrdersQuery,
   updateOrderStatus,
-} from "../../../../../shared/orders/order.repository.ts";
-import type { OrderRecord } from "../../../../../shared/orders/order.types.ts";
+} from "./order.repository.ts";
+import type { OrderRecord } from "./order.types.ts";
 
 export const createOrder = action({
   name: "createOrder",
@@ -41,7 +41,7 @@ async function moveOrder(
   extra: Record<string, unknown> = {},
 ): Promise<OrderRecord> {
   const current = await getOrder(ctx, id);
-  if (!current) throw new Error(`order ${id} not found`);
+  if (!(current !== null)) throw new Error(`order ${id} not found`);
   assertTransition(current.status, target);
   const next = await updateOrderStatus(ctx, id, target, assignee);
   ctx.pubsub.publish(event, { ...next, ...extra });

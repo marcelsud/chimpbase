@@ -320,6 +320,7 @@ describe("opentelemetry integration", () => {
 
     expect(handlerSpan).toBeDefined();
     expect(childSpan).toBeDefined();
+    expect(requireSpan(handlerSpan, "handlerSpan").resource.attributes["service.name"]).toBe("otel-package-test");
     expect(requireSpan(childSpan, "childSpan").parentSpanContext?.spanId).toBe(
       requireSpan(handlerSpan, "handlerSpan").spanContext().spanId,
     );

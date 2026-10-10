@@ -5,7 +5,8 @@
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "npm:hono@^4.12.5": "4.12.7",
     "npm:kysely@~0.28.11": "0.28.11",
-    "npm:pg@^8.16.3": "8.20.0"
+    "npm:pg@^8.16.3": "8.20.0",
+    "npm:typescript@^5.9.3": "5.9.3"
   },
   "jsr": {
     "@std/assert@1.0.18": {
@@ -90,6 +91,10 @@
     "split2@4.2.0": {
       "integrity": "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg=="
     },
+    "typescript@5.9.3": {
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+      "bin": true
+    },
     "xtend@4.0.2": {
       "integrity": "sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ=="
     }
@@ -98,7 +103,8 @@
     "dependencies": [
       "npm:hono@^4.12.5",
       "npm:kysely@~0.28.11",
-      "npm:pg@^8.16.3"
+      "npm:pg@^8.16.3",
+      "npm:typescript@^5.9.3"
     ]
   }
 }

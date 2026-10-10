@@ -32,7 +32,6 @@
     "@opentelemetry/sdk-logs": "npm:@opentelemetry/sdk-logs@^0.205.0",
     "@opentelemetry/sdk-metrics": "npm:@opentelemetry/sdk-metrics@^2.6.1",
     "@opentelemetry/sdk-trace-base": "npm:@opentelemetry/sdk-trace-base@^2.6.1",
-    "@opentelemetry/semantic-conventions": "npm:@opentelemetry/semantic-conventions@^1.40.0",
     "hono": "npm:hono@^4.12.5",
     "kysely": "npm:kysely@^0.28.11",
     "pg": "npm:pg@^8.16.3",

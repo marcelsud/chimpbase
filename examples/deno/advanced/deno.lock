@@ -13,10 +13,10 @@
     "npm:@opentelemetry/sdk-logs@0.205": "0.205.0_@opentelemetry+api@1.9.1",
     "npm:@opentelemetry/sdk-metrics@^2.6.1": "2.7.0_@opentelemetry+api@1.9.1",
     "npm:@opentelemetry/sdk-trace-base@^2.6.1": "2.7.0_@opentelemetry+api@1.9.1",
-    "npm:@opentelemetry/semantic-conventions@^1.40.0": "1.40.0",
     "npm:hono@^4.12.5": "4.12.14",
     "npm:kysely@~0.28.11": "0.28.16",
-    "npm:pg@^8.16.3": "8.20.0"
+    "npm:pg@^8.16.3": "8.20.0",
+    "npm:typescript@^5.9.3": "5.9.3"
   },
   "jsr": {
     "@std/assert@1.0.18": {
@@ -307,6 +307,10 @@
     "split2@4.2.0": {
       "integrity": "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg=="
     },
+    "typescript@5.9.3": {
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+      "bin": true
+    },
     "undici-types@7.19.2": {
       "integrity": "sha512-qYVnV5OEm2AW8cJMCpdV20CDyaN3g0AjDlOGf1OW4iaDEx8MwdtChUp4zu4H0VP3nDRF/8RKWH+IPp9uW0YGZg=="
     },
@@ -326,10 +330,10 @@
       "npm:@opentelemetry/sdk-logs@0.205",
       "npm:@opentelemetry/sdk-metrics@^2.6.1",
       "npm:@opentelemetry/sdk-trace-base@^2.6.1",
-      "npm:@opentelemetry/semantic-conventions@^1.40.0",
       "npm:hono@^4.12.5",
       "npm:kysely@~0.28.11",
-      "npm:pg@^8.16.3"
+      "npm:pg@^8.16.3",
+      "npm:typescript@^5.9.3"
     ]
   }
 }

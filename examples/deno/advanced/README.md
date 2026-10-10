@@ -2,6 +2,8 @@
 
 Production-shape Chimpbase app on Deno 2+. Mirrors `examples/bun/advanced`: fulfilment **workflow**, four first-party plugins, multi-replica Docker Compose topology.
 
+Order migrations, handlers, and HTTP routes live in `examples/shared/orders`. Each runtime keeps its own bootstrap, registrations, and native tests; advanced examples also share the fulfilment workflow.
+
 ## Run
 
 ```bash
