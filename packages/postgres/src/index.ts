@@ -16,6 +16,7 @@ import type {
 import {
   assertChimpbaseModuleCompiledSql,
   createChimpbaseEventDeliveryPayloads,
+  escapeSqlLikePrefix,
   paginateChimpbaseBlobMetadata,
 } from "@chimpbase/core";
 import type {
@@ -654,10 +655,10 @@ export function createPostgresEngineAdapter(
         `
           SELECT key
           FROM _chimpbase_kv
-          WHERE key LIKE $1 AND (expires_at IS NULL OR expires_at > NOW())
+          WHERE key LIKE $1 ESCAPE '!' AND (expires_at IS NULL OR expires_at > NOW())
           ORDER BY key ASC
         `,
-        [`${prefix}%`],
+        [escapeSqlLikePrefix(prefix)],
       );
       return result.rows.map((row) => row.key);
     },
@@ -938,12 +939,12 @@ export function createPostgresEngineAdapter(
                    created_at::text AS created_at, updated_at::text AS updated_at
             FROM _chimpbase_blobs
             WHERE bucket = $1
-              AND key LIKE $2
+              AND key LIKE $2 ESCAPE '!'
               AND key > $3
             ORDER BY key ASC
             LIMIT $4
           `,
-          [bucket, `${prefix}%`, cursor, limit],
+          [bucket, escapeSqlLikePrefix(prefix), cursor, limit],
         );
         return result.rows.map((row) => ({
           bucket: row.bucket,
@@ -1129,11 +1130,11 @@ export function createPostgresEngineAdapter(
                  created_at_ms::text AS created_at_ms,
                  expires_at_ms::text AS expires_at_ms
           FROM _chimpbase_blob_uploads
-          WHERE bucket = $1 AND key LIKE $2 AND upload_id > $3
+          WHERE bucket = $1 AND key LIKE $2 ESCAPE '!' AND upload_id > $3
           ORDER BY upload_id ASC
           LIMIT $4
         `,
-        [bucket, `${prefix}%`, cursor, limit + 1],
+        [bucket, escapeSqlLikePrefix(prefix), cursor, limit + 1],
       );
       const rows = result.rows.map((row) => ({
         uploadId: row.upload_id,

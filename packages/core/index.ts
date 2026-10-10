@@ -410,6 +410,7 @@ export {
   ChimpbaseNotModifiedError,
   ChimpbasePreconditionFailedError,
   createChimpbaseEventDeliveryPayloads,
+  escapeSqlLikePrefix,
   paginateChimpbaseBlobMetadata,
   type ChimpbaseActionExecutionResult,
   type ChimpbaseBlobDriver,

@@ -425,6 +425,10 @@ export interface ChimpbaseBlobListMetaResult {
   nextCursor: string | null;
 }
 
+export function escapeSqlLikePrefix(prefix: string): string {
+  return prefix.replace(/[!%_]/g, "!$&") + "%";
+}
+
 export async function paginateChimpbaseBlobMetadata(
   options: ChimpbaseBlobListOptions,
   fetchRows: (cursor: string, limit: number) => Promise<ChimpbaseBlobMetaRow[]>,

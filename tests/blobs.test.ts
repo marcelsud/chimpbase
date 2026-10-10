@@ -15,6 +15,66 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 const cleanupDirs: string[] = [];
 
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
+  const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+  (engine === "postgres" && !pgUrl ? test.skip : test)(`literal prefixes preserve KV, blob and multipart pagination (${engine})`, async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-literal-prefix-"));
+    cleanupDirs.push(projectDir);
+    const bucket = `prefix-${crypto.randomUUID()}`;
+    const keys = ["user_one", "user_two", "userXtwo", "literal%one", "literal%two", "literalXtwo", "bang!one", "bangXone", "bang!_one", "bang!%one", "slash\\one", "slashXone", "ordinary/one"];
+    const uploadIds: string[] = [];
+    const host = await createChimpbase({
+      projectDir, storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+      blobs: { driver: memoryBlobDriver(), buckets: [bucket] },
+      registrations: [
+        action("seedPrefixes", async (ctx) => {
+          for (const key of keys) {
+            await ctx.kv.set(key, true);
+            await ctx.blobs.put(bucket, key, new Uint8Array([1]));
+            uploadIds.push((await ctx.blobs.createUpload(bucket, key)).id);
+          }
+        }),
+        action("inspectPrefixes", async (ctx, prefix: string) => {
+          const blobs: string[] = [];
+          const uploads: string[] = [];
+          let cursor: string | undefined;
+          for (let i = 0; i <= keys.length; i++) {
+            const page = await ctx.blobs.list(bucket, { prefix, cursor, limit: 1 });
+            blobs.push(...page.entries.map((entry) => entry.key));
+            if (page.nextCursor === null) break;
+            if (page.nextCursor <= (cursor ?? "") || i === keys.length) throw new Error("blob cursor did not advance");
+            cursor = page.nextCursor;
+          }
+          cursor = undefined;
+          for (let i = 0; i <= keys.length; i++) {
+            const page = await ctx.blobs.listUploads(bucket, { prefix, cursor, limit: 1 });
+            uploads.push(...page.uploads.map((entry) => entry.key));
+            if (page.nextCursor === null) break;
+            if (page.nextCursor <= (cursor ?? "") || i === keys.length) throw new Error("upload cursor did not advance");
+            cursor = page.nextCursor;
+          }
+          return { kv: await ctx.kv.list({ prefix }), blobs, uploads: uploads.sort() };
+        }),
+        action("cleanupPrefixes", async (ctx) => {
+          for (const key of keys) await ctx.kv.delete(key);
+          await ctx.blobs.deleteMany(bucket, keys);
+          for (const id of uploadIds) await (await ctx.blobs.resumeUpload(id)).abort();
+        }),
+      ],
+    });
+    try {
+      await host.executeAction("seedPrefixes");
+      for (const prefix of ["user_", "literal%", "bang!", "bang!_", "bang!%", "slash\\", "ordinary/", "", "missing"]) {
+        const expected = keys.filter((key) => key.startsWith(prefix)).sort();
+        expect((await host.executeAction("inspectPrefixes", prefix)).result).toEqual({ kv: expected, blobs: expected, uploads: expected });
+      }
+    } finally {
+      try { await host.executeAction("cleanupPrefixes"); }
+      finally { await host.close(); }
+    }
+  });
+}
+
 const paginationFixtures = [
   { name: "folders", keys: ["a/one", "b/one", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
   { name: "large folder", keys: [...Array.from({ length: 1002 }, (_, i) => `a/${String(i).padStart(4, "0")}`), "b/one", "b/two", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
