@@ -37,6 +37,7 @@ import type {
 import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringRecord, v } from "@chimpbase/runtime";
 
 import { createPostgresKysely } from "./kysely.ts";
+import { PostgresPollingEventBus } from "./event-bus.ts";
 
 export { PostgresPollingEventBus, type PostgresPollingEventBusOptions } from "./event-bus.ts";
 export {
@@ -77,6 +78,39 @@ export function openPostgresPool(config: ChimpbaseProjectConfig): Pool {
   return new Pool({
     connectionString: config.storage.url,
   });
+}
+
+export async function openPostgresStorage(
+  config: ChimpbaseProjectConfig,
+  platform: ChimpbasePlatformShim,
+  migrations: readonly ChimpbaseMigration[],
+  migrationsSql: string[],
+) {
+  const pool = openPostgresPool(config);
+  try {
+    await applyPostgresSqlMigrations(pool, migrations);
+    await applyInlinePostgresMigrations(pool, migrationsSql);
+    await ensurePostgresInternalTables(pool);
+    return {
+      createAdapter() {
+        return createPostgresEngineAdapter(pool, platform);
+      },
+      eventBus: new PostgresPollingEventBus({ pool }),
+      storage: {
+        close() {
+          return pool.end();
+        },
+      },
+      supportsConcurrentWorkers: true,
+    };
+  } catch (error) {
+    try {
+      await pool.end();
+    } catch {
+      // Preserve the startup error if closing the failed pool also fails.
+    }
+    throw error;
+  }
 }
 
 export async function applyPostgresSqlMigrations(

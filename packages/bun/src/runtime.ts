@@ -1,8 +1,4 @@
-import { join, resolve } from "node:path";
-
 import {
-  normalizeProjectConfig,
-  type ChimpbaseAppDefinition,
   type ChimpbaseMigration,
   type ChimpbaseMigrationSource,
   type ChimpbasePlatformShim,
@@ -11,10 +7,6 @@ import {
 import {
   ChimpbaseHost,
   createRuntimeHost,
-  inferNumberEnv,
-  inferServerPort,
-  inferStorageEngine,
-  inferSubscriptionDispatchMode,
   type ActionExecutionResult,
   type ChimpbaseRuntimeEnvironment,
   type ChimpbaseRuntimeShim,
@@ -26,15 +18,7 @@ import {
   type StartedHost,
   type TelemetryRecord,
 } from "@chimpbase/host";
-import { loadProjectAppDefinition } from "@chimpbase/tooling/app";
-import {
-  applyInlinePostgresMigrations,
-  applyPostgresSqlMigrations,
-  createPostgresEngineAdapter,
-  ensurePostgresInternalTables,
-  openPostgresPool,
-  PostgresPollingEventBus,
-} from "@chimpbase/postgres";
+import { openPostgresStorage } from "@chimpbase/postgres";
 
 import {
   applyInlineSqlMigrations,
@@ -90,23 +74,7 @@ export const bunRuntimeShim: ChimpbaseRuntimeShim<Bun.Server<unknown>> = {
         if (!(config.storage.url !== null && config.storage.url.length > 0)) {
           throw new Error("@chimpbase/bun requires storage.url for postgres storage");
         }
-        const pool = openPostgresPool(config);
-        await applyPostgresSqlMigrations(pool, resolvedMigrations);
-        await applyInlinePostgresMigrations(pool, migrationsSql);
-        await ensurePostgresInternalTables(pool);
-        const eventBus = new PostgresPollingEventBus({ pool });
-        return {
-          createAdapter() {
-            return createPostgresEngineAdapter(pool, platform);
-          },
-          eventBus,
-          storage: {
-            close() {
-              return pool.end();
-            },
-          },
-          supportsConcurrentWorkers: true,
-        };
+        return await openPostgresStorage(config, platform, resolvedMigrations, migrationsSql);
       }
 
       const db = await openSqliteDatabase(projectDir, config);
@@ -133,63 +101,7 @@ export class ChimpbaseBunHost extends ChimpbaseHost<Bun.Server<unknown>> {
     super(options);
   }
 
-  static async load(projectDirInput: string): Promise<ChimpbaseBunHost> {
-    const projectDir = resolve(projectDirInput);
-    const app = await loadProjectAppDefinitionOrThrow(projectDir);
-    const config = buildConfigFromApp(app);
-    return await ChimpbaseBunHost.create({
-      app,
-      config,
-      projectDir,
-    });
-  }
-
   static async create(options: CreateHostOptions): Promise<ChimpbaseBunHost> {
     return await createRuntimeHost(ChimpbaseBunHost, bunRuntimeShim, options);
   }
-}
-
-function buildConfigFromApp(app: ChimpbaseAppDefinition): ChimpbaseProjectConfig {
-  const storageEngine = inferStorageEngine(bunEnvironment, {});
-  return normalizeProjectConfig({
-    project: {
-      name: app.project.name,
-    },
-    server: {
-      port: inferServerPort(bunEnvironment),
-    },
-    storage: {
-      engine: storageEngine,
-      path: storageEngine === "memory" || storageEngine === "postgres"
-        ? null
-        : bunEnvironment.get("CHIMPBASE_STORAGE_PATH") ?? join("data", `${app.project.name}.db`),
-      url: bunEnvironment.get("CHIMPBASE_DATABASE_URL") ?? bunEnvironment.get("DATABASE_URL") ?? null,
-    },
-    subscriptions: {
-      dispatch: inferSubscriptionDispatchMode(bunEnvironment),
-    },
-    telemetry: {
-      minLevel: app.telemetry.minLevel,
-      persist: app.telemetry.persist,
-    },
-    worker: {
-      concurrency: inferNumberEnv(bunEnvironment, "CHIMPBASE_WORKER_CONCURRENCY"),
-      leaseMs: inferNumberEnv(bunEnvironment, "CHIMPBASE_WORKER_LEASE_MS"),
-      maxAttempts: app.worker.maxAttempts,
-      pollIntervalMs: inferNumberEnv(bunEnvironment, "CHIMPBASE_WORKER_POLL_INTERVAL_MS"),
-      retryDelayMs: app.worker.retryDelayMs,
-    },
-    workflows: {
-      contractsDir: app.workflows.contractsDir ?? undefined,
-    },
-  });
-}
-
-async function loadProjectAppDefinitionOrThrow(projectDir: string): Promise<ChimpbaseAppDefinition> {
-  const app = await loadProjectAppDefinition(projectDir);
-  if (!(app !== null)) {
-    throw new Error(`missing chimpbase.app.ts in ${projectDir}`);
-  }
-
-  return app;
 }
