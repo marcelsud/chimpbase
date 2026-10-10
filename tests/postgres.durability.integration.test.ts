@@ -8,6 +8,7 @@ import {
   v,
   worker,
   workflow,
+  workflowActionStep,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
 
@@ -42,6 +43,85 @@ describeIfPg("PostgreSQL queue durability", () => {
     }
     await pool.end();
   });
+
+  for (const scenario of ["single failure", "exhausted retries", "recovered retry", "SQL failure"] as const) {
+    test(`workflow ${scenario} persists status after rollback`, async () => {
+      const workflowName = uniqueName("failure");
+      const workflowId = uniqueName("failure-instance");
+      const stepName = uniqueName("failure-step");
+      let attempts = 0;
+      const maxAttempts = scenario === "single failure" || scenario === "SQL failure" ? 1 : 2;
+      const step = action(stepName, async (ctx) => {
+        attempts += 1;
+        await ctx.kv.set(workflowId, { attempt: attempts });
+        if (scenario === "SQL failure") {
+          await ctx.db.query("SELECT 1 / 0", [], v.object({ value: v.number() }));
+        }
+        if (scenario !== "recovered retry" || attempts === 1) throw new Error(`failure ${attempts}`);
+      });
+      const definition = workflow({
+        name: workflowName, version: 1, initialState: () => ({}),
+        steps: [workflowActionStep("execute", stepName)],
+      });
+      const host = await createChimpbase({
+        project: { name: uniqueName("workflow-failure") },
+        storage: { engine: "postgres", url: postgresUrl() },
+        worker: { maxAttempts, retryDelayMs: 0 },
+        registrations: [definition, step,
+          action("launchFailure", async (ctx) => await ctx.workflow.start(definition, {}, { workflowId })),
+          action("inspectFailure", async (ctx) => await ctx.workflow.get(workflowId)),
+          action("inspectSideEffect", async (ctx) => await ctx.kv.get(workflowId)),
+        ],
+      });
+      const inspect = async () => (await host.executeAction("inspectFailure")).result;
+      const firstError = scenario === "SQL failure" ? "division by zero" : "failure 1";
+      try {
+        await host.executeAction("launchFailure");
+        await expect(host.processNextQueueJob()).rejects.toThrow(firstError);
+        expect(await inspect()).toMatchObject({
+          status: maxAttempts === 1 ? "failed" : "running", lastError: maxAttempts === 1 ? firstError : null,
+        });
+        expect((await host.executeAction("inspectSideEffect")).result).toBeNull();
+        const first = await pool.query<{ status: string; last_error: string; attempt_count: number; lease_expires_at_ms: number | null }>(
+          "SELECT status, last_error, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1",
+          [workflowId],
+        );
+        expect(first.rows).toEqual([{
+          status: maxAttempts === 1 ? "failed" : "pending", last_error: firstError,
+          attempt_count: 1, lease_expires_at_ms: null,
+        }]);
+        if (maxAttempts === 2) {
+          if (scenario === "recovered retry") await host.processNextQueueJob();
+          else await expect(host.processNextQueueJob()).rejects.toThrow("failure 2");
+          expect(await inspect()).toMatchObject({
+            status: scenario === "recovered retry" ? "completed" : "failed",
+            lastError: scenario === "recovered retry" ? null : "failure 2",
+          });
+          expect((await host.executeAction("inspectSideEffect")).result)
+            .toEqual(scenario === "recovered retry" ? { attempt: 2 } : null);
+          const finalJob = await pool.query<{ status: string; last_error: string; attempt_count: number; lease_expires_at_ms: number | null }>(
+            "SELECT status, last_error, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1",
+            [workflowId],
+          );
+          expect(finalJob.rows).toEqual([{
+            status: scenario === "recovered retry" ? "completed" : "failed",
+            last_error: scenario === "recovered retry" ? "failure 1" : "failure 2",
+            attempt_count: 2, lease_expires_at_ms: null,
+          }]);
+        }
+        const lease = await pool.query<{ lease_token: string | null; lease_expires_at_ms: number | null }>(
+          "SELECT lease_token, lease_expires_at_ms FROM _chimpbase_workflow_instances WHERE workflow_id = $1", [workflowId],
+        );
+        expect(lease.rows).toEqual([{ lease_token: null, lease_expires_at_ms: null }]);
+        expect(await host.processNextQueueJob()).toBeNull();
+      } finally {
+        await host.close();
+        await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1", [workflowId]);
+        await pool.query("DELETE FROM _chimpbase_workflow_instances WHERE workflow_id = $1", [workflowId]);
+        await pool.query("DELETE FROM _chimpbase_kv WHERE key = $1", [workflowId]);
+      }
+    });
+  }
 
   test("a queued job survives one host stopping and is processed by another", async () => {
     const queueName = uniqueName("restart");

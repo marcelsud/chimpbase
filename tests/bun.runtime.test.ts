@@ -13,11 +13,73 @@ import {
   subscription,
   v,
   worker,
+  workflow,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
 import { defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
+
+for (const engine of ["memory", "sqlite"] as const) {
+  for (const scenario of ["single failure", "exhausted retries", "recovered retry"] as const) {
+    test(`workflow ${scenario} persists status and clears leases (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-workflow-failure-"));
+      cleanupDirs.push(projectDir);
+      let attempts = 0;
+      const maxAttempts = scenario === "single failure" ? 1 : 2;
+      const host = await createChimpbase({
+        project: { name: "workflow-failure" }, projectDir,
+        storage: { engine }, worker: { maxAttempts, retryDelayMs: 0 },
+        registrations: [
+          workflow({
+            name: "failure", version: 1, initialState: () => ({}),
+            run(ctx) {
+              attempts += 1;
+              if (scenario === "recovered retry" && attempts === 2) return ctx.complete(ctx.state);
+              throw new Error(`failure ${attempts}`);
+            },
+          }),
+          action("launch", async (ctx) => await ctx.workflow.start("failure", {})),
+          action("inspect", async (ctx) => await ctx.db.query(
+            `SELECT w.status, w.last_error, w.lease_token, w.lease_expires_at_ms,
+              j.status AS job_status, j.last_error AS job_error, j.attempt_count,
+              j.lease_expires_at_ms AS job_lease
+             FROM _chimpbase_workflow_instances w CROSS JOIN _chimpbase_queue_jobs j`, [],
+            v.object({
+              status: v.string(), last_error: v.string().nullable(), lease_token: v.string().nullable(),
+              lease_expires_at_ms: v.number().nullable(), job_status: v.string(),
+              job_error: v.string().nullable(), attempt_count: v.number(), job_lease: v.number().nullable(),
+            }),
+          )),
+        ],
+      });
+      const inspect = async () => (await host.executeAction("inspect")).result;
+      try {
+        await host.executeAction("launch");
+        await expect(host.processNextQueueJob()).rejects.toThrow("failure 1");
+        expect(await inspect()).toEqual([{
+          status: maxAttempts === 1 ? "failed" : "running", last_error: maxAttempts === 1 ? "failure 1" : null,
+          lease_token: null, lease_expires_at_ms: null, job_status: maxAttempts === 1 ? "failed" : "pending",
+          job_error: "failure 1", attempt_count: 1, job_lease: null,
+        }]);
+        if (maxAttempts === 2) {
+          if (scenario === "recovered retry") await host.processNextQueueJob();
+          else await expect(host.processNextQueueJob()).rejects.toThrow("failure 2");
+          expect(await inspect()).toEqual([{
+            status: scenario === "recovered retry" ? "completed" : "failed",
+            last_error: scenario === "recovered retry" ? null : "failure 2",
+            lease_token: null, lease_expires_at_ms: null,
+            job_status: scenario === "recovered retry" ? "completed" : "failed",
+            job_error: scenario === "recovered retry" ? "failure 1" : "failure 2", attempt_count: 2, job_lease: null,
+          }]);
+        }
+        expect(await host.processNextQueueJob()).toBeNull();
+      } finally {
+        await host.close();
+      }
+    });
+  }
+}
 const countRowValidator = v.object({ count: v.number() });
 const detailRowValidator = v.object({ detail: v.string() });
 const itemRowValidator = v.object({

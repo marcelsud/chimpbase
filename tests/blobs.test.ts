@@ -584,7 +584,7 @@ for (const useFs of [false, true]) {
         const preserved = await blobs.get("uploads", "target.txt");
         expect(preserved === null ? null : await new Response(preserved.body).text()).toBe("before");
         if (root !== undefined) {
-          expect(await readdir(join(root, "uploads", "objects"), { recursive: true })).toEqual(files);
+          expect((await readdir(join(root, "uploads", "objects"), { recursive: true })).sort()).toEqual(files.sort());
         }
       } finally {
         await started.stop();

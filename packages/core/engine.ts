@@ -52,8 +52,10 @@ import type {
 } from "@chimpbase/runtime";
 import {
   isChimpbaseWorkflowDefinition,
+  isJsonObject,
   resolveChimpbaseActionRegistrationName,
   runWithActionInvoker,
+  tryParseJson,
   v,
 } from "@chimpbase/runtime";
 
@@ -1643,15 +1645,9 @@ export class ChimpbaseEngine {
       return;
     }
 
-    try {
-      await this.runWorkflowInstanceUntilSuspended(payload.workflowId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.failWorkflowInstance(payload.workflowId, message);
-      throw error;
-    } finally {
-      await this.releaseWorkflowLease(payload.workflowId, leaseToken);
-    }
+    // Failed execution rolls back the lease claim along with the workflow changes.
+    await this.runWorkflowInstanceUntilSuspended(payload.workflowId);
+    await this.releaseWorkflowLease(payload.workflowId, leaseToken);
   }
 
   private async runWorkflowInstanceUntilSuspended(workflowId: string): Promise<void> {
@@ -2436,7 +2432,7 @@ export class ChimpbaseEngine {
           lease_token = NULL,
           lease_expires_at_ms = NULL,
           updated_at = CURRENT_TIMESTAMP
-        WHERE workflow_id = ?1
+        WHERE workflow_id = ?1 AND status NOT IN ('completed', 'failed')
       `,
       [workflowId, errorMessage],
       databaseRowValidator,
@@ -2793,6 +2789,17 @@ export class ChimpbaseEngine {
 
     const nextStatus = shouldDlq ? "dlq" : (attempts >= this.worker.maxAttempts ? "failed" : "pending");
     const nextAvailableAtMs = this.platform.now() + this.worker.retryDelayMs;
+    if (queueName === INTERNAL_WORKFLOW_QUEUE_NAME && attempts >= this.worker.maxAttempts) {
+      await this.runInTransaction(async () => {
+        const payloadJson = await this.adapter.getQueueJobPayload(jobId);
+        const payload = payloadJson === null ? null : tryParseJson(payloadJson);
+        if (isJsonObject(payload) && typeof payload.workflowId === "string" && payload.workflowId.length > 0) {
+          await this.failWorkflowInstance(payload.workflowId, errorMessage);
+        }
+        await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
+      });
+      return;
+    }
     await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
   }
 
