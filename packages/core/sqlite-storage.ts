@@ -10,11 +10,12 @@ import type {
   ChimpbaseEventRecord,
   ChimpbaseQueueJobRecord,
 } from "./engine.ts";
-import { createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "./engine.ts";
+import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "./engine.ts";
 import { createSqliteKysely } from "./sqlite-kysely.ts";
 import type { ChimpbasePlatformShim } from "./host.ts";
 import type {
   ChimpbaseBlobListOptions,
+  ChimpbaseBlobPutOptions,
   ChimpbaseBlobUploadListOptions,
   ChimpbaseCollectionFilter,
   ChimpbaseCollectionFindOptions,
@@ -299,6 +300,10 @@ export function createSqliteEngineAdapter(
 
         throw error;
       }
+    },
+    async lockQueueJob(jobId: number, attempt: number): Promise<boolean> {
+      return db.query("SELECT id FROM _chimpbase_queue_jobs WHERE id = ?1 AND status = 'processing' AND attempt_count = ?2")
+        .all(jobId, attempt).length > 0;
     },
     async collectionDelete(name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> {
       const matched = findCollectionDocuments(db, name, filter);
@@ -627,31 +632,32 @@ export function createSqliteEngineAdapter(
         `,
       ).run(scheduleName, cronExpression, nextFireAtMs);
     },
-    async blobPutMetadata(row: ChimpbaseBlobMetaRow) {
-      db.query(
-        `
+    async blobPutMetadata(row: ChimpbaseBlobMetaRow, conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">) {
+      const ifMatch = conditions?.ifMatch;
+      const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
+        JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
+      const sql = ifMatch !== undefined && ifMatch.length > 0
+        ? `UPDATE _chimpbase_blobs SET size = ?3, etag = ?4, content_type = ?5,
+             metadata_json = ?6, driver_ref = ?7, updated_at = ?8
+           WHERE bucket = ?1 AND key = ?2 AND etag = ?9`
+        : `
           INSERT INTO _chimpbase_blobs (
             bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-          ON CONFLICT(bucket, key) DO UPDATE SET
+          ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
             size = excluded.size,
             etag = excluded.etag,
             content_type = excluded.content_type,
             metadata_json = excluded.metadata_json,
             driver_ref = excluded.driver_ref,
-            updated_at = excluded.updated_at
-        `,
-      ).run(
-        row.bucket,
-        row.key,
-        row.size,
-        row.etag,
-        row.contentType,
-        JSON.stringify(row.metadata),
-        row.driverRef,
-        row.createdAt,
-        row.updatedAt,
-      );
+            updated_at = excluded.updated_at`}
+        `;
+      if (ifMatch !== undefined && ifMatch.length > 0) {
+        params.splice(7, 1);
+        params.push(ifMatch);
+      }
+      const result = db.query(sql).run(...params);
+      if (result.changes === 0) throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
     },
     async blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null> {
       const [row] = parseRows(db.query(

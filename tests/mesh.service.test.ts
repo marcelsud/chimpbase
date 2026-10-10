@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
+import { resolveService } from "../packages/mesh/src/service.ts";
+import type { AnyServiceDefinition } from "../packages/mesh/src/types.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { v } from "../packages/runtime/index.ts";
 
@@ -31,6 +33,52 @@ async function createMeshHost() {
 }
 
 describe("@chimpbase/mesh service()", () => {
+  test("shared mixin ancestors merge without being treated as cycles", async () => {
+    const host = await createMeshHost();
+    try {
+      const common = service({
+        name: "common",
+        settings: { source: "common", winner: "common" },
+        methods: { tag: () => "common" },
+        actions: { ping: () => "common" },
+      });
+      const left = service({ name: "left", mixins: [common], settings: { left: true, winner: "left" } });
+      const right = service({ name: "right", mixins: [common], settings: { right: true, winner: "right" } });
+      const combined = service({
+        name: "combined",
+        mixins: [left, right],
+        settings: { winner: "combined" },
+        actions: {
+          inspect: (_ctx, _args: unknown, self) => ({ settings: self.settings, tag: self.methods.tag() }),
+        },
+      });
+      host.register(chimpbaseMesh({ services: [combined], transport: "local-only" }));
+      const started = await host.start({ serve: false, runWorker: false });
+      try {
+        expect((await host.executeAction("v1.combined.ping")).result).toBe("common");
+        expect((await host.executeAction("v1.combined.inspect")).result).toEqual({
+          settings: { source: "common", left: true, right: true, winner: "combined" },
+          tag: "common",
+        });
+      } finally {
+        await started.stop();
+      }
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("mixin cycles still reject direct and indirect recursion", () => {
+    const direct: AnyServiceDefinition = { name: "direct" };
+    direct.mixins = [direct];
+    expect(() => resolveService(direct)).toThrow('service "direct" has a circular mixin reference');
+
+    const first: AnyServiceDefinition = { name: "first" };
+    const second: AnyServiceDefinition = { name: "second", mixins: [first] };
+    first.mixins = [second];
+    expect(() => resolveService(first)).toThrow('service "first" has a circular mixin reference');
+  });
+
   test("prefixes actions with version", async () => {
     const host = await createMeshHost();
     try {

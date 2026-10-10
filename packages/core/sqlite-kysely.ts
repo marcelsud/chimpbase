@@ -12,7 +12,7 @@ import {
   SqliteQueryCompiler,
 } from "kysely";
 
-interface ChimpbaseKyselyExecutor {
+export interface ChimpbaseKyselyExecutor {
   executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>>;
 }
 
@@ -40,7 +40,7 @@ class ChimpbaseKyselyConnection implements DatabaseConnection {
   }
 }
 
-class ChimpbaseKyselyDriver implements Driver {
+export class ChimpbaseKyselyDriver implements Driver {
   private readonly connection: DatabaseConnection;
 
   constructor(private readonly executor: ChimpbaseKyselyExecutor) {

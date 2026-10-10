@@ -368,6 +368,111 @@ describeIfPg("PostgreSQL queue durability", () => {
     }
   });
 
+  for (const batchSize of [1, 2]) {
+    test(`a live worker keeps ownership after lease expiry (batch ${batchSize})`, async () => {
+      const queueName = uniqueName("live-lease");
+      queueNames.add(queueName);
+      const seen: string[] = [];
+      let started!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const consume = worker(queueName, async (ctx, payload: { id: string }, execution) => {
+        seen.push(payload.id);
+        if (payload.id === "first" && execution?.attempt === 1) {
+          started();
+          await blocked;
+        }
+        await ctx.stream.append(queueName, "processed", payload);
+      });
+      const a = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        workerRuntime: { leaseMs: 30 },
+        registrations: [consume, action("enqueue", async (ctx) => {
+          await ctx.enqueue(queueName, { id: "first" });
+          if (batchSize === 2) await ctx.enqueue(queueName, { id: "second" });
+        })],
+      });
+      const b = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        workerRuntime: { leaseMs: 30 }, registrations: [consume],
+      });
+      let running: Promise<unknown> | undefined;
+      try {
+        await a.executeAction("enqueue");
+        running = a.engine.processNextQueueJobs(batchSize);
+        await entered;
+        await Bun.sleep(60);
+        const other = await b.processNextQueueJob();
+        release();
+        await running;
+        expect(other === null).toBe(batchSize === 1);
+        expect(seen).toEqual(batchSize === 1 ? ["first"] : ["first", "second"]);
+        const effects = await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM _chimpbase_stream_events WHERE stream_name = $1", [queueName],
+        );
+        expect(effects.rows[0]?.count).toBe(batchSize);
+        const rows = await pool.query<{ attempt_count: number; status: string }>(
+          "SELECT attempt_count, status FROM _chimpbase_queue_jobs WHERE queue_name = $1 ORDER BY id", [queueName],
+        );
+        expect(rows.rows).toEqual(batchSize === 1
+          ? [{ attempt_count: 1, status: "completed" }]
+          : [{ attempt_count: 1, status: "completed" }, { attempt_count: 2, status: "completed" }]);
+      } finally {
+        release();
+        await running;
+        await a.close();
+        await b.close();
+        await pool.query("DELETE FROM _chimpbase_stream_events WHERE stream_name = $1", [queueName]);
+      }
+    });
+  }
+
+  test("a stale failure cannot run hooks or overwrite a recovered job", async () => {
+    const queueName = uniqueName("stale-failure");
+    const dlqName = `${queueName}.dlq`;
+    queueNames.add(queueName);
+    queueNames.add(dlqName);
+    let rolledBack!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { rolledBack = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let hooks = 0;
+    const a = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, workerRuntime: { leaseMs: 30 }, worker: { maxAttempts: 1 },
+      registrations: [worker(queueName, async () => { throw new Error("old attempt failed"); }, {
+        dlq: dlqName, onFailure: async () => { hooks += 1; },
+      }), action("enqueue", async (ctx) => await ctx.enqueue(queueName, {}))],
+    });
+    const b = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, registrations: [worker(queueName, async () => {})],
+    });
+    const adapter = a.engine.getBlobsAdapter();
+    const rollback = adapter.rollbackTransaction.bind(adapter);
+    adapter.rollbackTransaction = async () => { await rollback(); rolledBack(); await blocked; };
+    let running: Promise<unknown> | undefined;
+    try {
+      await a.executeAction("enqueue");
+      running = a.processNextQueueJob().catch((error: unknown) => error);
+      await entered;
+      await Bun.sleep(60);
+      expect(await b.processNextQueueJob()).not.toBeNull();
+      release();
+      expect(await running).toMatchObject({ message: "old attempt failed" });
+      expect(hooks).toBe(0);
+      const rows = await pool.query<{ attempt_count: number; status: string; queue_name: string }>(
+        "SELECT attempt_count, status, queue_name FROM _chimpbase_queue_jobs WHERE queue_name = ANY($1::text[])", [[queueName, dlqName]],
+      );
+      expect(rows.rows).toEqual([{ attempt_count: 2, status: "completed", queue_name: queueName }]);
+    } finally {
+      release();
+      await running;
+      adapter.rollbackTransaction = rollback;
+      await a.close();
+      await b.close();
+    }
+  });
+
   test("a workflow waiting for a signal resumes on a replacement host", async () => {
     const workflowName = uniqueName("workflow");
     const workflowId = uniqueName("workflow-instance");

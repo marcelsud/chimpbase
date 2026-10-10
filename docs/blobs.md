@@ -55,6 +55,8 @@ await ctx.blobs.put("uploads", "photos/cat.jpg", bytes, { ifNoneMatch: "*" });
 await ctx.blobs.put("uploads", "photos/cat.jpg", bytes, { ifMatch: previousEtag });
 ```
 
+Conditional writes are atomic across hosts sharing the same database. PostgreSQL serializes writes and deletes for each bucket/key inside the transaction; SQLite uses its write transaction. Parallel conditional puts in one action also check the condition when saving metadata, and discarded payloads are cleaned up.
+
 Partial reads:
 
 ```ts
@@ -135,6 +137,8 @@ The `fsBlobDriver` writes to:
 ```
 
 Object and part IDs are fixed-length UUIDs. Logical keys stay in database metadata, so long keys do not exceed filesystem filename limits. Replacing a part writes a new payload; the previous payload remains available until the transaction commits.
+
+Replicas sharing database metadata must also share the payload storage. The Bun advanced Docker Compose example sets `ATTACHMENTS_ROOT` and mounts one named attachments volume in all three app replicas. A separate `memoryBlobDriver()` in each replica cannot serve another replica's objects.
 
 Use `rsync -a --delete <root>/ <backup-root>/` to mirror the stored payloads, together with a database backup to preserve their logical keys and metadata. Run it from a chimpbase `cron(...)` for periodic local backup.
 

@@ -161,22 +161,41 @@ function buildCollectionEntries(
   return [
     action(definition.actionNames.list, async (ctx, input: RestListInput) => {
       const documents = await ctx.collection.find(definition.collectionName, input.filter, { limit: input.limit });
+      if (definition.onRead === undefined || documents.length === 0) {
+        return documents;
+      }
+      // shortcut: reads this collection's metadata; add an IN filter if versioned collections outgrow a single batch.
+      const metadata = await ctx.collection.find(
+        REST_COLLECTION_METADATA_COLLECTION,
+        { collectionName: definition.collectionName },
+      );
+      const documentIds = new Set(documents.map((document) => document.id));
+      const schemaVersions = new Map<string, number>();
+      for (const record of metadata) {
+        if (typeof record.documentId === "string" && documentIds.has(record.documentId) && !schemaVersions.has(record.documentId)) {
+          const versioned = restCollectionMetadataValidator.parse(record, "rest collection metadata");
+          schemaVersions.set(versioned.documentId, versioned.schemaVersion);
+        }
+      }
       return await Promise.all(
         documents.map(async (document) => await applyReadTransform(
+          ctx.collection,
           definition,
           document,
           "list",
-          await resolveSchemaVersion(ctx.collection, definition, document),
+          typeof document.id === "string"
+            ? schemaVersions.get(document.id) ?? readLegacyDocumentSchemaVersion(document)
+            : null,
         )),
       );
     }),
     action(definition.actionNames.get, async (ctx, id: string) => {
       const document = await ctx.collection.findOne(definition.collectionName, { id });
       return await applyReadTransform(
+        ctx.collection,
         definition,
         document,
         "get",
-        await resolveSchemaVersion(ctx.collection, definition, document),
       );
     }),
     action(definition.actionNames.create, async (ctx, document: Record<string, unknown>) => {
@@ -185,10 +204,10 @@ function buildCollectionEntries(
       await persistSchemaVersion(ctx.collection, definition, id);
       const stored = await ctx.collection.findOne(definition.collectionName, { id });
       return await applyReadTransform(
+        ctx.collection,
         definition,
         stored,
         "create",
-        await resolveSchemaVersion(ctx.collection, definition, stored),
       );
     }),
     action(definition.actionNames.update, async (ctx, input: RestUpdateInput) => {
@@ -202,16 +221,16 @@ function buildCollectionEntries(
         input.patch,
         "update",
         current,
-        await resolveSchemaVersion(ctx.collection, definition, current),
+        definition.onWrite === undefined ? null : await resolveSchemaVersion(ctx.collection, definition, current),
       );
       await ctx.collection.update(definition.collectionName, { id: input.id }, patch);
       await persistSchemaVersion(ctx.collection, definition, input.id);
       const stored = await ctx.collection.findOne(definition.collectionName, { id: input.id });
       return await applyReadTransform(
+        ctx.collection,
         definition,
         stored,
         "update",
-        await resolveSchemaVersion(ctx.collection, definition, stored),
       );
     }),
     action(definition.actionNames.delete, async (ctx, id: string) => {
@@ -461,10 +480,11 @@ function sanitizeWritableDocument(
 }
 
 async function applyReadTransform(
+  collection: Pick<ChimpbaseCollectionClient, "findOne">,
   definition: ResolvedRestCollectionDefinition,
   document: Record<string, unknown> | null,
   operation: RestCollectionReadOperation,
-  schemaVersion: number | null,
+  schemaVersion?: number | null,
 ): Promise<unknown> {
   if (!(document !== null)) {
     return null;
@@ -478,7 +498,7 @@ async function applyReadTransform(
     configuredSchemaVersion: definition.schemaVersion,
     document,
     operation,
-    schemaVersion,
+    schemaVersion: schemaVersion === undefined ? await resolveSchemaVersion(collection, definition, document) : schemaVersion,
   });
 }
 

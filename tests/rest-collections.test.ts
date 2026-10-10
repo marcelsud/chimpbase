@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { restCollections } from "../packages/rest-collections/src/index.ts";
 import { readJsonResponse } from "./support/http.ts";
-import { v } from "../packages/runtime/index.ts";
+import { action, contextExtension, v } from "../packages/runtime/index.ts";
 
 
 const cleanupDirs: string[] = [];
@@ -21,6 +21,62 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/rest-collections", () => {
+  for (const transformed of [false, true]) {
+    test(`lists 50 documents with ${transformed ? "one metadata batch" : "no metadata reads"}`, async () => {
+      const metadataReads: string[] = [];
+      const metadataCollection = "__chimpbase.rest.collection_metadata";
+      const host = await createChimpbase({
+        storage: { engine: "memory" },
+        registrations: [
+          contextExtension("countCollectionReads", {
+            context(ctx) {
+              for (const method of ["find", "findOne"] as const) {
+                Reflect.set(ctx.collection, method, new Proxy(ctx.collection[method], {
+                  apply(target, thisArg: unknown, args: unknown[]): unknown {
+                    if (args[0] === metadataCollection) metadataReads.push(method);
+                    return Reflect.apply(target, thisArg, args);
+                  },
+                }));
+              }
+              return null;
+            },
+          }),
+          restCollections({
+            collections: {
+              notes: {
+                onRead: transformed ? async ({ document, schemaVersion }) => ({ ...document, observedVersion: schemaVersion }) : undefined,
+                schemaVersion: 2,
+              },
+            },
+          }),
+          action("seedList", async (ctx) => {
+            await ctx.collection.insert(metadataCollection, { collectionName: "notes", documentId: "outside-the-page", schemaVersion: "invalid" });
+            for (let index = 0; index < 50; index++) {
+              const documentId = await ctx.collection.insert("notes", { index, schemaVersion: index === 1 ? 1 : undefined });
+              if (index === 0) {
+                await ctx.collection.insert(metadataCollection, { collectionName: "notes", documentId, schemaVersion: 2 });
+              }
+            }
+          }),
+        ],
+      });
+      try {
+        await host.executeAction("seedList");
+        const outcome = await host.executeRoute(new Request("http://rest.test/notes"));
+        const documents = await readJsonResponse<Array<{ index: number; observedVersion?: number | null }>>(outcome.response);
+        expect(documents).toHaveLength(50);
+        expect(metadataReads).toEqual(transformed ? ["find"] : []);
+        if (transformed) {
+          expect(documents.find((document) => document.index === 0)?.observedVersion).toBe(2);
+          expect(documents.find((document) => document.index === 1)?.observedVersion).toBe(1);
+          expect(documents.find((document) => document.index === 2)?.observedVersion).toBeNull();
+        }
+      } finally {
+        await host.close();
+      }
+    });
+  }
+
   test("exposes CRUD endpoints for an explicit collection", async () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-rest-collections-"));
     cleanupDirs.push(projectDir);

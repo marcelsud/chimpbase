@@ -19,9 +19,11 @@ import {
   createChimpbaseEventDeliveryPayloads,
   escapeSqlLikePrefix,
   paginateChimpbaseBlobMetadata,
+  ChimpbasePreconditionFailedError,
 } from "@chimpbase/core";
 import type {
   ChimpbaseBlobListOptions,
+  ChimpbaseBlobPutOptions,
   ChimpbaseBlobUploadListOptions,
   ChimpbaseCollectionFilter,
   ChimpbaseCollectionFindOptions,
@@ -517,15 +519,17 @@ export function createPostgresEngineAdapter(
 
       return result.rows;
     },
+    async lockQueueJob(jobId: number, attempt: number): Promise<boolean> {
+      const result = await queryable().query<{ id: number }>(
+        "SELECT id FROM _chimpbase_queue_jobs WHERE id = $1 AND status = 'processing' AND attempt_count = $2 FOR UPDATE",
+        [jobId, attempt],
+      );
+      return result.rows.length > 0;
+    },
     async collectionDelete(name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> {
-      const matched = await findCollectionDocuments(queryable(), name, filter);
-      for (const row of matched) {
-        await queryable().query(
-          "DELETE FROM _chimpbase_collections WHERE collection_name = $1 AND document_id = $2",
-          [name, row.document_id],
-        );
-      }
-      return matched.length;
+      const { where, params } = collectionWhere(name, filter);
+      const result = await queryable().query(`DELETE FROM _chimpbase_collections WHERE ${where}`, params);
+      return result.rowCount ?? 0;
     },
     async collectionFind<TDocument>(
       name: string,
@@ -574,19 +578,21 @@ export function createPostgresEngineAdapter(
       return result.rows.map((row) => row.collection_name);
     },
     async collectionUpdate(name: string, filter: ChimpbaseCollectionFilter, patch: ChimpbaseCollectionPatch): Promise<number> {
-      const matched = await findCollectionDocuments(queryable(), name, filter);
-      for (const row of matched) {
-        const current = parseJsonObject(row.document_json, "collection document");
-        await queryable().query(
-          `
-            UPDATE _chimpbase_collections
-            SET document_json = $1::jsonb, updated_at = NOW()
-            WHERE collection_name = $2 AND document_id = $3
-          `,
-          [JSON.stringify({ ...current, ...patch }), name, row.document_id],
-        );
-      }
-      return matched.length;
+      const { where, params } = collectionWhere(name, filter);
+      const patchJson = JSON.stringify({ ...patch });
+      const storedPatch = parseJsonObject(patchJson, "collection patch");
+      const removedKeys = Object.keys(patch).filter((key) => !Object.hasOwn(storedPatch, key));
+      params.push(removedKeys, patchJson);
+      const result = await queryable().query(
+        `
+          UPDATE _chimpbase_collections
+          SET document_json = (document_json - $${params.length - 1}::text[]) || $${params.length}::jsonb,
+              updated_at = NOW()
+          WHERE ${where}
+        `,
+        params,
+      );
+      return result.rowCount ?? 0;
     },
     async persistEvents(events: ChimpbaseEventRecord[]) {
       const connection = queryable();
@@ -868,32 +874,35 @@ export function createPostgresEngineAdapter(
         [scheduleName, cronExpression, nextFireAtMs],
       );
     },
-    async blobPutMetadata(row: ChimpbaseBlobMetaRow): Promise<void> {
-      await queryable().query(
-        `
+    async blobLockMetadata(bucket: string, key: string): Promise<void> {
+      await queryable().query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify([bucket, key])]);
+    },
+    async blobPutMetadata(row: ChimpbaseBlobMetaRow, conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">): Promise<void> {
+      const ifMatch = conditions?.ifMatch;
+      const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
+        JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
+      const sql = ifMatch !== undefined && ifMatch.length > 0
+        ? `UPDATE _chimpbase_blobs SET size = $3, etag = $4, content_type = $5,
+             metadata = $6::jsonb, driver_ref = $7, updated_at = $8::timestamptz
+           WHERE bucket = $1 AND key = $2 AND etag = $9`
+        : `
           INSERT INTO _chimpbase_blobs (
             bucket, key, size, etag, content_type, metadata, driver_ref, created_at, updated_at
           ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9::timestamptz)
-          ON CONFLICT(bucket, key) DO UPDATE SET
+          ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
             size = excluded.size,
             etag = excluded.etag,
             content_type = excluded.content_type,
             metadata = excluded.metadata,
             driver_ref = excluded.driver_ref,
-            updated_at = excluded.updated_at
-        `,
-        [
-          row.bucket,
-          row.key,
-          row.size,
-          row.etag,
-          row.contentType,
-          JSON.stringify(row.metadata),
-          row.driverRef,
-          row.createdAt,
-          row.updatedAt,
-        ],
-      );
+            updated_at = excluded.updated_at`}
+        `;
+      if (ifMatch !== undefined && ifMatch.length > 0) {
+        params.splice(7, 1);
+        params.push(ifMatch);
+      }
+      const result = await queryable().query(sql, params);
+      if (result.rowCount === 0) throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
     },
     async blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null> {
       const result = await queryable().query<{
@@ -1214,23 +1223,44 @@ async function findCollectionDocuments(
   filter: ChimpbaseCollectionFilter = {},
   options?: ChimpbaseCollectionFindOptions,
 ): Promise<PersistedCollectionDocument[]> {
-  const result = await queryable.query<PersistedCollectionDocument>(
-    `
-      SELECT
-        document_id,
-        document_json::text AS document_json
-      FROM _chimpbase_collections
-      WHERE collection_name = $1
-      ORDER BY document_id ASC
-    `,
-    [name],
-  );
-
-  const matched = result.rows.filter((row) => {
-    const document = parseJsonObject(row.document_json, "collection document");
-    return Object.entries(filter).every(([key, value]) => document[key] === value);
-  });
-
+  const { where, params } = collectionWhere(name, filter);
+  let sql = `SELECT document_id, document_json::text AS document_json
+    FROM _chimpbase_collections WHERE ${where}`;
   const limit = options?.limit;
-  return typeof limit === "number" ? matched.slice(0, limit) : matched;
+  if (typeof limit === "number" && limit < 0 && Number.isFinite(limit) && Math.trunc(limit) < 0) {
+    params.push(Math.max(-Number.MAX_SAFE_INTEGER, Math.trunc(limit)));
+    sql = `WITH matched AS (${sql})
+      SELECT document_id, document_json FROM matched ORDER BY document_id ASC
+      LIMIT GREATEST((SELECT COUNT(*) FROM matched) + $${params.length}::bigint, 0)`;
+  } else {
+    sql += " ORDER BY document_id ASC";
+    if (typeof limit === "number" && limit !== Infinity && (Number.isNaN(limit) || limit < Number.MAX_SAFE_INTEGER)) {
+      params.push(Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 0);
+      sql += ` LIMIT $${params.length}`;
+    }
+  }
+  return (await queryable.query<PersistedCollectionDocument>(sql, params)).rows;
+}
+
+function collectionWhere(name: string, filter: ChimpbaseCollectionFilter): { where: string; params: unknown[] } {
+  const clauses = ["collection_name = $1"];
+  const params: unknown[] = [name];
+  for (const [key, value] of Object.entries(filter)) {
+    const primitive = value === null || typeof value === "string" || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value));
+    const inherited: unknown = key === "__proto__" ? Object.prototype : Object.getOwnPropertyDescriptor(Object.prototype, key)?.value;
+    if (!primitive && value !== inherited) {
+      clauses.push("FALSE");
+      continue;
+    }
+    params.push(key);
+    const keyParam = `$${params.length}::text`;
+    if (primitive) {
+      params.push(JSON.stringify(value));
+      clauses.push(`document_json -> ${keyParam} = $${params.length}::jsonb`);
+    } else {
+      clauses.push(`NOT (document_json ? ${keyParam})`);
+    }
+  }
+  return { where: clauses.join(" AND "), params };
 }

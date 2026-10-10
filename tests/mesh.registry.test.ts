@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { v } from "../packages/runtime/index.ts";
+import { upsertNode } from "../packages/mesh/src/registry.ts";
 
 const cleanupDirs: string[] = [];
 
@@ -28,29 +30,161 @@ async function createMeshHost() {
   });
 }
 
+async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error("waitFor timed out");
+}
+
 describe("@chimpbase/mesh registry", () => {
   test("advertises the node row on start and removes it on stop", async () => {
     const host = await createMeshHost();
     try {
       const svc = service({
         name: "alpha",
-        actions: { ping: async () => "pong" },
+        actions: {
+          nodes: async (ctx) => await ctx.db.query(
+            "SELECT node_id FROM _chimpbase_mesh_nodes",
+            [],
+            v.object({ node_id: v.string() }),
+          ),
+        },
       });
 
       host.register(chimpbaseMesh({ services: [svc], transport: "local-only" }));
 
       const started = await host.start({ serve: false, runWorker: false });
       try {
-        const snapshot = await host.executeAction("v1.alpha.ping");
-        expect(snapshot.result).toBe("pong");
+        expect((await host.executeAction("v1.alpha.nodes")).result).toHaveLength(1);
+      } finally {
+        await started.stop();
+      }
+      expect((await host.executeAction("v1.alpha.nodes")).result).toEqual([]);
+    } finally {
+      await host.close();
+    }
+  });
 
-        const rows = await host.executeAction("__chimpbase.mesh.inspect.nodes", []).catch(() => null);
-        // inspect action isn't built-in; use a registered fixture action:
-        expect(rows === null || rows === null).toBe(true);
+  test("shutdown waits for an unrelated action rollback before removing its registry row", async () => {
+    const host = await createMeshHost();
+    let entered!: () => void;
+    let release!: () => void;
+    const busy = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0, transport: "local-only",
+      services: [service({ name: "busy", actions: {
+        hold: async (ctx) => { await ctx.kv.set("pending", true); entered(); await blocked; throw new Error("rollback request"); },
+        nodes: async (ctx) => await ctx.db.query("SELECT node_id FROM _chimpbase_mesh_nodes"),
+        pending: async (ctx) => await ctx.kv.get("pending"),
+      } })],
+    }));
+    const started = await host.start({ serve: false, runWorker: false });
+    let stopping: Promise<void> | undefined;
+    let running: Promise<unknown> | undefined;
+    let stopped = false;
+    try {
+      running = host.executeAction("v1.busy.hold").catch((error: unknown) => error);
+      await busy;
+      stopping = started.stop().then(() => { stopped = true; });
+      await Bun.sleep(30);
+      expect(stopped).toBe(false);
+      release();
+      expect(await running).toMatchObject({ message: "rollback request" });
+      await stopping;
+      expect((await host.executeAction("v1.busy.nodes")).result).toEqual([]);
+      expect((await host.executeAction("v1.busy.pending")).result).toBeNull();
+    } finally {
+      release();
+      await running;
+      await (stopping ?? started.stop());
+      await host.close();
+    }
+  });
+
+  test("heartbeats discover, expire, and rediscover peers from registry rows", async () => {
+    const host = await createMeshHost();
+    try {
+      const svc = service({
+        name: "observer",
+        actions: {
+          peers: (ctx) => ctx.mesh?.peers().map((peer) => peer.nodeId),
+          refreshPeer: async (ctx) => await upsertNode(ctx, {
+            advertisedUrl: null,
+            metadata: {},
+            nodeId: "peer-without-events",
+            services: [],
+            startedAtMs: Date.now(),
+          }),
+        },
+      });
+      host.register(chimpbaseMesh({
+        heartbeatMs: 20,
+        offlineAfterMs: 150,
+        services: [svc],
+        transport: "local-only",
+      }));
+      const started = await host.start({ serve: false, runWorker: false });
+      try {
+        const peers = async () => (await host.executeAction("v1.observer.peers")).result;
+        expect(await peers()).toEqual([]);
+        await host.executeAction("v1.observer.refreshPeer");
+        await waitFor(async () => JSON.stringify(await peers()) === '["peer-without-events"]');
+        await waitFor(async () => JSON.stringify(await peers()) === "[]");
+        await host.executeAction("v1.observer.refreshPeer");
+        await waitFor(async () => JSON.stringify(await peers()) === '["peer-without-events"]');
       } finally {
         await started.stop();
       }
     } finally {
+      await host.close();
+    }
+  });
+
+  test("slow heartbeats do not overlap and shutdown waits for them", async () => {
+    const host = await createMeshHost();
+    let releaseHeartbeat = () => {};
+    const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
+    let heartbeatUpdates = 0;
+    let serviceStopped = false;
+    const svc = service({
+      name: "slow",
+      started: (ctx) => {
+        ctx.db.query = new Proxy(ctx.db.query, {
+          apply(target, thisArg: unknown, args: unknown[]): unknown {
+            if (typeof args[0] === "string" && args[0].startsWith("UPDATE _chimpbase_mesh_nodes")) {
+              heartbeatUpdates += 1;
+              return heartbeatGate.then((): unknown => {
+                return Reflect.apply(target, thisArg, args);
+              });
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        });
+      },
+      stopped: () => { serviceStopped = true; },
+    });
+    host.register(chimpbaseMesh({ heartbeatMs: 20, services: [svc], transport: "local-only" }));
+    const started = await host.start({ serve: false, runWorker: false });
+    let stopping: Promise<void> | undefined;
+    try {
+      await waitFor(async () => heartbeatUpdates > 0);
+      await Bun.sleep(70);
+      expect(heartbeatUpdates).toBe(1);
+      stopping = started.stop();
+      await Bun.sleep(30);
+      expect(serviceStopped).toBe(false);
+      releaseHeartbeat();
+      await stopping;
+      expect(serviceStopped).toBe(true);
+      await Bun.sleep(50);
+      expect(heartbeatUpdates).toBe(1);
+    } finally {
+      releaseHeartbeat();
+      await (stopping ?? started.stop());
       await host.close();
     }
   });

@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { AsyncResource } from "node:async_hooks";
 
 import {
   createChimpbaseRegistry,
   createDefaultChimpbasePlatformShim,
+  normalizeProjectConfig,
   NoopEventBus,
   type ChimpbaseEventBus,
   type ChimpbaseEventBusCallback,
   type ChimpbaseEventRecord,
 } from "../packages/core/index.ts";
 import { ChimpbaseEngine } from "../packages/core/engine.ts";
+import { ChimpbaseHost } from "../packages/host/src/runtime.ts";
+import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { Database } from "bun:sqlite";
 import {
   createSqliteEngineAdapter,
@@ -38,10 +42,107 @@ async function createTestEngine(
     worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
   });
 
-  return { adapter, db, engine, registry };
+  return { adapter, db, engine, platform, registry };
 }
 
 describe("event bus", () => {
+  for (const dispatch of ["sync", "async"] as const) {
+    test(`${dispatch} bus delivery waits for an unrelated action rollback before ack`, async () => {
+      let callback: ChimpbaseEventBusCallback | undefined;
+      const bus: ChimpbaseEventBus = {
+        publish: async () => {}, start(handler) { callback = handler; }, stop() {},
+      };
+      const { db, engine, platform, registry } = await createTestEngine(bus, dispatch);
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      registry.actions.set("blocked", action("blocked", async (ctx) => {
+        await ctx.kv.set("rolled-back", true);
+        entered.resolve();
+        await release.promise;
+        throw new Error("action failed");
+      }));
+      registry.actions.set("nested", action("nested", async (ctx) => {
+        await ctx.kv.set("delivered", true);
+      }));
+      registry.subscriptions.set("external", [{
+        name: "external", idempotent: true,
+        handler: async (ctx) => { await ctx.action("nested"); },
+      }]);
+      const host = new ChimpbaseHost({
+        config: normalizeProjectConfig({ storage: { engine: "memory" }, subscriptions: { dispatch } }),
+        createWorkerEngine: () => engine, debugEnabled: false, engine, platform,
+        projectDir: process.cwd(), registry, runtime: bunRuntimeShim,
+        storage: { close() { db.close(); } }, supportsConcurrentWorkers: false,
+      });
+      const started = await host.start({ runWorker: false, serve: false });
+      let acked = false;
+      try {
+        let deliver: (() => Promise<void>) | undefined;
+        registry.actions.set("bindDelivery", action("bindDelivery", () => {
+          deliver = AsyncResource.bind(async () => {
+            if (callback === undefined) throw new Error("bus did not start");
+            await callback([{ id: 42, name: "external", payload: {}, payloadJson: "{}" }], async () => {
+              expect(db.inTransaction).toBe(false);
+              acked = true;
+            });
+          });
+        }));
+        await host.executeAction("bindDelivery");
+        const pendingAction = host.executeAction("blocked").catch((error: unknown) => error);
+        await entered.promise;
+        if (deliver === undefined) throw new Error("delivery did not bind");
+        const delivery = deliver();
+        await Promise.resolve();
+        expect(acked).toBe(false);
+        expect(db.query("SELECT key FROM _chimpbase_kv WHERE key = 'delivered'").all()).toEqual([]);
+        release.resolve();
+        expect(await pendingAction).toMatchObject({ message: "action failed" });
+        await delivery;
+        expect(acked).toBe(true);
+        if (dispatch === "async") {
+          expect(db.query("SELECT status FROM _chimpbase_queue_jobs").all()).toEqual([{ status: "pending" }]);
+          await host.processNextQueueJob();
+        }
+        expect(db.query("SELECT key FROM _chimpbase_kv ORDER BY key").all()).toEqual([
+          { key: "_chimpbase.sub.seen:42:external" }, { key: "delivered" },
+        ]);
+      } finally {
+        release.resolve();
+        await started.stop();
+        await host.close();
+      }
+    });
+  }
+
+  test("failed bus delivery rolls back its idempotency reservation and can retry", async () => {
+    let callback: ChimpbaseEventBusCallback | undefined;
+    const { db, engine, registry } = await createTestEngine({
+      publish: async () => {}, start(handler) { callback = handler; }, stop() {},
+    });
+    let calls = 0;
+    registry.subscriptions.set("external", [{
+      name: "retry", idempotent: true,
+      handler: async (ctx) => {
+        calls += 1;
+        await ctx.kv.set("effect", calls);
+        if (calls === 1) throw new Error("delivery failed");
+      },
+    }]);
+    engine.startEventBus();
+    const events = [{ id: 43, name: "external", payload: {}, payloadJson: "{}" }];
+    try {
+      if (callback === undefined) throw new Error("bus did not start");
+      await expect(callback(events)).rejects.toThrow("delivery failed");
+      expect(db.query("SELECT key FROM _chimpbase_kv").all()).toEqual([]);
+      await callback(events);
+      await callback(events);
+      expect(calls).toBe(2);
+      expect(db.query("SELECT key, value_json FROM _chimpbase_kv ORDER BY key").all()).toEqual([
+        { key: "_chimpbase.sub.seen:43:retry", value_json: "true" }, { key: "effect", value_json: "2" },
+      ]);
+    } finally { engine.stopEventBus(); db.close(); }
+  });
+
   for (const publisher of ["action", "route", "worker"] as const) {
     test(`failing cascaded sync subscription rolls back its ${publisher} publisher`, async () => {
       const published: ChimpbaseEventRecord[][] = [];
@@ -139,7 +240,10 @@ describe("event bus", () => {
           throw new Error("completion failed");
         };
       } else {
-        adapter.commitTransaction = async () => { throw new Error("commit failed"); };
+        adapter.commitTransaction = async () => {
+          adapter.commitTransaction = commit;
+          throw new Error("commit failed");
+        };
       }
       try {
         await adapter.queueEnqueue("work", {});

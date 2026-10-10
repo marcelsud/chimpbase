@@ -3,6 +3,7 @@ import { Pool } from "pg";
 
 import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { v } from "../packages/runtime/index.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
 const describeIfPg = (PG_URL !== undefined && PG_URL.length > 0) ? describe : describe.skip;
@@ -56,14 +57,68 @@ describeIfPg("@chimpbase/mesh (integration — requires CHIMPBASE_TEST_PG_URL)",
     await pool.end();
   });
 
-  test("two hosts see each other in the registry via LISTEN/NOTIFY", async () => {
+  test("heartbeats stay committed while an unrelated action is active and rolls back", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const busy = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const hostA = await createChimpbase({ storage: { engine: "postgres", url: postgresUrl() } });
+    const hostB = await createChimpbase({ storage: { engine: "postgres", url: postgresUrl() } });
+    hostA.register(chimpbaseMesh({ heartbeatMs: 50, offlineAfterMs: 300, transport: "local-only",
+      services: [service({ name: "busy", actions: {
+        nodeId: (ctx) => ctx.mesh?.nodeId(),
+        pending: async (ctx) => await ctx.kv.get("mesh.pending"),
+        hold: async (ctx) => { await ctx.kv.set("mesh.pending", true); entered(); await blocked; throw new Error("rollback request"); },
+      } })],
+    }));
+    hostB.register(chimpbaseMesh({ heartbeatMs: 50, offlineAfterMs: 300, transport: "local-only",
+      services: [service({ name: "observer", actions: { peers: (ctx) => ctx.mesh?.peers().map((peer) => peer.nodeId) } })],
+    }));
+    const startedA = await hostA.start({ serve: false, runWorker: false });
+    const startedB = await hostB.start({ serve: false, runWorker: false });
+    let running: Promise<unknown> | undefined;
+    try {
+      const nodeA = v.string().parse((await hostA.executeAction("v1.busy.nodeId")).result);
+      const peers = async () => (await hostB.executeAction("v1.observer.peers")).result;
+      await waitFor(async () => JSON.stringify(await peers()) === JSON.stringify([nodeA]));
+      const heartbeat = async () => Number((await pool.query<{ last_heartbeat_ms: string }>(
+        "SELECT last_heartbeat_ms FROM _chimpbase_mesh_nodes WHERE node_id = $1", [nodeA],
+      )).rows[0]?.last_heartbeat_ms);
+      running = hostA.executeAction("v1.busy.hold").catch((error: unknown) => error);
+      await busy;
+      const before = await heartbeat();
+      await Bun.sleep(650);
+      expect(await peers()).toEqual([nodeA]);
+      const during = await heartbeat();
+      expect(during).toBeGreaterThan(before);
+      release();
+      expect(await running).toMatchObject({ message: "rollback request" });
+      expect(await heartbeat()).toBeGreaterThanOrEqual(during);
+      expect((await hostA.executeAction("v1.busy.pending")).result).toBeNull();
+    } finally {
+      release();
+      await running;
+      await startedA.stop();
+      await startedB.stop();
+      await hostA.close();
+      await hostB.close();
+    }
+  });
+
+  test("heartbeats keep peers live and shutdown removes the stopped node", async () => {
     const svcA = service({
       name: "a",
-      actions: { ping: async () => "pong-a" },
+      actions: {
+        peers: (ctx) => ctx.mesh?.peers().map((peer) => peer.nodeId),
+        nodeId: (ctx) => ctx.mesh?.nodeId(),
+      },
     });
     const svcB = service({
       name: "b",
-      actions: { ping: async () => "pong-b" },
+      actions: {
+        peers: (ctx) => ctx.mesh?.peers().map((peer) => peer.nodeId),
+        nodeId: (ctx) => ctx.mesh?.nodeId(),
+      },
     });
 
     const hostA = await createChimpbase({
@@ -78,14 +133,14 @@ describeIfPg("@chimpbase/mesh (integration — requires CHIMPBASE_TEST_PG_URL)",
     });
 
     hostA.register(chimpbaseMesh({
-      heartbeatMs: 500,
-      offlineAfterMs: 3_000,
+      heartbeatMs: 50,
+      offlineAfterMs: 300,
       services: [svcA],
       transport: "local-only",
     }));
     hostB.register(chimpbaseMesh({
-      heartbeatMs: 500,
-      offlineAfterMs: 3_000,
+      heartbeatMs: 50,
+      offlineAfterMs: 300,
       services: [svcB],
       transport: "local-only",
     }));
@@ -93,21 +148,30 @@ describeIfPg("@chimpbase/mesh (integration — requires CHIMPBASE_TEST_PG_URL)",
     const startedA = await hostA.start({ serve: false, runWorker: false });
     const startedB = await hostB.start({ serve: false, runWorker: false });
 
+    let stoppedB = false;
     try {
-      await waitFor(async () => {
-        const rows = await pool.query<{ node_id: string }>(
-          "SELECT node_id FROM _chimpbase_mesh_nodes",
-        );
-        return rows.rows.length >= 2;
-      });
+      const nodeA = (await hostA.executeAction("v1.a.nodeId")).result;
+      const nodeB = (await hostB.executeAction("v1.b.nodeId")).result;
+      const peersA = async () => (await hostA.executeAction("v1.a.peers")).result;
+      const peersB = async () => (await hostB.executeAction("v1.b.peers")).result;
+      await waitFor(async () => JSON.stringify(await peersA()) === JSON.stringify([nodeB]));
+      expect(await peersB()).toEqual([nodeA]);
 
-      const rows = await pool.query<{ node_id: string }>(
-        "SELECT node_id FROM _chimpbase_mesh_nodes",
-      );
-      expect(rows.rows.length).toBeGreaterThanOrEqual(2);
+      // Cross two offline windows: registry heartbeats must refresh both caches.
+      await Bun.sleep(650);
+      expect(await peersA()).toEqual([nodeB]);
+      expect(await peersB()).toEqual([nodeA]);
+
+      await startedB.stop();
+      stoppedB = true;
+      expect((await pool.query<{ node_id: string }>(
+        "SELECT node_id FROM _chimpbase_mesh_nodes WHERE node_id = $1",
+        [nodeB],
+      )).rows).toEqual([]);
+      await waitFor(async () => JSON.stringify(await peersA()) === "[]");
     } finally {
       await startedA.stop();
-      await startedB.stop();
+      if (!stoppedB) await startedB.stop();
       await hostA.close();
       await hostB.close();
     }
