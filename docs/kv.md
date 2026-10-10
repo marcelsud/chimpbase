@@ -16,6 +16,15 @@ await ctx.kv.set("session:abc123", { userId: 42 }, { ttlMs: 3_600_000 }); // 1 h
 
 Expired keys are invisible immediately on read — no need to wait for cleanup.
 
+### Set if absent
+
+```ts
+const reserved = await ctx.kv.setIfAbsent("delivery:abc123", true, { ttlMs: 86_400_000 });
+if (!reserved) return;
+```
+
+Returns `true` only when the key was absent or expired. The write is atomic across hosts sharing a database and participates in the current transaction: rollback releases the reservation. An existing live key keeps its value and expiration.
+
 ## Get
 
 ```ts

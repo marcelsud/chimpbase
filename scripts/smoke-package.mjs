@@ -70,7 +70,6 @@ const expectedDependencies = {
   "@opentelemetry/sdk-logs": "^0.200.0",
   "@opentelemetry/sdk-metrics": "^2.0.0",
   "@opentelemetry/sdk-trace-base": "^2.0.0",
-  "@opentelemetry/semantic-conventions": "^1.25.0",
   "@types/pg": "^8.15.6",
   kysely: "^0.28.11",
   pg: "^8.16.3",

@@ -738,6 +738,22 @@ export function createPostgresEngineAdapter(
         [key, JSON.stringify(value ?? null), expiresAt],
       );
     },
+    async kvSetIfAbsent<TValue = unknown>(key: string, value: TValue, ttlMs?: number) {
+      const expiresAt = ttlMs !== undefined ? new Date(Date.now() + ttlMs).toISOString() : null;
+      const result = await queryable().query(
+        `
+          INSERT INTO _chimpbase_kv (key, value_json, updated_at, expires_at)
+          VALUES ($1, $2::jsonb, NOW(), $3::timestamptz)
+          ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = NOW(),
+            expires_at = excluded.expires_at
+          WHERE _chimpbase_kv.expires_at <= NOW()
+        `,
+        [key, JSON.stringify(value ?? null), expiresAt],
+      );
+      return (result.rowCount ?? 0) > 0;
+    },
     async listCronSchedules(): Promise<PersistedCronScheduleRow[]> {
       const result = await queryable().query<PersistedCronScheduleRow>(
         `

@@ -1,6 +1,6 @@
 import type { ChimpbaseContext, ChimpbaseDlqEnvelope } from "@chimpbase/runtime";
 
-import { insertNotification } from "../../../../../shared/orders/order.repository.ts";
+import { insertNotification } from "./order.repository.ts";
 
 export interface OrderCompletedNotificationPayload {
   orderId: number;

@@ -75,7 +75,7 @@ Three rungs per runtime share the same orders domain so readers compare shape, n
 - [examples/bun/intermediate/chimpbase.app.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/intermediate/chimpbase.app.ts): Orders lifecycle with subscriptions, worker + DLQ, cron, and Hono HTTP.
 - [examples/bun/intermediate/chimpbase.migrations.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/intermediate/chimpbase.migrations.ts): Postgres + SQLite migrations defined inline via `defineChimpbaseMigrations`.
 - [examples/bun/advanced/chimpbase.app.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/advanced/chimpbase.app.ts): Full composition — workflow, four first-party plugins, conditional OTel sink.
-- [examples/bun/advanced/src/modules/orders/order.workflow.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/advanced/src/modules/orders/order.workflow.ts): Signal-driven `workflow` using the imperative `run()` form.
+- [examples/shared/orders/order.workflow.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/shared/orders/order.workflow.ts): Signal-driven `workflow` using the imperative `run()` form.
 - [examples/bun/advanced/docker-compose.yml](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/advanced/docker-compose.yml): 3 replicas + Postgres + OTel collector.
 - [packages/bun/src/library.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/bun/src/library.ts): Bun public API, project loading helpers, action execution, startup helpers, and schema/workflow sync functions.
 - [packages/deno/src/library.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/deno/src/library.ts): Deno public API mirroring the Bun host shape.

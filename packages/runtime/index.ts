@@ -463,6 +463,7 @@ export interface ChimpbaseKvClient {
   get<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
   list(options?: ChimpbaseKvListOptions): Promise<string[]>;
   set<TValue = unknown>(key: string, value: TValue, options?: ChimpbaseKvSetOptions): Promise<void>;
+  setIfAbsent<TValue = unknown>(key: string, value: TValue, options?: ChimpbaseKvSetOptions): Promise<boolean>;
 }
 
 export interface ChimpbaseCollectionFindOptions {

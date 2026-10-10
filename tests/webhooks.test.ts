@@ -106,6 +106,117 @@ afterEach(async () => {
   }
 });
 
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
+  const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+  (engine === "postgres" && !pgUrl ? test.skip : test)(`inbound deduplication reserves, expires, and rolls back keys (${engine})`, async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-webhook-dedup-"));
+    cleanupDirs.push(projectDir);
+    const source = crypto.randomUUID();
+    const topic = `inbound.${source}`;
+    const key = `__chimpbase.webhooks.dedup:${source}:delivery`;
+    const accept = `__chimpbase.webhooks.inbound.accept.${source}`;
+    const host = await createChimpbase({
+      projectDir, storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+      registrations: [
+        chimpbaseWebhooks({ allowedEvents: [], inbound: {
+          [source]: { path: "/inbound", publishAs: topic, verify: () => true, deduplicationKey: () => "delivery" },
+        } }),
+        action("rollbackAccept", async (ctx) => { await ctx.action(accept, {}, "delivery"); throw new Error("acceptance failed"); }),
+        action("expireKey", async (ctx) => await ctx.kv.set(key, true, { ttlMs: -1 })),
+        action("inspectKey", async (ctx) => await ctx.kv.get(key)),
+        action("cleanupDedup", async (ctx) => {
+          await ctx.kv.delete(key);
+          await ctx.db.query("DELETE FROM _chimpbase_events WHERE event_name = ?1", [topic]);
+        }),
+        action("reserveValues", async (ctx) => {
+          const results = [await ctx.kv.setIfAbsent(key, "first")];
+          results.push(await ctx.kv.setIfAbsent(key, "replaced", { ttlMs: -1 }));
+          const stored = await ctx.kv.get(key);
+          await ctx.kv.delete(key);
+          return { results, stored };
+        }),
+      ],
+    });
+    const request = () => host.executeRoute(new Request("http://test.local/inbound", { method: "POST", body: "{}" }));
+    try {
+      expect((await host.executeAction("reserveValues")).result).toEqual({ results: [true, false], stored: "first" });
+      await expect(host.executeAction("rollbackAccept")).rejects.toThrow("acceptance failed");
+      expect((await host.executeAction("inspectKey")).result).toBeNull();
+      const first = await request();
+      expect(first.response?.status).toBe(200);
+      expect(first.emittedEvents.map((event) => event.name)).toEqual([topic]);
+      const duplicates = await Promise.all([request(), request()]);
+      expect(duplicates.map((outcome) => outcome.emittedEvents.length)).toEqual([0, 0]);
+      expect(duplicates.map((outcome) => outcome.response?.status)).toEqual([200, 200]);
+      await host.executeAction("expireKey");
+      expect((await host.executeAction("inspectKey")).result).toBeNull();
+      expect((await request()).emittedEvents.map((event) => event.name)).toEqual([topic]);
+      expect((await host.executeAction("inspectKey")).result).toBe(true);
+    } finally {
+      try { await host.executeAction("cleanupDedup"); }
+      finally { await host.close(); }
+    }
+  });
+}
+
+for (const rollback of [false, true]) {
+  const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+  (pgUrl ? test : test.skip)(`PostgreSQL inbound deduplication waits for a competing host to ${rollback ? "roll back" : "commit"}`, async () => {
+    const source = crypto.randomUUID();
+    const topic = `inbound.${source}`;
+    const key = `__chimpbase.webhooks.dedup:${source}:delivery`;
+    const accept = `__chimpbase.webhooks.inbound.accept.${source}`;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const registrations = [
+      chimpbaseWebhooks({ allowedEvents: [], inbound: {
+        [source]: { path: "/inbound", publishAs: topic, verify: () => true, deduplicationKey: () => "delivery" },
+      } }),
+      action("holdAccept", async (ctx) => {
+        await ctx.action(accept, {}, "delivery");
+        entered.resolve();
+        await release.promise;
+        if (rollback) throw new Error("acceptance failed");
+      }),
+      action("cleanupDedup", async (ctx) => {
+        await ctx.kv.delete(key);
+        await ctx.db.query("DELETE FROM _chimpbase_events WHERE event_name = ?1", [topic]);
+      }),
+    ];
+    const first = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, registrations });
+    const second = await createChimpbase({ storage: { engine: "postgres", url: pgUrl }, registrations });
+    const deliveries: Promise<unknown>[] = [];
+    try {
+      const held = first.executeAction("holdAccept");
+      deliveries.push(held);
+      const heldResult = held.then((outcome) => ({ outcome, error: null }), (error: unknown) => ({ outcome: null, error }));
+      await entered.promise;
+      let settled = false;
+      const concurrent = second.executeRoute(new Request("http://test.local/inbound", { method: "POST", body: "{}" }))
+        .finally(() => { settled = true; });
+      deliveries.push(concurrent);
+      await Bun.sleep(30);
+      expect(settled).toBe(false);
+      release.resolve();
+      const [firstResult, secondResult] = await Promise.all([heldResult, concurrent]);
+      expect(secondResult.response?.status).toBe(200);
+      if (rollback) {
+        expect(firstResult.error).toBeInstanceOf(Error);
+        expect(secondResult.emittedEvents.map((event) => event.name)).toEqual([topic]);
+      } else {
+        expect(firstResult.outcome?.emittedEvents.map((event) => event.name)).toEqual([topic]);
+        expect(secondResult.emittedEvents).toEqual([]);
+      }
+      expect((await second.executeAction(accept, [{}, "delivery"])).emittedEvents).toEqual([]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(deliveries);
+      try { await first.executeAction("cleanupDedup"); }
+      finally { await Promise.all([first.close(), second.close()]); }
+    }
+  });
+}
+
 const INBOUND_SECRET = "test-inbound-secret";
 const MANAGEMENT_KEY = "test-management-key";
 

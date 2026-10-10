@@ -485,15 +485,14 @@ export function chimpbaseWebhooks(
           async (ctx, payload: unknown, dedupKey: string | null) => {
             if ((dedupKey !== null && dedupKey.length > 0)) {
               const kvKey = `__chimpbase.webhooks.dedup:${sourceName}:${dedupKey}`;
-              const existing = await ctx.kv.get(kvKey);
-              if ((existing !== null)) {
+              const reserved = await ctx.kv.setIfAbsent(kvKey, true, { ttlMs: deduplicationTtlMs });
+              if (!reserved) {
                 ctx.log.info("inbound webhook deduplicated", {
                   source: sourceName,
                   dedupKey,
                 });
                 return;
               }
-              await ctx.kv.set(kvKey, true, { ttlMs: deduplicationTtlMs });
             }
 
             ctx.pubsub.publish(definition.publishAs, payload);

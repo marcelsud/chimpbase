@@ -130,6 +130,12 @@ still run on every startup.
 
 ## Storage Configuration
 
+Custom storage adapters implementing `ChimpbaseEngineAdapter` must provide
+`kvSetIfAbsent(key, value, ttlMs?)`: atomically write an absent or expired key and
+return `true`, or preserve an existing live key and return `false`. The write must
+use the adapter's current transaction so rollback also releases the reservation.
+Built-in adapters provide this operation for `ctx.kv.setIfAbsent` and inbound webhook deduplication.
+
 Configure storage in your app definition:
 
 ```ts

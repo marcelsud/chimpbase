@@ -614,43 +614,59 @@ export class ChimpbaseHost<TServer> {
   async start(options: { runWorker?: boolean; serve?: boolean } = {}): Promise<StartedHost<this, TServer>> {
     const runServe = options.serve ?? !(options.runWorker === true);
     const runWorker = options.runWorker ?? !(options.serve === true);
-    for (const hook of this.registry.onStartHooks) {
-      await this.runEngineOperation(async () => {
-        await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
-      });
-    }
+    let worker: WorkerHandle | null = null;
+    let server: TServer | null = null;
+    const stop = async () => {
+      for (const hook of this.registry.onStopHooks) {
+        try {
+          await this.runEngineOperation(async () => {
+            await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+          });
+        } catch (err) {
+          console.error(`onStop hook "${hook.name}" failed:`, err);
+        }
+      }
+      try {
+        if (server !== null) await this.runtime.server.stop(server);
+      } finally {
+        try {
+          await worker?.stop();
+        } finally {
+          this.engine.stopEventBus();
+        }
+      }
+      this.debug("runtime stopped");
+    };
 
-    const worker = runWorker ? this.startWorker() : null;
-    const server = runServe ? this.serve() : null;
-    this.debug("runtime starting", {
-      workerConcurrency: runWorker ? this.getWorkerConcurrency() : 0,
-      port: runServe ? this.config.server.port : null,
-      runServe,
-      runWorker,
-      storage: this.config.storage.engine,
-    });
-    this.engine.startEventBus(async (operation) => await this.runEngineOperation(operation));
+    try {
+      for (const hook of this.registry.onStartHooks) {
+        await this.runEngineOperation(async () => {
+          await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+        });
+      }
+      server = runServe ? this.serve() : null;
+      worker = runWorker ? this.startWorker() : null;
+      this.debug("runtime starting", {
+        workerConcurrency: runWorker ? this.getWorkerConcurrency() : 0,
+        port: runServe ? this.config.server.port : null,
+        runServe,
+        runWorker,
+        storage: this.config.storage.engine,
+      });
+      this.engine.startEventBus(async (operation) => await this.runEngineOperation(operation));
+    } catch (error) {
+      try {
+        await stop();
+      } catch {
+        // Preserve the startup error if unwinding also fails.
+      }
+      throw error;
+    }
 
     return {
       host: this,
       server,
-      stop: async () => {
-        for (const hook of this.registry.onStopHooks) {
-          try {
-            await this.runEngineOperation(async () => {
-              await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
-            });
-          } catch (err) {
-            console.error(`onStop hook "${hook.name}" failed:`, err);
-          }
-        }
-        if ((server !== null)) {
-          await this.runtime.server.stop(server);
-        }
-        await worker?.stop();
-        this.engine.stopEventBus();
-        this.debug("runtime stopped");
-      },
+      stop,
     };
   }
 
@@ -771,21 +787,14 @@ export class ChimpbaseHost<TServer> {
   }
 
   async close(): Promise<void> {
-    this.engine.stopEventBus();
-    const [sinkResult, storageResult] = await Promise.allSettled([
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => this.engine.stopEventBus()),
       Promise.resolve().then(() => this.engine.shutdownSinks()),
       Promise.resolve().then(() => this.storage.close()),
     ]);
-
-    if (sinkResult.status === "rejected" && storageResult.status === "rejected") {
-      throw new AggregateError([sinkResult.reason as unknown, storageResult.reason as unknown], "runtime cleanup failed");
-    }
-    if (sinkResult.status === "rejected") {
-      throw sinkResult.reason as unknown;
-    }
-    if (storageResult.status === "rejected") {
-      throw storageResult.reason as unknown;
-    }
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "runtime cleanup failed");
     this.debug("runtime closed");
   }
 
@@ -898,82 +907,91 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
   const projectDir = resolve(options.projectDir ?? ".");
   const platform = options.platform ?? createDefaultChimpbasePlatformShim();
   const registry = createChimpbaseRegistry();
-  const storageResources = await runtime.storage.open(
-    projectDir,
-    options.config,
-    platform,
-    listChimpbaseMigrationsForEngine(options.app?.migrations ?? options.migrations, options.config.storage.engine),
-    options.migrationSource
-      ?? ((options.app !== undefined)
-        ? createStaticMigrationSource([])
-        : createLocalMigrationSource(projectDir, options.config, options.migrationsDir ?? null)),
-    options.migrationsSql ?? [],
-  );
-  const secrets = options.secrets ?? await loadLocalSecretStore(projectDir, options.config, {
-    env: runtime.env.toObject(),
-    envFileDefault: runtime.env.get("CHIMPBASE_ENV_FILE") ?? ".env",
-    secretsDirDefault: runtime.env.get("CHIMPBASE_SECRETS_DIR") ?? "/run/secrets",
-  });
+  let storage: StorageHandle | undefined;
+  try {
+    const storageResources = await runtime.storage.open(
+      projectDir,
+      options.config,
+      platform,
+      listChimpbaseMigrationsForEngine(options.app?.migrations ?? options.migrations, options.config.storage.engine),
+      options.migrationSource
+        ?? ((options.app !== undefined)
+          ? createStaticMigrationSource([])
+          : createLocalMigrationSource(projectDir, options.config, options.migrationsDir ?? null)),
+      options.migrationsSql ?? [],
+    );
+    storage = storageResources.storage;
+    const secrets = options.secrets ?? await loadLocalSecretStore(projectDir, options.config, {
+      env: runtime.env.toObject(),
+      envFileDefault: runtime.env.get("CHIMPBASE_ENV_FILE") ?? ".env",
+      secretsDirDefault: runtime.env.get("CHIMPBASE_SECRETS_DIR") ?? "/run/secrets",
+    });
 
-  const blobsEngineConfig: ChimpbaseBlobsEngineConfig | undefined = (options.blobs !== undefined)
-    ? { driver: options.blobs.driver, buckets: options.blobs.buckets, signer: options.blobs.signer }
-    : undefined;
-  const createPrimaryEngine = () => new ChimpbaseEngine({
-    adapter: storageResources.createAdapter(),
-    createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter() : undefined,
-    blobs: blobsEngineConfig,
-    eventBus: storageResources.eventBus,
-    platform,
-    registry,
-    secrets,
-    sinks: options.sinks,
-    subscriptions: {
-      dispatch: options.config.subscriptions.dispatch,
-    },
-    telemetry: {
-      minLevel: options.config.telemetry.minLevel,
-      persist: options.config.telemetry.persist,
-    },
-    worker: options.config.worker,
-  });
-  const createWorkerEngine = () => new ChimpbaseEngine({
-    adapter: storageResources.createAdapter(),
-    blobs: blobsEngineConfig,
-    eventBus: storageResources.eventBus,
-    platform,
-    registry: cloneRegistryForWorkerEngine(registry),
-    secrets,
-    sinks: options.sinks,
-    subscriptions: {
-      dispatch: options.config.subscriptions.dispatch,
-    },
-    telemetry: {
-      minLevel: options.config.telemetry.minLevel,
-      persist: options.config.telemetry.persist,
-    },
-    worker: options.config.worker,
-  });
-  const engine = createPrimaryEngine();
-  const host = new HostClass({
-    config: options.config,
-    createWorkerEngine,
-    debugEnabled: options.debug ?? false,
-    engine,
-    platform,
-    projectDir,
-    registry,
-    runtime,
-    storage: storageResources.storage,
-    supportsConcurrentWorkers: storageResources.supportsConcurrentWorkers,
-  });
+    const blobsEngineConfig: ChimpbaseBlobsEngineConfig | undefined = (options.blobs !== undefined)
+      ? { driver: options.blobs.driver, buckets: options.blobs.buckets, signer: options.blobs.signer }
+      : undefined;
+    const engine = new ChimpbaseEngine({
+      adapter: storageResources.createAdapter(),
+      createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter() : undefined,
+      blobs: blobsEngineConfig,
+      eventBus: storageResources.eventBus,
+      platform,
+      registry,
+      secrets,
+      sinks: options.sinks,
+      subscriptions: {
+        dispatch: options.config.subscriptions.dispatch,
+      },
+      telemetry: {
+        minLevel: options.config.telemetry.minLevel,
+        persist: options.config.telemetry.persist,
+      },
+      worker: options.config.worker,
+    });
+    const createWorkerEngine = () => new ChimpbaseEngine({
+      adapter: storageResources.createAdapter(),
+      blobs: blobsEngineConfig,
+      eventBus: storageResources.eventBus,
+      platform,
+      registry: cloneRegistryForWorkerEngine(registry),
+      secrets,
+      sinks: options.sinks,
+      subscriptions: {
+        dispatch: options.config.subscriptions.dispatch,
+      },
+      telemetry: {
+        minLevel: options.config.telemetry.minLevel,
+        persist: options.config.telemetry.persist,
+      },
+      worker: options.config.worker,
+    });
+    const host = new HostClass({
+      config: options.config,
+      createWorkerEngine,
+      debugEnabled: options.debug ?? false,
+      engine,
+      platform,
+      projectDir,
+      registry,
+      runtime,
+      storage: storageResources.storage,
+      supportsConcurrentWorkers: storageResources.supportsConcurrentWorkers,
+    });
 
-  if ((options.app !== undefined)) {
-    applyChimpbaseApp(host, options.app);
+    if ((options.app !== undefined)) {
+      applyChimpbaseApp(host, options.app);
+    }
+
+    registerInternalCleanupCrons(host, options.config, platform);
+
+    return host;
+  } catch (error) {
+    await Promise.allSettled([
+      ...(options.sinks ?? []).map(async (sink) => await sink.shutdown?.()),
+      Promise.resolve().then(() => storage?.close()),
+    ]);
+    throw error;
   }
-
-  registerInternalCleanupCrons(host, options.config, platform);
-
-  return host;
 }
 
 export function getRouteKey(request: RouteRequestLike): string {

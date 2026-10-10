@@ -11,6 +11,8 @@ Production-shape Chimpbase app on Node 22+. Mirrors `examples/bun/advanced`: ful
 - **`@chimpbase/rest-collections`** — auto-exposes the `quality_reports` collection under `/api/quality_reports`.
 - **`@chimpbase/otel`** — wired via `createOtelSink({...})` only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Local `node --import tsx/esm app.ts` without an endpoint keeps `sinks: []` to avoid retry noise.
 
+Order migrations, handlers, and HTTP routes live in `examples/shared/orders`. Each runtime keeps its own bootstrap, registrations, and native tests; advanced examples also share the fulfilment workflow.
+
 ## Run
 
 ```bash

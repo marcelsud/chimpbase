@@ -348,6 +348,7 @@ export interface ChimpbaseEngineAdapter {
   kvGet<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
   kvList(options?: ChimpbaseKvListOptions): Promise<string[]>;
   kvSet<TValue = unknown>(key: string, value: TValue, ttlMs?: number): Promise<void>;
+  kvSetIfAbsent<TValue = unknown>(key: string, value: TValue, ttlMs?: number): Promise<boolean>;
   listCronSchedules(): Promise<PersistedCronScheduleRow[]>;
   markQueueJobFailure(
     jobId: number,
@@ -1098,9 +1099,10 @@ export class ChimpbaseEngine {
   }
 
   async shutdownSinks(): Promise<void> {
-    for (const sink of this.sinks) {
-      await sink.shutdown?.();
-    }
+    const results = await Promise.allSettled(this.sinks.map(async (sink) => await sink.shutdown?.()));
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "telemetry sink cleanup failed");
   }
 
   private async flushTelemetryToStreams(scope?: ChimpbaseExecutionScope, fromIndex = 0): Promise<void> {
@@ -1433,6 +1435,8 @@ export class ChimpbaseEngine {
         },
         set: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) =>
           await this.adapter.kvSet(qualify("kv", key), value, options?.ttlMs),
+        setIfAbsent: async <TValue = unknown>(key: string, value: TValue, options?: { ttlMs?: number }) =>
+          await this.adapter.kvSetIfAbsent(qualify("kv", key), value, options?.ttlMs),
       },
       collection: {
         delete: async (name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> =>

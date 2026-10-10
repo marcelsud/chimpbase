@@ -5,7 +5,7 @@ import { restCollections } from "@chimpbase/rest-collections";
 import { cron, subscription, worker } from "@chimpbase/runtime";
 
 import migrations from "./chimpbase.migrations.ts";
-import { orderApiApp } from "./src/http/app.ts";
+import { orderApiApp } from "../../shared/orders/order.fulfilment.http.ts";
 import {
   assignOrder,
   completeOrder,
@@ -13,20 +13,20 @@ import {
   listOrders,
   rejectOrder,
   startOrder,
-} from "./src/modules/orders/order.actions.ts";
+} from "../../shared/orders/order.actions.ts";
 import {
   listOrderEvents,
   listOrderNotifications,
-} from "./src/modules/orders/order.audit.actions.ts";
+} from "../../shared/orders/order.audit.actions.ts";
 import {
   captureOrderBacklogSnapshot,
   listOrderBacklogSnapshots,
-} from "./src/modules/orders/order.cron.ts";
+} from "../../shared/orders/order.cron.ts";
 import {
   getFulfilmentStatus,
   signalQualityDecision,
   startOrderFulfilment,
-} from "./src/modules/orders/order.fulfilment.actions.ts";
+} from "../../shared/orders/order.fulfilment.actions.ts";
 import {
   auditOrderAssigned,
   auditOrderCompleted,
@@ -34,12 +34,12 @@ import {
   auditOrderRejected,
   auditOrderStarted,
   enqueueOrderCompletedNotification,
-} from "./src/modules/orders/order.subscriptions.ts";
+} from "../../shared/orders/order.subscriptions.ts";
 import {
   captureOrderCompletedDlq,
   notifyOrderCompleted,
-} from "./src/modules/orders/order.workers.ts";
-import { orderFulfilmentWorkflow } from "./src/modules/orders/order.workflow.ts";
+} from "../../shared/orders/order.workers.ts";
+import { orderFulfilmentWorkflow } from "../../shared/orders/order.workflow.ts";
 
 export default {
   httpHandler: orderApiApp,

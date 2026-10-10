@@ -2,6 +2,8 @@
 
 Adds the asynchronous primitives: `subscription`, `worker`, `enqueue`, `cron`, and telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
 
+Order migrations, handlers, and HTTP routes live in `examples/shared/orders`. Each runtime keeps its own bootstrap, registrations, and native tests; advanced examples also share the fulfilment workflow.
+
 ## Run
 
 ```bash

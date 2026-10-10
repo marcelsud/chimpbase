@@ -8,12 +8,12 @@ import {
   listOrders,
   rejectOrder,
   startOrder,
-} from "../modules/orders/order.actions.ts";
+} from "./order.actions.ts";
 import {
   listOrderEvents,
   listOrderNotifications,
-} from "../modules/orders/order.audit.actions.ts";
-import { listOrderBacklogSnapshots } from "../modules/orders/order.cron.ts";
+} from "./order.audit.actions.ts";
+import { listOrderBacklogSnapshots } from "./order.cron.ts";
 
 const app = new Hono<{ Bindings: ChimpbaseRouteEnv }>();
 
