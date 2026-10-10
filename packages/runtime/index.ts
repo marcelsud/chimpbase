@@ -668,6 +668,7 @@ export interface ChimpbaseBlobsClient {
   ): Promise<ChimpbaseBlobUpload>;
   resumeUpload(uploadId: string): Promise<ChimpbaseBlobUpload>;
   listUploads(bucket: string, options?: ChimpbaseBlobUploadListOptions): Promise<ChimpbaseBlobUploadListResult>;
+  gcExpiredUploads(nowMs?: number): Promise<number>;
   sign(options: ChimpbaseBlobSignOptions): string;
 }
 

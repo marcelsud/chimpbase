@@ -1088,6 +1088,7 @@ export function createSqliteEngineAdapter(
       db.query("DELETE FROM _chimpbase_blob_uploads WHERE upload_id = ?1").run(uploadId);
     },
     async blobAbortUpload(uploadId: string): Promise<void> {
+      db.query("DELETE FROM _chimpbase_blob_upload_parts WHERE upload_id = ?1").run(uploadId);
       db.query("DELETE FROM _chimpbase_blob_uploads WHERE upload_id = ?1").run(uploadId);
     },
     async blobListUploads(
@@ -1123,11 +1124,10 @@ export function createSqliteEngineAdapter(
         nextCursor: hasMore ? page[page.length - 1].uploadId : null,
       };
     },
-    async blobGcExpiredUploads(nowMs: number): Promise<string[]> {
+    async blobListExpiredUploads(nowMs: number): Promise<string[]> {
       const rows = parseRows(db.query(
         "SELECT upload_id FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1",
       ).all(nowMs), uploadIdRowValidator, "expired upload rows");
-      db.query("DELETE FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1").run(nowMs);
       return rows.map((row) => row.upload_id);
     },
   };

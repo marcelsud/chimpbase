@@ -89,15 +89,7 @@ export function chimpbaseBlobs(options: ChimpbaseBlobsPluginOptions): ChimpbaseB
     "__chimpbase.blobs.gc",
     options.gcSchedule ?? "0 * * * *",
     async (ctx) => {
-      const now = Date.now();
-      await ctx.db.query(
-        "DELETE FROM _chimpbase_blob_upload_parts WHERE upload_id IN (SELECT upload_id FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1)",
-        [now],
-      );
-      await ctx.db.query(
-        "DELETE FROM _chimpbase_blob_uploads WHERE expires_at_ms <= ?1",
-        [now],
-      );
+      await ctx.blobs.gcExpiredUploads();
     },
   );
 

@@ -384,7 +384,7 @@ export interface ChimpbaseEngineAdapter {
   blobFinalizeUpload(uploadId: string, finalMeta: ChimpbaseBlobMetaRow): Promise<void>;
   blobAbortUpload(uploadId: string): Promise<void>;
   blobListUploads(bucket: string, options: ChimpbaseBlobUploadListOptions): Promise<ChimpbaseBlobUploadListMetaResult>;
-  blobGcExpiredUploads(nowMs: number): Promise<string[]>;
+  blobListExpiredUploads(nowMs: number): Promise<string[]>;
 }
 
 export interface ChimpbaseBlobMetaRow {
@@ -2904,6 +2904,7 @@ export class ChimpbaseEngine {
         createUpload: disabled,
         resumeUpload: disabled,
         listUploads: disabled,
+        gcExpiredUploads: disabled,
         sign: disabled,
       };
     }
@@ -3187,6 +3188,14 @@ export class ChimpbaseEngine {
         }
         return buildUpload(row);
       },
+      gcExpiredUploads: async (nowMs = platform.now()) => await this.runInTransaction(async () => {
+        const uploadIds = await adapter.blobListExpiredUploads(nowMs);
+        for (const uploadId of uploadIds) {
+          await driver.abortUpload(uploadId);
+          await adapter.blobAbortUpload(uploadId);
+        }
+        return uploadIds.length;
+      }),
       listUploads: async (bucket, options) => {
         assertBucket(bucket);
         const result = await adapter.blobListUploads(bucket, options ?? {});

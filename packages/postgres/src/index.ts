@@ -1153,12 +1153,11 @@ export function createPostgresEngineAdapter(
         nextCursor: hasMore ? page[page.length - 1].uploadId : null,
       };
     },
-    async blobGcExpiredUploads(nowMs: number): Promise<string[]> {
+    async blobListExpiredUploads(nowMs: number): Promise<string[]> {
       const result = await queryable().query<{ upload_id: string }>(
         `
-          DELETE FROM _chimpbase_blob_uploads
+          SELECT upload_id FROM _chimpbase_blob_uploads
           WHERE expires_at_ms <= $1
-          RETURNING upload_id
         `,
         [nowMs],
       );

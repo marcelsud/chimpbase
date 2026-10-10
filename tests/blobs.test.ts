@@ -16,6 +16,93 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 const cleanupDirs: string[] = [];
 
 for (const engine of ["memory", "sqlite", "postgres"] as const) {
+  for (const useFs of [false, true]) {
+    const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+    (engine === "postgres" && !pgUrl ? test.skip : test)(`expired upload cleanup retains failed IDs and removes staging on retry (${engine}, ${useFs ? "filesystem" : "memory"})`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "chimpbase-expired-upload-"));
+      cleanupDirs.push(root);
+      const driver = useFs ? fsBlobDriver({ root }) : memoryBlobDriver();
+      const plugin = chimpbaseBlobs({ secret: "test-secret", baseUrl: "http://test.local" });
+      const gc = plugin.registrations.find((entry) => entry.kind === "cron");
+      if (gc === undefined) throw new Error("missing cleanup cron");
+      const bucket = `gc-${crypto.randomUUID()}`;
+      let expiredId = "";
+      let liveId = "";
+      const abortUpload = driver.abortUpload.bind(driver);
+      let cleanupCalls = 0;
+      driver.abortUpload = async (id) => {
+        if (id === expiredId) {
+          cleanupCalls += 1;
+          if (cleanupCalls === 1) throw new Error("staging cleanup failed");
+        }
+        await abortUpload(id);
+      };
+      const host = await createChimpbase({
+        projectDir: root, storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+        blobs: { driver, buckets: [bucket] },
+        registrations: [
+          ...plugin.registrations,
+          action("seedExpired", async (ctx) => {
+            const expired = await ctx.blobs.createUpload(bucket, "expired.txt");
+            expiredId = expired.id;
+            await expired.writePart(1, new TextEncoder().encode("expired bytes"));
+            const live = await ctx.blobs.createUpload(bucket, "live.txt");
+            liveId = live.id;
+            await live.writePart(1, new TextEncoder().encode("live bytes"));
+          }),
+          action("expireUpload", async (ctx) => await ctx.db.query("UPDATE _chimpbase_blob_uploads SET expires_at_ms = 0 WHERE upload_id = ?1", [expiredId])),
+          action("runGc", async (ctx) => {
+            const fireAtMs = Date.now();
+            await gc.handler(ctx, { fireAt: new Date(fireAtMs).toISOString(), fireAtMs, name: gc.name, schedule: gc.schedule });
+          }),
+          action("inspectGc", async (ctx) => ({
+            uploads: await ctx.db.query("SELECT upload_id FROM _chimpbase_blob_uploads WHERE bucket = ?1 ORDER BY upload_id", [bucket], v.object({ upload_id: v.string() })),
+            parts: await ctx.db.query("SELECT upload_id FROM _chimpbase_blob_upload_parts WHERE upload_id IN (?1, ?2) ORDER BY upload_id", [expiredId, liveId], v.object({ upload_id: v.string() })),
+          })),
+          action("cleanupGcFixture", async (ctx) => {
+            const adapter = host.engine.getBlobsAdapter();
+            for (const id of [expiredId, liveId]) await adapter.blobAbortUpload(id);
+            await ctx.blobs.deleteMany(bucket, ["expired.txt", "live.txt"]);
+          }),
+        ],
+      });
+      const inspect = async () => (await host.executeAction("inspectGc")).result;
+      try {
+        await host.executeAction("seedExpired");
+        const before = await inspect();
+        await host.executeAction("runGc");
+        expect(await inspect()).toEqual(before);
+        expect(cleanupCalls).toBe(0);
+        await host.executeAction("expireUpload");
+        await expect(host.executeAction("runGc")).rejects.toThrow("staging cleanup failed");
+        expect(await inspect()).toEqual(before);
+        expect((await host.routeEnv().blobs.resumeUpload(expiredId)).id).toBe(expiredId);
+        if (useFs) expect(await Bun.file(join(root, "_uploads", expiredId, "part-000001")).text()).toBe("expired bytes");
+        await host.executeAction("runGc");
+        expect(await inspect()).toEqual({ uploads: [{ upload_id: liveId }], parts: [{ upload_id: liveId }] });
+        await expect(host.routeEnv().blobs.resumeUpload(expiredId)).rejects.toThrow("not found");
+        if (useFs) {
+          await expect(stat(join(root, "_uploads", expiredId))).rejects.toMatchObject({ code: "ENOENT" });
+          expect(await Bun.file(join(root, "_uploads", liveId, "part-000001")).text()).toBe("live bytes");
+        } else {
+          await expect(driver.assemble(expiredId, [{ partNumber: 1, driverRef: `${expiredId}/1` }], bucket, "expired.txt")).rejects.toThrow("missing upload");
+        }
+        await host.executeAction("runGc");
+        expect(await inspect()).toEqual({ uploads: [{ upload_id: liveId }], parts: [{ upload_id: liveId }] });
+        expect(cleanupCalls).toBe(2);
+        const live = await host.routeEnv().blobs.resumeUpload(liveId);
+        await live.complete();
+        const object = await host.routeEnv().blobs.get(bucket, "live.txt");
+        expect(object === null ? null : await new Response(object.body).text()).toBe("live bytes");
+      } finally {
+        try { await host.executeAction("cleanupGcFixture"); }
+        finally { await host.close(); }
+      }
+    });
+  }
+}
+
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
   const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
   (engine === "postgres" && !pgUrl ? test.skip : test)(`literal prefixes preserve KV, blob and multipart pagination (${engine})`, async () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-literal-prefix-"));
