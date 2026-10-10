@@ -63,13 +63,10 @@ Chimpbase manages its own tables, prefixed with `_chimpbase_`:
 | `_chimpbase_events` | Pub/sub event bus |
 | `_chimpbase_kv` | Key-value store |
 | `_chimpbase_collections` | JSON document storage |
-| `_chimpbase_stream_events` | Append-only event streams |
+| `_chimpbase_stream_events` | Append-only event streams and persisted telemetry (logs, metrics, traces) |
 | `_chimpbase_cron_schedules` | Durable cron metadata |
 | `_chimpbase_workflows` | Workflow state |
 | `_chimpbase_queue_jobs` | Job queue with retry tracking |
-| `_chimpbase_logs` | Persisted log entries |
-| `_chimpbase_metrics` | Persisted metrics |
-| `_chimpbase_traces` | Persisted trace spans |
 
 These tables are created and migrated automatically. Your application tables live alongside them in the same database.
 

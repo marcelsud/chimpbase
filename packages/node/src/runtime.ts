@@ -1,6 +1,8 @@
 import { join, resolve } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import {
   normalizeProjectConfig,
@@ -79,6 +81,11 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
           const webResponse = await handler(webRequest);
           await writeNodeResponse(response, webResponse);
         } catch (error) {
+          if (response.destroyed) return;
+          if (response.headersSent) {
+            response.destroy(error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
           response.statusCode = 500;
           response.end(error instanceof Error ? error.message : String(error));
         }
@@ -277,6 +284,5 @@ async function writeNodeResponse(response: ServerResponse, webResponse: Response
     return;
   }
 
-  const payload = Buffer.from(await webResponse.arrayBuffer());
-  response.end(payload);
+  await pipeline(Readable.fromWeb(webResponse.body as unknown as NodeReadableStream<Uint8Array>), response);
 }

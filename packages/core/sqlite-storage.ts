@@ -370,7 +370,10 @@ export function createSqliteEngineAdapter(
       }
       return matched.length;
     },
-    async commitTransaction(events: ChimpbaseEventRecord[]) {
+    async commitTransaction() {
+      db.exec("COMMIT");
+    },
+    async persistEvents(events: ChimpbaseEventRecord[]) {
       persistEvents(db, events);
       const availableAtMs = platform.now();
       const statement = db.query(
@@ -387,7 +390,6 @@ export function createSqliteEngineAdapter(
           );
         }
       }
-      db.exec("COMMIT");
     },
     async completeQueueJob(jobId: number) {
       db.query(

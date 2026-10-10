@@ -178,7 +178,7 @@ function pathStartsWith(pathname: string, prefixes: string[]): boolean {
   const normalized = normalizePath(pathname);
   return prefixes.some((prefix) => {
     const normalizedPrefix = normalizePath(prefix);
-    return normalized === normalizedPrefix || normalized.startsWith(normalizedPrefix + "/");
+    return normalizedPrefix === "/" || normalized === normalizedPrefix || normalized.startsWith(normalizedPrefix + "/");
   });
 }
 
@@ -188,7 +188,7 @@ function resolveRequiredScopes(
   managementBasePath: string | null,
   webhooksManagementPaths: string[],
 ): AuthScope[] {
-  if ((managementBasePath !== null && managementBasePath.length > 0) && pathStartsWith(pathname, [managementBasePath])) {
+  if (managementBasePath !== null && pathStartsWith(pathname, [managementBasePath])) {
     return ["admin", "auth:manage"];
   }
 

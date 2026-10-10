@@ -37,7 +37,7 @@ afterEach(async () => {
 });
 
 describe("chimpbase-node runtime", () => {
-  (nodeSupportsSqlite ? test : test.skip)("supports sqlite storage in a real Node process", async () => {
+  (nodeSupportsSqlite ? test : test.skip)("supports SQLite upgrades and streaming responses in a real Node process", async () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-node-sqlite-"));
     cleanupDirs.push(projectDir);
 
@@ -75,9 +75,12 @@ describe("chimpbase-node runtime", () => {
       scriptPath,
       [
         `import { createChimpbase } from "${nodeLibraryPath}";`,
-        `import { ChimpbaseNodeHost } from ${JSON.stringify(nodeRuntimePath)};`,
+        `import { ChimpbaseNodeHost, nodeRuntimeShim } from ${JSON.stringify(nodeRuntimePath)};`,
         `import { normalizeProjectConfig } from ${JSON.stringify(corePath)};`,
         'import assert from "node:assert/strict";',
+        'import { DatabaseSync } from "node:sqlite";',
+        'import { once } from "node:events";',
+        'import { get } from "node:http";',
         "",
         "const migrationOptions = {",
         `  projectDir: ${JSON.stringify(projectDir)},`,
@@ -86,6 +89,49 @@ describe("chimpbase-node runtime", () => {
         "};",
         "await (await createChimpbase(migrationOptions)).close();",
         "await (await createChimpbase(migrationOptions)).close();",
+        `const legacyPath = ${JSON.stringify(resolve(projectDir, "legacy.db"))};
+const legacyDb = new DatabaseSync(legacyPath);
+legacyDb.exec(\`
+  CREATE TABLE _chimpbase_kv (
+    key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  INSERT INTO _chimpbase_kv (key, value_json) VALUES ('saved', '{"value":"retained"}');
+  CREATE TABLE _chimpbase_workflow_instances (
+    workflow_id TEXT PRIMARY KEY, workflow_name TEXT NOT NULL, workflow_version INTEGER NOT NULL,
+    status TEXT NOT NULL, input_json TEXT NOT NULL, state_json TEXT NOT NULL,
+    current_step_index INTEGER NOT NULL DEFAULT 0, wake_at_ms INTEGER, last_error TEXT,
+    lease_token TEXT, lease_expires_at_ms INTEGER, completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  INSERT INTO _chimpbase_workflow_instances (workflow_id, workflow_name, workflow_version, status, input_json, state_json)
+  VALUES ('old-workflow', 'legacy', 1, 'completed', '{}', '{}');
+  CREATE TABLE _chimpbase_logs (
+    id INTEGER PRIMARY KEY, level TEXT NOT NULL, message TEXT NOT NULL, attributes_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  INSERT INTO _chimpbase_logs (level, message) VALUES ('info', 'old log');
+\`);
+legacyDb.close();
+for (let boot = 0; boot < 2; boot++) {
+  const legacyHost = await createChimpbase({ storage: { engine: "sqlite", path: legacyPath } });
+  try {
+    legacyHost.registerAction("checkUpgrade", async (ctx) => {
+      assert.deepEqual(await ctx.kv.get("saved"), { value: "retained" });
+      await ctx.kv.set("new", "value", { ttlMs: 60000 });
+      assert.equal(await ctx.kv.get("new"), "value");
+      assert.deepEqual(await ctx.db.query("SELECT workflow_id, current_step_id FROM _chimpbase_workflow_instances"),
+        [{ workflow_id: "old-workflow", current_step_id: null }]);
+      assert.deepEqual(await ctx.db.query("SELECT message FROM _chimpbase_logs"), [{ message: "old log" }]);
+      const indexes = await ctx.db.query("SELECT name FROM sqlite_master WHERE type = 'index'");
+      for (const name of ["idx_chimpbase_cron_schedules_due", "idx_chimpbase_workflow_instances_status",
+        "idx_chimpbase_workflow_signals_pending", "idx_chimpbase_queue_jobs_pending_due",
+        "idx_chimpbase_queue_jobs_processing_due", "idx_chimpbase_stream_events_stream_id"]) {
+        assert(indexes.some((row) => row.name === name), "missing index: " + name);
+      }
+    });
+    await legacyHost.executeAction("checkUpgrade");
+  } finally { await legacyHost.close(); }
+}`,
         "",
         "const host = await createChimpbase({",
         '  project: { name: "node-sqlite-app" },',
@@ -116,6 +162,8 @@ describe("chimpbase-node runtime", () => {
         '  config: normalizeProjectConfig({ storage: { engine: "memory" }, kv: { retention: { enabled: true } } }),',
         "});",
         "try {",
+        '  kvHost.registerAction("checkFreshSchema", async (ctx) => assert.deepEqual(await ctx.db.query("SELECT name FROM sqlite_master WHERE name IN (\'_chimpbase_logs\', \'_chimpbase_metrics\', \'_chimpbase_traces\')"), []));',
+        '  await kvHost.executeAction("checkFreshSchema");',
         '  kvHost.registerAction("seedKv", async (ctx) => {',
         '    await ctx.kv.set("ttl.permanent", "permanent");',
         '    await ctx.kv.set("ttl.live", "live", { ttlMs: 60000 });',
@@ -190,6 +238,65 @@ describe("chimpbase-node runtime", () => {
         "  await assert.rejects(sqliteKysely.transaction().execute(async () => {}), /runtime-managed transactions/);",
         "  await sqliteKysely.destroy();",
         "} finally { await kvHost.close(); }",
+        `let controller;
+let cancelled;
+const sourceCancelled = new Promise((resolve) => { cancelled = resolve; });
+const server = nodeRuntimeShim.server.create({ port: 0 }, (request) => {
+  if (request.url.endsWith("/fail")) {
+    return new Response(new ReadableStream({
+      start(control) {
+        controller = control;
+        control.enqueue(new TextEncoder().encode("partial"));
+      },
+    }));
+  }
+  return new Response(new ReadableStream({
+    start(control) {
+      controller = control;
+      control.enqueue(new TextEncoder().encode("first"));
+    },
+    cancel(reason) { cancelled(reason); },
+  }), { status: 201, headers: { "x-stream": "yes" } });
+});
+if (!server.server.listening) await once(server.server, "listening");
+const address = server.server.address();
+assert(address && typeof address === "object");
+const streamUrl = "http://127.0.0.1:" + address.port;
+try {
+  const streamed = await fetch(streamUrl, { signal: AbortSignal.timeout(5000) });
+  assert.equal(streamed.status, 201);
+  assert.equal(streamed.headers.get("x-stream"), "yes");
+  const reader = streamed.body.getReader();
+  const first = await reader.read();
+  assert.equal(new TextDecoder().decode(first.value), "first");
+  assert.equal(first.done, false);
+  controller.enqueue(new TextEncoder().encode("second"));
+  controller.close();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "second");
+  assert.equal((await reader.read()).done, true);
+  reader.releaseLock();
+  const abort = new AbortController();
+  const disconnect = await fetch(streamUrl, { signal: abort.signal });
+  const disconnectedReader = disconnect.body.getReader();
+  assert.equal(new TextDecoder().decode((await disconnectedReader.read()).value), "first");
+  abort.abort();
+  await assert.rejects(disconnectedReader.read(), { name: "AbortError" });
+  await sourceCancelled;
+  disconnectedReader.releaseLock();
+  await new Promise((resolveFailure, rejectFailure) => {
+    const request = get(streamUrl + "/fail");
+    request.once("error", resolveFailure);
+    request.once("response", (response) => {
+      response.once("error", resolveFailure);
+      response.once("end", () => rejectFailure(new Error("failed stream ended successfully")));
+      response.once("data", () => controller.error(new Error("stream failed")));
+      response.resume();
+    });
+  });
+} finally {
+  server.server.closeAllConnections();
+  await nodeRuntimeShim.server.stop(server);
+}`,
         "console.log(JSON.stringify({",
         "  firstDrain,",
         "  kvExpiration: true,",

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { memoryBlobDriver } from "../packages/blobs/src/index.ts";
 import { defineChimpbaseApp, normalizeProjectConfig, type ChimpbaseEventBusCallback } from "../packages/core/index.ts";
 import { action, cron, subscription, v, worker } from "../packages/runtime/index.ts";
 import { ChimpbaseBunHost, bunRuntimeShim } from "../packages/bun/src/runtime.ts";
@@ -410,6 +411,92 @@ describe("telemetry sink interface", () => {
     await host.executeAction("contextAction");
 
     expect(mock.runInContextCalled()).toBe(true);
+  });
+
+  test("sink context failure after worker commit does not retry its database effects", async () => {
+    const mock = createMockSink();
+    const startHandlerSpan = mock.sink.startHandlerSpan.bind(mock.sink);
+    mock.sink.startHandlerSpan = (scope) => {
+      const span = startHandlerSpan(scope);
+      if (scope.kind === "queue") {
+        span.runInContext = async (callback) => {
+          await callback();
+          throw new Error("sink context failed");
+        };
+      }
+      return span;
+    };
+    const host = await createHostWithSink(mock.sink);
+    let failures = 0;
+    host.register(
+      worker("work", async (ctx) => await ctx.kv.set("effect", "committed"), {
+        onFailure: () => { failures += 1; },
+      }),
+      action("enqueue", async (ctx) => await ctx.enqueue("work", {})),
+      action("inspect", async (ctx) => ({
+        effect: await ctx.kv.get("effect", v.string()),
+        jobs: await ctx.db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs", [],
+          v.object({ status: v.string(), attempt_count: v.number() })),
+      })),
+    );
+    await host.executeAction("enqueue");
+    await expect(host.processNextQueueJob()).rejects.toThrow("sink context failed");
+    expect((await host.executeAction("inspect")).result).toEqual({
+      effect: "committed", jobs: [{ status: "completed", attempt_count: 1 }],
+    });
+    expect(failures).toBe(0);
+    expect(await host.processNextQueueJob()).toBeNull();
+  });
+
+  test("cleanup warning sink failure does not retry a committed blob replacement", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "chimpbase-cleanup-sink-test-"));
+    cleanupDirs.push(dir);
+    const driver = memoryBlobDriver();
+    const mock = createMockSink();
+    const onLog = mock.sink.onLog.bind(mock.sink);
+    mock.sink.onLog = (scope, level, message, attributes) => {
+      onLog(scope, level, message, attributes);
+      if (scope.name === "__chimpbase.blobs.cleanup") throw new Error("warning sink failed");
+    };
+    let failures = 0;
+    const host = await createChimpbase({
+      projectDir: dir, storage: { engine: "memory" }, sinks: [mock.sink],
+      blobs: { driver, buckets: ["uploads"] },
+      registrations: [
+        action("seed", async (ctx) => await ctx.blobs.put("uploads", "target", new TextEncoder().encode("before"))),
+        action("enqueue", async (ctx) => await ctx.enqueue("replace", {})),
+        worker("replace", async (ctx) => {
+          await ctx.blobs.put("uploads", "target", new TextEncoder().encode("after"));
+          const count = await ctx.kv.get("effect", v.number()) ?? 0;
+          await ctx.kv.set("effect", count + 1);
+          ctx.pubsub.publish("replaced", {});
+        }, { onFailure: () => { failures += 1; } }),
+        action("inspect", async (ctx) => ({
+          effect: await ctx.kv.get("effect", v.number()),
+          jobs: await ctx.db.query("SELECT status, attempt_count FROM _chimpbase_queue_jobs", [],
+            v.object({ status: v.string(), attempt_count: v.number() })),
+        })),
+      ],
+    });
+    cleanupHosts.push(host);
+    await host.executeAction("seed");
+    const before = await host.engine.getBlobsAdapter().blobGetMetadata("uploads", "target");
+    if (before === null) throw new Error("missing initial blob metadata");
+    const remove = driver.delete.bind(driver);
+    driver.delete = async (bucket, key, driverRef) => {
+      if (driverRef === before.driverRef) throw new Error("cleanup unavailable");
+      await remove(bucket, key, driverRef);
+    };
+    await host.executeAction("enqueue");
+    expect((await host.processNextQueueJob())?.emittedEvents.map((event) => event.name)).toEqual(["replaced"]);
+    expect((await host.executeAction("inspect")).result).toEqual({
+      effect: 1, jobs: [{ status: "completed", attempt_count: 1 }],
+    });
+    const object = await host.routeEnv().blobs.get("uploads", "target");
+    expect(object === null ? null : await new Response(object.body).text()).toBe("after");
+    expect(mock.calls.some((call) => call.method === "onLog" && call.args[2] === "blob payload cleanup failed")).toBe(true);
+    expect(failures).toBe(0);
+    expect(await host.processNextQueueJob()).toBeNull();
   });
 
   test("drainTelemetryRecords still works alongside sinks", async () => {

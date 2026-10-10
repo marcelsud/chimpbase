@@ -17,9 +17,29 @@ import {
   workflow,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
-import { applySqliteMigrations, defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/core/index.ts";
+import { applySqliteMigrations, defineChimpbaseMigrations, ensureSqliteInternalTables, normalizeProjectConfig } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
+
+test("SQLite internal upgrades propagate failures and can retry without losing KV data", async () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec("CREATE TABLE _chimpbase_kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+    db.query("INSERT INTO _chimpbase_kv (key, value_json) VALUES (?, ?)").run("saved", JSON.stringify("retained"));
+    await expect(ensureSqliteInternalTables({
+      exec(sql) {
+        if (sql.startsWith("ALTER TABLE _chimpbase_kv")) throw new Error("upgrade failed");
+        return db.exec(sql);
+      },
+      query(sql) { return db.query(sql); },
+    })).rejects.toThrow("upgrade failed");
+    await ensureSqliteInternalTables(db);
+    await ensureSqliteInternalTables(db);
+    expect(db.query("SELECT key, value_json, expires_at FROM _chimpbase_kv").all()).toEqual([
+      { key: "saved", value_json: JSON.stringify("retained"), expires_at: null },
+    ]);
+  } finally { db.close(); }
+});
 
 test("named SQLite migrations run once, apply new names and roll back failed batches", () => {
   const db = new Database(":memory:");

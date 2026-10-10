@@ -36,6 +36,15 @@ await ctx.db.query(
 
 `ctx.db.query(sql, params, validator)` validates every returned row at the database boundary and returns the validator's inferred type. Invalid rows throw with their exact row and field path.
 
+### Engine adapters
+
+Custom `ChimpbaseEngineAdapter` implementations must implement `persistEvents(events)` separately
+from `commitTransaction()`. Move event insertion, ID assignment, and durable subscription job
+insertion out of the old `commitTransaction(events)` method into `persistEvents(events)`, which
+runs inside the open transaction and may be called for multiple batches of cascading events.
+`commitTransaction()` now only commits that transaction. This lets synchronous subscriptions
+use persisted event IDs while their writes and idempotency markers still roll back with the publisher.
+
 ## Kysely (type-safe queries)
 
 For type-safe query building, use the [Kysely](https://kysely.dev/) integration:
