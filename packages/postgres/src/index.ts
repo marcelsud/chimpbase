@@ -9,6 +9,7 @@ import type {
   ChimpbaseBlobUploadRow,
   ChimpbaseEngineAdapter,
   ChimpbaseEventRecord,
+  ChimpbaseMigration,
   ChimpbasePlatformShim,
   ChimpbaseProjectConfig,
   ChimpbaseQueueJobRecord,
@@ -78,10 +79,29 @@ export function openPostgresPool(config: ChimpbaseProjectConfig): Pool {
 
 export async function applyPostgresSqlMigrations(
   pool: Pool,
-  migrations: readonly string[],
+  migrations: readonly ChimpbaseMigration[],
 ): Promise<void> {
-  for (const migration of migrations) {
-    await pool.query(migration);
+  if (migrations.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('_chimpbase_migrations'))");
+    await client.query(`CREATE TABLE IF NOT EXISTS _chimpbase_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    for (const migration of migrations) {
+      const applied = await client.query<{ name: string }>("SELECT name FROM _chimpbase_migrations WHERE name = $1", [migration.name]);
+      if (applied.rows.length > 0) continue;
+      await client.query(migration.sql);
+      await client.query("INSERT INTO _chimpbase_migrations (name) VALUES ($1)", [migration.name]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
 }
 

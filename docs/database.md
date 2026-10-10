@@ -110,7 +110,14 @@ export default {
 
 Or load from SQL files using a `chimpbase.migrations.ts` file.
 
-Migrations run automatically on startup.
+Named migrations run automatically on startup and are recorded in `_chimpbase_migrations`.
+Each name runs once; add a new name for subsequent changes. Pending migrations and their
+history records run in one transaction, so a failed batch is rolled back and can be retried.
+PostgreSQL startup also locks migration execution across hosts.
+
+Databases created before migration history was introduced need their already applied names
+recorded before restarting with non-idempotent migrations. Anonymous `migrationsSql` statements
+still run on every startup.
 
 ## Storage Configuration
 

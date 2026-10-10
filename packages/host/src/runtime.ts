@@ -612,6 +612,10 @@ export class ChimpbaseHost<TServer> {
   async start(options: { runWorker?: boolean; serve?: boolean } = {}): Promise<StartedHost<this, TServer>> {
     const runServe = options.serve ?? !(options.runWorker === true);
     const runWorker = options.runWorker ?? !(options.serve === true);
+    for (const hook of this.registry.onStartHooks) {
+      await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+    }
+
     const worker = runWorker ? this.startWorker() : null;
     const server = runServe ? this.serve() : null;
     this.debug("runtime starting", {
@@ -622,10 +626,6 @@ export class ChimpbaseHost<TServer> {
       storage: this.config.storage.engine,
     });
     this.engine.startEventBus();
-
-    for (const hook of this.registry.onStartHooks) {
-      await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
-    }
 
     return {
       host: this,

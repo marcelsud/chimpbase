@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Database } from "bun:sqlite";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { bunRuntimeShim, ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
@@ -16,9 +17,34 @@ import {
   workflow,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
-import { defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/core/index.ts";
+import { applySqliteMigrations, defineChimpbaseMigrations, normalizeProjectConfig } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
+
+test("named SQLite migrations run once, apply new names and roll back failed batches", () => {
+  const db = new Database(":memory:");
+  const initial = { name: "001_create", sql: "CREATE TABLE migrated_items (value TEXT)" };
+  const insert = { name: "002_insert", sql: "INSERT INTO migrated_items VALUES ('once')" };
+  try {
+    applySqliteMigrations(db, [initial, insert]);
+    applySqliteMigrations(db, [initial, insert]);
+    expect(db.query("SELECT value FROM migrated_items").all()).toEqual([{ value: "once" }]);
+
+    const pending = { name: "003_update", sql: "UPDATE migrated_items SET value = 'updated'" };
+    expect(() => applySqliteMigrations(db, [pending, {
+      name: "004_bad", sql: "INSERT INTO missing_table VALUES (1)",
+    }])).toThrow("missing_table");
+    expect(db.query("SELECT value FROM migrated_items").all()).toEqual([{ value: "once" }]);
+    expect(db.query("SELECT name FROM _chimpbase_migrations ORDER BY name").all()).toEqual([
+      { name: initial.name }, { name: insert.name },
+    ]);
+
+    applySqliteMigrations(db, [initial, insert, pending]);
+    expect(db.query("SELECT value FROM migrated_items").all()).toEqual([{ value: "updated" }]);
+  } finally {
+    db.close();
+  }
+});
 
 for (const engine of ["memory", "sqlite"] as const) {
   test(`shared SQLite Kysely preserves query results, streaming and transaction restrictions (${engine})`, async () => {
@@ -113,6 +139,49 @@ for (const engine of ["memory", "sqlite"] as const) {
         await host.close();
       }
     });
+  }
+}
+for (const engine of ["memory", "sqlite"] as const) {
+  for (const scenario of ["early signal", "immediate timeout"] as const) {
+    for (const callback of [false, true]) {
+      test(`workflow keeps directive state on ${scenario}, callback=${callback} (${engine})`, async () => {
+        const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-workflow-directive-state-"));
+        cleanupDirs.push(projectDir);
+        const definition = workflow<unknown, { phase: string; marker: string }>({
+          name: "directive-state", version: 1,
+          initialState: () => ({ phase: "initial", marker: "old" }),
+          run(ctx) {
+            if (ctx.state.phase === "done") return ctx.complete();
+            return ctx.waitForSignal("ready", {
+              state: { phase: callback ? "waiting" : "done", marker: "new" },
+              timeoutMs: scenario === "immediate timeout" ? 0 : undefined,
+              onSignal: callback ? ({ state }) => ({ ...state, phase: "done" }) : undefined,
+              onTimeout: callback ? ({ state }) => ({ ...state, phase: "done" }) : "continue",
+            });
+          },
+        });
+        const host = await createChimpbase({
+          projectDir, storage: { engine },
+          registrations: [
+            definition,
+            action("launch", async (ctx) => {
+              await ctx.workflow.start(definition, {}, { workflowId: "flow" });
+              if (scenario === "early signal") await ctx.workflow.signal("flow", "ready", {});
+            }),
+            action("inspect", async (ctx) => ctx.workflow.get("flow")),
+          ],
+        });
+        try {
+          await host.executeAction("launch");
+          await host.drain();
+          expect((await host.executeAction("inspect")).result).toMatchObject({
+            status: "completed", state: { phase: "done", marker: "new" },
+          });
+        } finally {
+          await host.close();
+        }
+      });
+    }
   }
 }
 const countRowValidator = v.object({ count: v.number() });

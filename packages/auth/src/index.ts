@@ -170,7 +170,7 @@ function isProtectedPath(pathname: string, protectedPaths: string[] | "all"): bo
   const normalized = normalizePath(pathname);
   return protectedPaths.some((path) => {
     const normalizedPath = normalizePath(path);
-    return normalized === normalizedPath || normalized.startsWith(normalizedPath + "/");
+    return normalizedPath === "/" || normalized === normalizedPath || normalized.startsWith(normalizedPath + "/");
   });
 }
 
@@ -308,8 +308,11 @@ export function chimpbaseAuth(
         return { valid: false, reason: "revoked" };
       }
 
-      if ((record.expiresAt !== null && record.expiresAt.length > 0) && new Date(record.expiresAt) < new Date()) {
-        return { valid: false, reason: "expired" };
+      if (record.expiresAt !== null) {
+        const expiresAtMs = Date.parse(record.expiresAt);
+        if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+          return { valid: false, reason: "expired" };
+        }
       }
 
       return {
@@ -497,6 +500,11 @@ export function chimpbaseAuth(
 
       const scopes = input.scopes ?? DEFAULT_SCOPES;
       validateScopes(scopes);
+      if (input.expiresAt !== undefined && (
+        typeof input.expiresAt !== "string" || !Number.isFinite(Date.parse(input.expiresAt))
+      )) {
+        throw new AuthRequestError(400, '"expiresAt" must be a valid date');
+      }
 
       const rawKey = generateRawKey();
       const keyHash = await hashKey(rawKey);

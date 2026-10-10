@@ -296,6 +296,7 @@ const INTERNAL_SUBSCRIPTION_QUEUE_NAME = "__chimpbase.subscription.run";
 const INTERNAL_WORKFLOW_QUEUE_NAME = "__chimpbase.workflow.run";
 
 const TELEMETRY_LOG_STREAM = "_chimpbase.logs";
+const MAX_TELEMETRY_RECORDS = 10_000;
 const TELEMETRY_METRIC_STREAM = "_chimpbase.metrics";
 const TELEMETRY_TRACE_STREAM = "_chimpbase.traces";
 const LOG_LEVEL_ORDER: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -498,6 +499,7 @@ export interface ChimpbaseBlobDriver {
     driverRef: string,
     range?: ChimpbaseBlobDriverRange,
   ): Promise<ChimpbaseBlobDriverGetResult | null>;
+  /** Delete an object or staged part payload by its immutable driver reference. */
   delete(bucket: string, key: string, driverRef: string): Promise<void>;
   copy(
     src: { bucket: string; key: string; driverRef: string },
@@ -565,6 +567,7 @@ export class ChimpbaseEngine {
   private readonly subscriptionsConfig: ChimpbaseEngineOptions["subscriptions"];
   private readonly telemetryConfig: ChimpbaseEngineOptions["telemetry"];
   private readonly telemetryRecords: ChimpbaseTelemetryRecord[] = [];
+  private telemetryExecutionDepth = 0;
   private transactionDepth = 0;
   private readonly worker: ChimpbaseEngineOptions["worker"];
 
@@ -633,14 +636,19 @@ export class ChimpbaseEngine {
   startEventBus(): void {
     this.eventBus.start(async (events, ack) => {
       const telemetryStart = this.telemetryRecords.length;
-      const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
-      if (this.subscriptionsConfig.dispatch === "async") {
-        await this.enqueueSubscriptionDispatchJobs(legacyEvents);
-      } else {
-        await this.dispatchSubscriptions(legacyEvents);
-        await this.handleCommittedEvents(this.takeCommittedEvents(), undefined, telemetryStart);
+      try {
+        this.telemetryExecutionDepth += 1;
+        const legacyEvents = events.filter((event) => !this.registry.eventContracts.has(event.name));
+        if (this.subscriptionsConfig.dispatch === "async") {
+          await this.enqueueSubscriptionDispatchJobs(legacyEvents);
+        } else {
+          await this.dispatchSubscriptions(legacyEvents);
+          await this.handleCommittedEvents(this.takeCommittedEvents(), undefined, telemetryStart);
+        }
+        await ack?.();
+      } finally {
+        this.finishTelemetryExecution();
       }
-      await ack?.();
     });
   }
 
@@ -664,6 +672,7 @@ export class ChimpbaseEngine {
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
+      this.telemetryExecutionDepth += 1;
       let invoke: () => Promise<unknown> = () => this.invokeActionByName(name, args);
       for (const span of handlerSpans) {
         const runInContext = span.runInContext?.bind(span);
@@ -687,6 +696,8 @@ export class ChimpbaseEngine {
       const message = error instanceof Error ? error.message : String(error);
       for (const span of handlerSpans) span.end("error", message);
       throw error;
+    } finally {
+      this.finishTelemetryExecution();
     }
   }
 
@@ -701,6 +712,7 @@ export class ChimpbaseEngine {
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
+      this.telemetryExecutionDepth += 1;
       const routeContext = new Map<string, unknown>();
       let invoke = async () => {
         for (const route of this.registry.routes) {
@@ -747,6 +759,8 @@ export class ChimpbaseEngine {
       const message = error instanceof Error ? error.message : String(error);
       for (const span of handlerSpans) span.end("error", message);
       throw error;
+    } finally {
+      this.finishTelemetryExecution();
     }
   }
 
@@ -911,6 +925,7 @@ export class ChimpbaseEngine {
     const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
 
     try {
+      this.telemetryExecutionDepth += 1;
       const workerHandler: unknown = worker.handler;
       if (!isWorkerHandler(workerHandler)) {
         throw new TypeError(`queue ${job.queue_name} has an invalid handler`);
@@ -966,6 +981,8 @@ export class ChimpbaseEngine {
       }
       for (const span of handlerSpans) span.end("error", message);
       throw error;
+    } finally {
+      this.finishTelemetryExecution();
     }
   }
 
@@ -1056,6 +1073,14 @@ export class ChimpbaseEngine {
 
   drainTelemetryRecords(): ChimpbaseTelemetryRecord[] {
     return this.telemetryRecords.splice(0);
+  }
+
+  private finishTelemetryExecution(): void {
+    this.telemetryExecutionDepth -= 1;
+    // Nested or concurrent handlers may still need these records for persistence.
+    if (this.telemetryExecutionDepth > 0) return;
+    const overflow = this.telemetryRecords.length - MAX_TELEMETRY_RECORDS;
+    if (overflow > 0) this.telemetryRecords.splice(0, overflow);
   }
 
   async shutdownSinks(): Promise<void> {
@@ -1174,10 +1199,15 @@ export class ChimpbaseEngine {
     moduleName: string | null = null,
     name = "__lifecycle",
   ): Promise<void> {
-    await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
-      const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name });
-      await handler(ctx);
-    }, moduleName));
+    try {
+      this.telemetryExecutionDepth += 1;
+      await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
+        const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name });
+        await handler(ctx);
+      }, moduleName));
+    } finally {
+      this.finishTelemetryExecution();
+    }
   }
 
   private async processCronQueuePayload(payload: CronQueuePayload): Promise<void> {
@@ -1745,7 +1775,7 @@ export class ChimpbaseEngine {
             workflowId,
           }, workflowModule),
         ), workflowModule);
-        const shouldContinue = await this.applyWorkflowRunDirective(workflowId, row, directive, input, state);
+        const shouldContinue = await this.applyWorkflowRunDirective(workflowId, row, directive, input);
         if (shouldContinue) {
           continue;
         }
@@ -2028,7 +2058,6 @@ export class ChimpbaseEngine {
     row: PersistedWorkflowInstanceRow,
     directive: WorkflowRunDirective,
     input: unknown,
-    state: unknown,
   ): Promise<boolean> {
     if (!(directive !== null && directive !== undefined) || typeof directive !== "object" || !("kind" in directive)) {
       throw new Error(`workflow run must return a directive: ${workflowId}`);
@@ -2155,7 +2184,7 @@ export class ChimpbaseEngine {
       }
 
       case "workflow_wait_for_signal_directive":
-        return await this.applyWorkflowWaitForSignalDirective(workflowId, row, directive, input, state);
+        return await this.applyWorkflowWaitForSignalDirective(workflowId, row, directive, input);
     }
   }
 
@@ -2164,8 +2193,8 @@ export class ChimpbaseEngine {
     row: PersistedWorkflowInstanceRow,
     directive: Extract<WorkflowRunDirective, { kind: "workflow_wait_for_signal_directive" }>,
     input: unknown,
-    state: unknown,
   ): Promise<boolean> {
+    const state = directive.state;
     const signal = await this.findPendingWorkflowSignal(workflowId, directive.signal);
     if ((signal !== null)) {
       await this.adapter.query(
@@ -2565,30 +2594,35 @@ export class ChimpbaseEngine {
     this.assertActionAccess(callerModule, name, ownership, viaContract);
     const targetModule = ownership?.module ?? null;
 
-    return await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
-      const context = this.createContext({ kind: "action", module: targetModule, name });
-      let result: unknown;
-      if ((registration.args !== undefined)) {
-        if (args.length > 1) {
-          throw new Error(`action ${name} expects a single argument`);
-        }
+    try {
+      this.telemetryExecutionDepth += 1;
+      return await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
+        const context = this.createContext({ kind: "action", module: targetModule, name });
+        let result: unknown;
+        if ((registration.args !== undefined)) {
+          if (args.length > 1) {
+            throw new Error(`action ${name} expects a single argument`);
+          }
 
-        const inputLabel = ownership?.visibility === "public" ? `module call ${name} input` : "args";
-        const parsedArgs = registration.args.parse(args[0], inputLabel);
-        if (!isObjectActionHandler<unknown>(registration.handler)) {
-          throw new TypeError(`action ${name} has an invalid handler`);
+          const inputLabel = ownership?.visibility === "public" ? `module call ${name} input` : "args";
+          const parsedArgs = registration.args.parse(args[0], inputLabel);
+          if (!isObjectActionHandler<unknown>(registration.handler)) {
+            throw new TypeError(`action ${name} has an invalid handler`);
+          }
+          result = await registration.handler(context, parsedArgs);
+        } else {
+          if (!isTupleActionHandler<unknown>(registration.handler)) {
+            throw new TypeError(`action ${name} has an invalid handler`);
+          }
+          result = await registration.handler(context, ...args);
         }
-        result = await registration.handler(context, parsedArgs);
-      } else {
-        if (!isTupleActionHandler<unknown>(registration.handler)) {
-          throw new TypeError(`action ${name} has an invalid handler`);
-        }
-        result = await registration.handler(context, ...args);
-      }
-      return (registration.result === undefined
-        ? result
-        : registration.result.parse(result, `module call ${name} output`)) as TResult;
-    }, targetModule));
+        return (registration.result === undefined
+          ? result
+          : registration.result.parse(result, `module call ${name} output`)) as TResult;
+      }, targetModule));
+    } finally {
+      this.finishTelemetryExecution();
+    }
   }
 
   private assertActionAccess(
@@ -2975,11 +3009,17 @@ export class ChimpbaseEngine {
       id: row.uploadId,
       bucket: row.bucket,
       key: row.key,
-      async writePart(partNumber, body) {
+      writePart: async (partNumber, body) => await this.runInTransaction(async () => {
         if (!Number.isInteger(partNumber) || partNumber < 1) {
           throw new Error("partNumber must be a positive integer");
         }
+        const [existing] = await adapter.query(
+          "SELECT driver_ref FROM _chimpbase_blob_upload_parts WHERE upload_id = ?1 AND part_number = ?2",
+          [row.uploadId, partNumber],
+          v.object({ driver_ref: v.string() }),
+        );
         const result = await driver.putPart(row.uploadId, partNumber, toStream(body));
+        this.blobRollbackCleanups.push(() => driver.delete(row.bucket, row.key, result.driverRef));
         await adapter.blobRecordPart({
           uploadId: row.uploadId,
           partNumber,
@@ -2988,8 +3028,11 @@ export class ChimpbaseEngine {
           driverRef: result.driverRef,
           createdAt: new Date(platform.now()).toISOString(),
         });
+        if (existing !== undefined) {
+          this.blobCommitCleanups.push(() => driver.delete(row.bucket, row.key, existing.driver_ref));
+        }
         return { etag: result.sha256, size: result.size };
-      },
+      }),
       complete: async () => {
         const parts = (await adapter.blobListParts(row.uploadId)).slice().sort(
           (a, b) => a.partNumber - b.partNumber,
