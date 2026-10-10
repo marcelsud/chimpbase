@@ -622,6 +622,39 @@ test("failed payload cleanup after commit preserves the new blob and records a w
 });
 
 describe("chimpbase blobs primitive (fs driver)", () => {
+  for (const destination of [
+    { bucket: "uploads", key: "source.txt" },
+    { bucket: "uploads", key: "copy.txt" },
+    { bucket: "archive", key: "copy.txt" },
+  ]) {
+    test(`copy to ${destination.bucket}/${destination.key} preserves a 256 KiB object and metadata`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-fs-copy-"));
+      cleanupDirs.push(root);
+      const { host, started } = await bootBlobsHost({ useFs: true, root });
+      const body = "0123456789abcdef".repeat(16 * 1024);
+      try {
+        const blobs = host.routeEnv().blobs;
+        const original = await blobs.put("uploads", "source.txt", new TextEncoder().encode(body), {
+          contentType: "text/plain", metadata: { author: "tests" },
+        });
+        const copied = await blobs.copy({ bucket: "uploads", key: "source.txt" }, destination);
+        expect(copied).toEqual({ ...original, ...destination });
+        for (const object of [{ bucket: "uploads", key: "source.txt" }, destination]) {
+          const result = await blobs.get(object.bucket, object.key);
+          expect(result).not.toBeNull();
+          if (result === null) throw new Error("copied object is missing");
+          expect(result.size).toBe(256 * 1024);
+          expect(result.etag).toBe(original.etag);
+          expect(result.contentType).toBe("text/plain");
+          expect(result.metadata).toEqual({ author: "tests" });
+          expect(await new Response(result.body).text()).toBe(body);
+        }
+      } finally {
+        await started.stop();
+      }
+    });
+  }
+
   test("writes bytes under the configured root and lists via engine", async () => {
     const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-fs-"));
     cleanupDirs.push(root);
