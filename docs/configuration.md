@@ -42,7 +42,7 @@ Memory data is lost when the process stops.
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `CHIMPBASE_SERVER_PORT` or `PORT` | HTTP port | `3000` |
-| `CHIMPBASE_STORAGE_ENGINE` | `sqlite`, `postgres` or `memory` | SQLite unless a database URL is set |
+| `CHIMPBASE_STORAGE_ENGINE` | `sqlite`, `postgres` or `memory` | Auto-detect: `postgres` with a database URL, otherwise `sqlite` |
 | `CHIMPBASE_DATABASE_URL` or `DATABASE_URL` | PostgreSQL connection URL | Unset |
 | `CHIMPBASE_STORAGE_PATH` | SQLite file path | `data/{project-name}.db` |
 | `CHIMPBASE_WORKER_CONCURRENCY` | PostgreSQL worker concurrency | `1` |

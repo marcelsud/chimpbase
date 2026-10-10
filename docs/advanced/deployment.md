@@ -105,7 +105,7 @@ Keep the same database and image. Replace the `app` service with:
         condition: service_healthy
 ```
 
-Scale the worker service with `docker compose up --build --scale worker=3`. Each replica loads the same registrations and claims jobs from the shared PostgreSQL queue. See [Configuration](/configuration) for runtime environment variables.
+Scale the worker service with `docker compose up --build --scale worker=3`. Each replica loads the same registrations and claims jobs from the shared PostgreSQL queue. See the [environment-variable reference](/configuration#environment-variables) for runtime settings and defaults.
 
 ## Coordination and retries
 

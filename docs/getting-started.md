@@ -59,6 +59,8 @@ bunx chimpbase dev
 
 The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. SQLite data is stored in `data/my-app.db`. The app file exports a definition; the CLI starts it.
 
+For port, storage, and worker settings and defaults, see the [environment-variable reference](/configuration#environment-variables).
+
 In another terminal:
 
 ```bash

@@ -105,12 +105,12 @@ export default {
 } satisfies ChimpbaseAppDefinitionInput;
 ```
 
-Additional settings via environment variables:
+Set runtime worker settings through environment variables. See the [environment-variable reference](/configuration#environment-variables) for defaults:
 
-```
-CHIMPBASE_WORKER_CONCURRENCY=4
-CHIMPBASE_WORKER_POLL_INTERVAL_MS=250
-CHIMPBASE_WORKER_LEASE_MS=30000
+```bash
+export CHIMPBASE_WORKER_CONCURRENCY=4
+export CHIMPBASE_WORKER_POLL_INTERVAL_MS=250
+export CHIMPBASE_WORKER_LEASE_MS=30000
 ```
 
 ## Registration

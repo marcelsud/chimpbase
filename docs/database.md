@@ -121,6 +121,6 @@ still run on every startup.
 
 ## Storage Configuration
 
-Storage is selected by the host, separately from your app definition. See [Configuration](/configuration) for SQLite, PostgreSQL, and memory settings.
+Storage is selected by the host, separately from your app definition. See the [environment-variable reference](/configuration#environment-variables) for SQLite, PostgreSQL, and memory settings and defaults.
 
 For engine integrations, see [Custom storage adapters](/advanced/storage-adapters).
