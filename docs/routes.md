@@ -1,49 +1,33 @@
 # HTTP Routes
 
-Chimpbase supports two ways to handle HTTP requests: the `route()` primitive for framework-level routes, and the `httpHandler` for application-level routing with Hono.
+Use `route()` to handle HTTP requests with the standard `Request` and `Response` APIs. Call actions for database writes and other business logic.
 
-## Using Hono (recommended for apps)
-
-The `httpHandler` in your app definition accepts a Hono app instance:
+## Define a Route
 
 ```ts
-import type { ChimpbaseRouteEnv } from "@chimpbase/runtime";
-import { Hono } from "hono";
+import { route } from "chimpbase/runtime";
 
-const app = new Hono<{ Bindings: ChimpbaseRouteEnv }>();
+const notesRoute = route("notes", async (request, env) => {
+  if (new URL(request.url).pathname !== "/notes") return null;
 
-app.get("/projects", async (c) => {
-  const projects = await c.env.action(listProjects);
-  return c.json(projects);
+  if (request.method === "GET") {
+    return Response.json(await env.action("listNotes"));
+  }
+
+  if (request.method === "POST") {
+    const note = await env.action("createNote", await request.json());
+    return Response.json(note, { status: 201 });
+  }
+
+  return new Response("Method not allowed", { status: 405 });
 });
-
-app.post("/projects", async (c) => {
-  const body = await c.req.json();
-  const project = await c.env.action(createProject, body);
-  return c.json(project, 201);
-});
-
-app.post("/todos/:id/complete", async (c) => {
-  const todoId = Number(c.req.param("id"));
-  const todo = await c.env.action(completeTodo, { todoId });
-  return c.json(todo);
-});
-
-export { app as myApiApp };
 ```
 
-Register in your app definition:
-
-```ts
-export default {
-  httpHandler: myApiApp,
-  registrations: [/* ... */],
-} satisfies ChimpbaseAppDefinitionInput;
-```
+Add `notesRoute` alongside its actions in your app's `registrations` array. See [Getting Started](/getting-started) for a complete app.
 
 ## Route Environment
 
-Both Hono handlers (`c.env`) and route handlers receive a `ChimpbaseRouteEnv`:
+The route's second argument is a `ChimpbaseRouteEnv`:
 
 ```ts
 interface ChimpbaseRouteEnv {
@@ -54,7 +38,7 @@ interface ChimpbaseRouteEnv {
 }
 ```
 
-Routes invoke business logic via actions — they don't have direct access to `db`, `kv`, `collection`, etc. This keeps HTTP handling separate from business logic.
+Use `env.action(name, ...args)` or pass an action reference. Routes do not have direct access to `db`, `kv`, or `collection`; those belong to the action context.
 
 ### Request Context
 
@@ -67,28 +51,21 @@ middleware("requestId", async (request, env) => {
   return null; // pass through
 });
 
-// Downstream route reads it
-app.get("/orders", async (c) => {
-  const requestId = c.env.get<string>("requestId");
-  const userId = c.env.get<string>("auth.userId"); // set by auth plugin
-  // ...
+// A later route reads it
+route("requestInfo", async (request, env) => {
+  if (new URL(request.url).pathname !== "/request-info") return null;
+  return Response.json({ requestId: env.get<string>("requestId") });
 });
 ```
 
-The auth plugin automatically sets these context values after successful authentication:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `auth.userId` | `string \| null` | Authenticated user ID (`null` for bootstrap key) |
-| `auth.scopes` | `string[]` | Scopes on the API key |
-| `auth.bootstrap` | `boolean` | Whether the bootstrap key was used |
+For authentication middleware and its context values, see [Authentication](/advanced/auth).
 
 ## Middleware
 
 The `middleware()` function is an alias for `route()` that signals intent — a handler that sets context or short-circuits, then returns `null` to pass through:
 
 ```ts
-import { middleware } from "@chimpbase/runtime";
+import { middleware } from "chimpbase/runtime";
 
 const cors = middleware("cors", async (request, env) => {
   if (request.method === "OPTIONS") {
@@ -104,27 +81,9 @@ const cors = middleware("cors", async (request, env) => {
 });
 ```
 
-Middleware runs in registration order before your routes and Hono handler.
+Middleware and routes run in registration order. Put middleware before the routes it should affect.
 
-## Using `route()` (for plugins)
-
-The `route()` primitive registers a low-level route handler. This is primarily used by plugins (auth, webhooks, rest-collections) rather than application code.
-
-```ts
-import { route } from "@chimpbase/runtime";
-
-const healthRoute = route("health", async (request, env) => {
-  const url = new URL(request.url);
-  if (url.pathname !== "/status") {
-    return null; // not my route — pass to next handler
-  }
-
-  const result = await env.action("getSystemStatus");
-  return Response.json(result);
-});
-```
-
-### Handler Signature
+## Handler Signature
 
 ```ts
 (request: Request, env: ChimpbaseRouteEnv) => Response | null | Promise<Response | null>
@@ -138,10 +97,10 @@ Routes are tried in registration order. The first non-null response wins.
 ## Route Execution Order
 
 1. Registered `route()` handlers run in order
-2. If no route matches, the `httpHandler` (Hono app) runs
+2. If no route matches, an optional `httpHandler` runs
 3. If nothing matches, the server returns `404`
 
-This is how the auth guard works — it registers a route that runs before everything else and returns `401` or `null` (pass-through).
+To use a framework as the `httpHandler`, see [Hono](/advanced/hono) or the other [advanced integrations](/advanced/).
 
 ## Built-in Endpoints
 

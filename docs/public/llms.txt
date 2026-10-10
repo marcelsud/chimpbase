@@ -1,107 +1,53 @@
-# chimpbase
+# Chimpbase
 
-> Action-driven backend runtime monorepo for Bun, Node, and Deno. Postgres-first in production, SQLite or memory for local work, with a small explicit TypeScript runtime surface built around `action`, `subscription`, `worker`, `cron`, and `workflow`.
+> Backend actions, queues and schedules in one TypeScript runtime. SQLite or memory for local development; PostgreSQL for shared application and coordination state.
 
-## Docs
+## Start here
 
-- [README.md](https://github.com/chimpbase/chimpbase/blob/main/README.md): Primary monorepo overview, quick start, runtime primitives, telemetry persistence, workflows, examples, and release model.
-- [packages/bun/README.md](https://github.com/chimpbase/chimpbase/blob/main/packages/bun/README.md): Bun host usage, runtime model, and Bun-first examples.
-- [packages/runtime/README.md](https://github.com/chimpbase/chimpbase/blob/main/packages/runtime/README.md): Public DSL for `action`, `cron`, `subscription`, `worker`, and `workflow`.
-- [packages/core/README.md](https://github.com/chimpbase/chimpbase/blob/main/packages/core/README.md): Low-level engine and host-facing internals.
+- [Getting Started](https://github.com/chimpbase/chimpbase/blob/main/docs/getting-started.md): Complete Bun notes API with actions, routes and collections; start with `bunx chimpbase dev`.
+- [Configuration](https://github.com/chimpbase/chimpbase/blob/main/docs/configuration.md): Storage, environment variables, host imports and CLI commands.
+- [README](https://github.com/chimpbase/chimpbase/blob/main/README.md): Repository overview and contributor commands.
 
-## Packages
+## Main guides
 
-- [@chimpbase/bun](https://github.com/chimpbase/chimpbase/tree/main/packages/bun): Bun host package and CLI. Exports `createChimpbase`, `createChimpbase.from(...)`, app loading helpers, and schema/workflow sync helpers.
-- [@chimpbase/node](https://github.com/chimpbase/chimpbase/tree/main/packages/node): Node.js host package mirroring the Bun host shape.
-- [@chimpbase/deno](https://github.com/chimpbase/chimpbase/tree/main/packages/deno): Deno CLI/self-hosted host package with the same runtime DSL.
-- [@chimpbase/host](https://github.com/chimpbase/chimpbase/tree/main/packages/host): Shared host runtime and adapters used by the Bun, Node, and Deno hosts.
-- [@chimpbase/runtime](https://github.com/chimpbase/chimpbase/tree/main/packages/runtime): Public runtime DSL, context types, and workflow contracts used by application code.
-- [@chimpbase/core](https://github.com/chimpbase/chimpbase/tree/main/packages/core): Engine, registry contracts, orchestration internals, and telemetry buffering/persistence internals.
-- [@chimpbase/postgres](https://github.com/chimpbase/chimpbase/tree/main/packages/postgres): Reusable Postgres adapter used by hosts.
-- [@chimpbase/tooling](https://github.com/chimpbase/chimpbase/tree/main/packages/tooling): Project loading, config helpers, schema sync, workflow contract sync, migrations, and CLI support.
-- [@chimpbase/otel](https://github.com/chimpbase/chimpbase/tree/main/packages/otel): Optional OpenTelemetry integration. Exports `createOtelSink()` which implements `ChimpbaseTelemetrySink` to bridge `ctx.log`, `ctx.metric`, and `ctx.trace` to OTel providers.
-- [@chimpbase/auth](https://github.com/chimpbase/chimpbase/tree/main/packages/auth): API key authentication and user management plugin. Provides hashed key issuance, verification, and context helpers.
-- [@chimpbase/webhooks](https://github.com/chimpbase/chimpbase/tree/main/packages/webhooks): Webhook delivery plugin with HMAC-SHA256 signing, retry, and event subscription mapping.
-- [@chimpbase/pact](https://github.com/chimpbase/chimpbase/tree/main/packages/pact): Consumer-driven contract testing for Chimpbase actions. Exports `definePactContract(...)` and verify helpers.
-- [@chimpbase/rest-collections](https://github.com/chimpbase/chimpbase/tree/main/packages/rest-collections): Fetch-first REST plugin exposing `ctx.collection` resources without hardcoding routes in the runtime.
+- [Actions](https://github.com/chimpbase/chimpbase/blob/main/docs/actions.md): Validated, transactional business operations.
+- [HTTP routes](https://github.com/chimpbase/chimpbase/blob/main/docs/routes.md): Standard Request/Response handlers.
+- [Collections](https://github.com/chimpbase/chimpbase/blob/main/docs/collections.md): JSON document storage without application migrations.
+- [Database](https://github.com/chimpbase/chimpbase/blob/main/docs/database.md): SQL, migrations and Kysely.
+- [Subscriptions](https://github.com/chimpbase/chimpbase/blob/main/docs/subscriptions.md): Internal event reactions.
+- [Workers](https://github.com/chimpbase/chimpbase/blob/main/docs/workers.md): Queues, retries and dead letter handling.
+- [Cron](https://github.com/chimpbase/chimpbase/blob/main/docs/cron.md): Recurring jobs.
+- [Context](https://github.com/chimpbase/chimpbase/blob/main/docs/context.md): Handler APIs.
 
-## Examples
+## Public package
 
-Three rungs per runtime share the same orders domain so readers compare shape, not scope.
+Install `chimpbase` with Bun, npm or Deno's npm support. All public imports are subpaths of that single package. Scoped repository workspaces are private; do not tell users to install them.
 
-- [examples/bun/basic](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic): Smallest runnable Bun app. Two actions + one `route()` over SQLite. No plugins.
-- [examples/bun/intermediate](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/intermediate): Full async pipeline — actions, subscriptions, workers + DLQ, cron, telemetry. Postgres-backed.
-- [examples/bun/advanced](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/advanced): Production shape — signal-driven `workflow`, `ctx.collection`, `ctx.kv`, `ctx.stream`, custom `route()`, plugins (`@chimpbase/auth`, `@chimpbase/webhooks`, `@chimpbase/rest-collections`, `@chimpbase/otel`), and 3-replica Docker Compose with an OTel collector.
-- [examples/node/basic](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic): Node 22+ port of `basic`. Entry via `node --import tsx/esm app.ts`; SQLite through built-in `node:sqlite`.
-- [examples/node/intermediate](https://github.com/chimpbase/chimpbase/tree/main/examples/node/intermediate): Node 22+ port of `intermediate`. `node:test` runner.
-- [examples/node/advanced](https://github.com/chimpbase/chimpbase/tree/main/examples/node/advanced): Node 22+ port of `advanced`. Same plugins + workflow + 3-replica Docker Compose; image is `node:22-slim` with Bun installed only to hydrate the workspace.
-- [examples/deno/basic](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/basic): Deno 2+ port of `basic`. Stands outside the Bun workspace; `deno.json` `imports` map resolves `@chimpbase/*` to workspace source and `hono`/`pg`/`kysely` via `npm:` specifiers.
-- [examples/deno/intermediate](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/intermediate): Deno 2+ port of `intermediate`. `Deno.test` runner; Hono via `npm:hono`.
-- [examples/deno/advanced](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/advanced): Deno 2+ port of `advanced`. Full plugin set, workflow, and a 3-replica `denoland/deno` Docker Compose topology alongside the Bun and Node advanced rungs.
+- `chimpbase` and `chimpbase/runtime`: portable runtime DSL and context types.
+- `chimpbase/runtime/bun`, `chimpbase/runtime/node`, `chimpbase/runtime/deno`: explicit host adapters. Portable imports do not select a host.
+- `chimpbase/core`, `chimpbase/host`, `chimpbase/postgres`, `chimpbase/tooling`: low-level integration and tooling.
+- `chimpbase/auth`, `chimpbase/blobs`, `chimpbase/mesh`, `chimpbase/otel`, `chimpbase/pact`, `chimpbase/rest-collections`, `chimpbase/webhooks`: optional integrations.
 
-## Key Concepts
+Published consumers receive compiled JavaScript and TypeScript declarations. The [root manifest](https://github.com/chimpbase/chimpbase/blob/main/package.json) is authoritative for public exports and binaries.
 
-- Prefer Postgres in production. SQLite and memory are supported for local development and tests.
-- The main DSL primitives are `action`, `subscription`, `worker`, `cron`, `route`, and `workflow`.
-- Common runtime context helpers are `ctx.db.query(...)`, `ctx.db.kysely<TDatabase>()`, `ctx.pubsub.publish(...)`, `ctx.enqueue(...)`, `ctx.kv`, `ctx.collection`, `ctx.stream`, `ctx.workflow`, `ctx.secret`, `ctx.log`, `ctx.metric`, `ctx.trace`, and `ctx.action(...)`.
-- `action(...)` is a typed RPC unit: validated input, transactional execution, callable from anywhere via `ctx.action(...)` or HTTP.
-- `subscription(...)` handles pubsub events from `ctx.pubsub.publish(...)`. Can be marked `idempotent: true` with a stable `name` to deduplicate cross-process delivery.
-- `worker(...)` plus `enqueue(...)` is the durable background job model. Workers pull from PostgreSQL queues with row-level locking.
-- `cron(...)` uses standard 5-field UTC cron expressions and runs through the same worker execution path.
-- `workflow(...)` is for long-running stateful processes that must survive restarts, time delays, and external signals. Steps are `workflowActionStep`, `workflowSleepStep`, `workflowWaitForSignalStep`.
-- `route(...)` exposes raw HTTP handlers (method, path, handler) when a framework is not in front of the host.
-- `ctx.db` gives both raw SQL (`query`) and typed Kysely access (`kysely<TDatabase>()`); transactions are managed by the runtime, not callers.
-- `ctx.collection` is a key-scoped document store built on Postgres; `@chimpbase/rest-collections` can expose it over REST.
-- `ctx.kv` is a key-value store for small ephemeral or cached state.
-- `ctx.stream` exposes append-only event streams with cursor-based consumption, used internally for telemetry persistence and available for app use.
-- `ctx.log`, `ctx.metric`, and `ctx.trace` feed the telemetry pipeline; persistence is optional and can write to internal `_chimpbase.logs`/`metrics`/`traces` streams.
-- Telemetry sinks (`ChimpbaseTelemetrySink`) allow exporting `ctx.log`, `ctx.metric`, and `ctx.trace` to external systems. Pass `sinks: [createOtelSink()]` to `createChimpbase()` for OpenTelemetry export.
-- Multiple containers running the same `chimpbase.app.ts` can share a single PostgreSQL database. Queues use row-level locking, cron fires once per slot regardless of replica count, and idempotent subscriptions deduplicate across processes.
-- Plugins compose via the same `registrations` surface: `@chimpbase/auth`, `@chimpbase/webhooks`, and `@chimpbase/rest-collections` are registered alongside actions/workers.
-- Contract testing is provided by `@chimpbase/pact`: define consumer expectations with `definePactContract(...)` and verify them against a running host.
+## Advanced guides
 
-## Runtime Surface
+- [Advanced overview](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/index.md): Optional workflows, modules, framework integrations, plugins and deployment.
+- [App composition](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/app-composition.md): Imported registrations, stable action names and custom entry points.
+- [Workflows](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/workflows.md): Durable processes and contract tooling.
+- [Modules](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/modules.md): Business boundaries and public interfaces.
+- [Plugins](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/plugins.md): Plugin composition.
+- [Storage adapters](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/storage-adapters.md): Low-level engine contracts.
+- [Event delivery](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/event-bus.md): Event transports and coordination.
+- [Deployment](https://github.com/chimpbase/chimpbase/blob/main/docs/advanced/deployment.md): Self-hosted production setup.
 
-- `ChimpbaseContext` exposes raw SQL via `ctx.db.query(...)` and typed Kysely access via `ctx.db.kysely<TDatabase>()`.
-- `ctx.db.kysely().transaction()` is intentionally unsupported; actions, subscriptions, and queue handlers already run inside runtime-managed transactions.
-- Workflow operations used throughout the repo are `ctx.workflow.start(...)`, `ctx.workflow.signal(...)`, and `ctx.workflow.get(...)`.
-- In-memory telemetry is available through `drainTelemetryRecords()` on the host.
-- When telemetry persistence is enabled, the internal streams are `_chimpbase.logs`, `_chimpbase.metrics`, and `_chimpbase.traces`.
-- Decorator-based composition exists for `Action`, `Subscription`, `Worker`, and `Cron`, and apps can collect those registrations with `registrationsFrom(...)`.
+## Repository examples and source
 
-## Key Entry Points
+Start with [Bun basic](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic), [Node basic](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic), or [Deno basic](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/basic). Intermediate and advanced examples remain separate under each host directory.
 
-- [examples/bun/basic/chimpbase.app.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/basic/chimpbase.app.ts): Minimal app definition — two actions plus a `route()`.
-- [examples/bun/intermediate/chimpbase.app.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/intermediate/chimpbase.app.ts): Orders lifecycle with subscriptions, worker + DLQ, cron, and Hono HTTP.
-- [examples/bun/intermediate/chimpbase.migrations.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/intermediate/chimpbase.migrations.ts): Postgres + SQLite migrations defined inline via `defineChimpbaseMigrations`.
-- [examples/bun/advanced/chimpbase.app.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/advanced/chimpbase.app.ts): Full composition — workflow, four first-party plugins, conditional OTel sink.
-- [examples/shared/orders/order.workflow.ts](https://github.com/chimpbase/chimpbase/blob/main/examples/shared/orders/order.workflow.ts): Signal-driven `workflow` using the imperative `run()` form.
-- [examples/bun/advanced/docker-compose.yml](https://github.com/chimpbase/chimpbase/blob/main/examples/bun/advanced/docker-compose.yml): 3 replicas + Postgres + OTel collector.
-- [packages/bun/src/library.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/bun/src/library.ts): Bun public API, project loading helpers, action execution, startup helpers, and schema/workflow sync functions.
-- [packages/deno/src/library.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/deno/src/library.ts): Deno public API mirroring the Bun host shape.
-- [packages/runtime/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/runtime/index.ts): Public runtime types and DSL surface.
-- [packages/tooling/src/cli.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/tooling/src/cli.ts): Shared CLI behavior for `dev`, `contracts`, `schema generate`, and `schema check`.
-- [packages/auth/src/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/auth/src/index.ts): Auth plugin entry point.
-- [packages/webhooks/src/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/webhooks/src/index.ts): Webhooks plugin entry point.
-- [packages/pact/src/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/pact/src/index.ts): Pact contract testing entry point.
-- [packages/rest-collections/src/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/rest-collections/src/index.ts): REST collections plugin entry point.
+- [Runtime exports](https://github.com/chimpbase/chimpbase/blob/main/packages/runtime/index.ts): Authoritative application API.
+- [Shared host](https://github.com/chimpbase/chimpbase/blob/main/packages/host/src/library.ts): Host options, app loading and startup.
+- [CLI source](https://github.com/chimpbase/chimpbase/blob/main/packages/tooling/src/cli.ts): Supported commands and flags.
+- [Tests](https://github.com/chimpbase/chimpbase/tree/main/tests): Runtime regression coverage.
 
-## Development Commands
-
-- `bun install`
-- `bun test`
-- `bun run typecheck`
-- `bun run ci:check`
-- `bun run dev:bun:basic`
-- `bun run dev:bun:intermediate`
-- `bun run dev:bun:advanced`
-- `bun run --filter @chimpbase/example-bun-intermediate test`
-
-## Notes For LLMs And Contributors
-
-- Install dependencies once at the repository root. Examples use Bun workspaces and shared root dependencies.
-- Prefer the explicit `chimpbase.app.ts` composition shape for multi-module apps.
-- Compatibility helpers like `createChimpbase.from(...)` and `createChimpbaseDeno.from(...)` still exist, but project loading prefers `chimpbase.app.ts` when it is present.
-- If you need the runtime API shape, trust [packages/runtime/index.ts](https://github.com/chimpbase/chimpbase/blob/main/packages/runtime/index.ts) and the tests over inferred framework conventions.
-- Use the root [tests](https://github.com/chimpbase/chimpbase/tree/main/tests) directory for runtime, storage, telemetry, event bus, and workflow regression coverage.
-- Use each example's local `tests/` directory for application-level patterns and end-to-end flows.
+Install workspace dependencies once at the repository root with `bun install`. Repository examples may import private workspace aliases for source development; those aliases are not public installation instructions.

@@ -1,34 +1,32 @@
-# examples/deno/advanced
+# Deno advanced example
 
-Production-shape Chimpbase app on Deno 2+. Mirrors `examples/bun/advanced`: fulfilment **workflow**, four first-party plugins, multi-replica Docker Compose topology.
-
-Order migrations, handlers, and HTTP routes live in `examples/shared/orders`. Each runtime keeps its own bootstrap, registrations, and native tests; advanced examples also share the fulfilment workflow.
+Order fulfilment with workflows, API-key authentication, webhooks, REST collections, and telemetry. Requires Deno 2+. Start with the [basic example](../basic/README.md) if you are learning Chimpbase.
 
 ## Run
 
 ```bash
 cd examples/deno/advanced
-export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/chimpbase
-echo "CHIMPBASE_BOOTSTRAP_API_KEY=dev-key" > .env
+export CHIMPBASE_BOOTSTRAP_API_KEY=dev-key
 deno task dev
 ```
 
-Mutations require `X-API-Key: dev-key`. Requires Deno 2.0+ (for stable `Deno.serve`, `node:sqlite`, npm compatibility).
+The server listens on port 3000. `/health` is public; other routes require `X-API-Key: dev-key`.
 
-## Multi-replica via Docker Compose
+```bash
+curl http://localhost:3000/orders -H "X-API-Key: dev-key"
+```
+
+SQLite is the default. Set `DATABASE_URL` to use an existing PostgreSQL database. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to send telemetry to a collector.
+
+## Docker
+
+From the same example directory:
 
 ```bash
 docker compose up --build
 ```
 
-Three replicas share Postgres + OTel collector. Coordination rules are identical to the Bun/Node advanced rungs — queues with `FOR UPDATE SKIP LOCKED`, cron slot leasing, idempotent subscriptions, workflow state in Postgres.
-
-## Plugins
-
-- `@chimpbase/auth` — API-key guard.
-- `@chimpbase/webhooks` — outbound delivery on `order.completed` / `order.rejected`.
-- `@chimpbase/rest-collections` — auto-exposes `quality_reports` under `/api/quality_reports`.
-- `@chimpbase/otel` — `createOtelSink` wired only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+Compose starts PostgreSQL, an OTel collector, and three app replicas on ports 3000–3002. It sets the API key to `dev-bootstrap-key`. Jobs may retry; external effects must be safe to repeat.
 
 ## Tests
 
@@ -36,4 +34,4 @@ Three replicas share Postgres + OTel collector. Coordination rules are identical
 deno task test
 ```
 
-In-memory storage + `subscriptions: { dispatch: "sync" }` so pubsub → audit → queue → worker → workflow settles inside `host.drain()`.
+These use in-memory storage. See the [workflow](../../../docs/advanced/workflows.md), [authentication](../../../docs/advanced/auth.md), and [webhook](../../../docs/advanced/webhooks.md) references for the APIs. Shared order handlers live in `examples/shared/orders`; runtime setup lives in `app.ts`.

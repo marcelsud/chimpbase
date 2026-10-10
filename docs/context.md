@@ -25,7 +25,7 @@ Every handler in Chimpbase — actions, subscriptions, workers, cron jobs, and w
 Every primitive handler receives the context as the first argument:
 
 ```ts
-import { action, v } from "@chimpbase/runtime";
+import { action, v } from "chimpbase/runtime";
 
 const createOrder = action("createOrder", async (ctx, input) => {
   // Database
@@ -52,6 +52,6 @@ See the individual primitive pages for detailed API documentation:
 
 - [Database](/database)
 - [Collections](/collections)
-- [KV Store](/kv)
-- [Streams](/streams)
-- [Telemetry](/telemetry)
+- [KV Store](/advanced/kv)
+- [Streams](/advanced/streams)
+- [Telemetry](/advanced/telemetry)

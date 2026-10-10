@@ -78,21 +78,4 @@ const names = await ctx.collection.list();
 
 ## REST Collections Plugin
 
-The `@chimpbase/rest-collections` plugin automatically exposes collections as REST APIs:
-
-```ts
-import { restCollections } from "@chimpbase/rest-collections";
-
-restCollections({
-  basePath: "/api",
-  collections: {
-    notes: {
-      collection: "todo_notes",
-      filterableFields: { todoId: "number" },
-      writableFields: ["body", "todoId"],
-    },
-  },
-});
-```
-
-See the [REST Collections](/rest-collections) page for details.
+To expose collections as REST APIs without writing routes, see the separate [REST Collections](/advanced/rest-collections) guide.

@@ -5,7 +5,7 @@ Cron jobs run on a recurring schedule. Schedules are durable — they survive pr
 ## Defining Cron Jobs
 
 ```ts
-import { cron } from "@chimpbase/runtime";
+import { cron } from "chimpbase/runtime";
 
 const dailyReport = cron(
   "reports.daily",

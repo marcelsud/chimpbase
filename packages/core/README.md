@@ -1,20 +1,11 @@
-# @chimpbase/core
+# Core internals
 
-Low-level engine and registry package for Chimpbase.
+`chimpbase/core` exposes the execution engine, registration contracts, app-definition types and host-facing internals.
 
-This package contains the execution engine, registry contracts and host-facing internals used by `@chimpbase/bun`.
+Application code normally uses `chimpbase/runtime` and a runtime adapter. Import from `chimpbase/core` when you need app-definition types or low-level integration contracts.
 
-Most application code should use `@chimpbase/runtime` and a host package such as `@chimpbase/bun` instead of importing `@chimpbase/core` directly.
+- [Getting Started](../../docs/getting-started.md) shows an app definition.
+- [Configuration](../../docs/configuration.md) describes application and runtime settings.
+- [Custom storage adapters](../../docs/advanced/storage-adapters.md) describes low-level integration contracts.
 
-## What is here
-
-- engine execution model
-- host registration contracts
-- action, subscription, worker and workflow orchestration internals
-- telemetry stream persistence (buffer-and-flush after handler execution)
-
-## Distribution model
-
-`@chimpbase/core` is published as TypeScript source for the alpha release.
-
-That keeps the package small and aligned with the Bun-first runtime while the multi-host build pipeline is still evolving.
+This directory is a private workspace implementation package. The public `chimpbase` package ships compiled JavaScript and TypeScript declarations.

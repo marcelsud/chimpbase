@@ -1,39 +1,43 @@
-# examples/bun/intermediate
+# Bun advanced example
 
-Adds the asynchronous primitives: `subscription`, `worker`, `enqueue`, `cron`, and telemetry. Same orders domain as `basic`, extended with a status lifecycle and a completion notification pipeline.
-
-Order migrations, handlers, and HTTP routes live in `examples/shared/orders`. Each runtime keeps its own bootstrap, registrations, and native tests; advanced examples also share the fulfilment workflow.
+Order fulfilment with workflows, API-key authentication, webhooks, REST collections, telemetry, and attachments. Start with the [basic example](../basic/README.md) if you are learning Chimpbase.
 
 ## Run
 
+From the repository root:
+
 ```bash
-bun install                           # at repo root
-export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/chimpbase
-bun run dev:bun:intermediate
+bun install
+export CHIMPBASE_BOOTSTRAP_API_KEY=dev-key
+bun run dev:bun:advanced
 ```
 
-SQLite works out of the box for local play; the `DATABASE_URL` export switches the host to Postgres once you have one running.
+The server listens on port 3000. `/health` is public; other routes require `X-API-Key: dev-key`.
 
-## Primitives introduced on top of `basic`
+```bash
+curl http://localhost:3000/orders -H "X-API-Key: dev-key"
+```
 
-- **`ctx.pubsub.publish(event, payload)`** — action publishes a domain event after the DB write commits.
-- **`subscription(event, handler, { idempotent, name })`** — cross-process-safe event handler. The runtime wraps each delivery in a transaction; duplicates are deduped by event id + subscription name.
-- **`ctx.enqueue(queue, payload)`** — durable background job handed to a worker.
-- **`worker(queue, handler)`** and a DLQ sibling (`worker("...dlq", ...)`) — queue consumers. The runtime pulls jobs with row-level locks so multiple replicas can share a queue.
-- **`cron(name, "5-field cron", handler)`** — UTC-only scheduler that runs through the same worker path as queues.
-- **`ctx.log / ctx.metric / ctx.trace`** — telemetry on the worker side, buffered and available via `drainTelemetryRecords()` for tests.
+SQLite is the default. Set `DATABASE_URL` to use an existing PostgreSQL database. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to send telemetry to a collector.
 
-## Domain
+Attachments use memory storage by default. Set `ATTACHMENTS_ROOT` to persist files and `BLOBS_SIGNING_SECRET` to a private signing key when deploying. The optional backup cron needs `ATTACHMENTS_BACKUP_ROOT` and `rsync` installed.
 
-`pending → assigned → in_progress → completed | rejected`
+## Docker
 
-Events: `order.created`, `order.assigned`, `order.started`, `order.completed`, `order.rejected`. Completion also pushes a job onto `order.completed.notify`, which `notifyOrderCompleted` processes (writes a row to `order_notifications`). Failures cascade to `order.completed.notify.dlq`.
+```bash
+cd examples/bun/advanced
+docker compose up --build
+```
+
+Compose starts PostgreSQL, an OTel collector, and three app replicas on ports 3000–3002. It sets the API key to `dev-bootstrap-key` and stores attachments in a shared volume. Jobs may retry; external effects must be safe to repeat.
 
 ## Tests
 
+From the repository root:
+
 ```bash
-bun run --filter @chimpbase/example-bun-intermediate test:app    # pure domain
-bun run --filter @chimpbase/example-bun-intermediate test:e2e    # full flow
+bun run --cwd examples/bun/advanced test:app
+bun run --cwd examples/bun/advanced test:e2e
 ```
 
-The e2e test runs against in-memory storage with `subscriptions: { dispatch: "sync" }` so the event → audit → queue → worker pipeline settles inside one `drain()` call.
+These use in-memory storage. See the [workflow](../../../docs/advanced/workflows.md), [authentication](../../../docs/advanced/auth.md), and [webhook](../../../docs/advanced/webhooks.md), plus the [blob](../../../docs/advanced/blobs.md) references for the APIs. Shared order handlers live in `examples/shared/orders`; runtime setup lives in `app.ts`.

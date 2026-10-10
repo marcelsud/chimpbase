@@ -43,6 +43,9 @@ jobs:
       - name: Unit tests
         run: bun test
 
+      - name: Check documentation examples
+        run: bun run docs:check
+
       - name: Publish dry-run
         run: bun run publish:dry-run
 
