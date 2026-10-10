@@ -476,6 +476,21 @@ export function createSqliteEngineAdapter(
         `,
       ).run(key, JSON.stringify(value ?? null), expiresAt);
     },
+    async kvSetIfAbsent<TValue = unknown>(key: string, value: TValue, ttlMs?: number) {
+      const expiresAt = ttlMs !== undefined ? new Date(Date.now() + ttlMs).toISOString() : null;
+      const result = db.query(
+        `
+          INSERT INTO _chimpbase_kv (key, value_json, updated_at, expires_at)
+          VALUES (?1, ?2, CURRENT_TIMESTAMP, ?3)
+          ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = CURRENT_TIMESTAMP,
+            expires_at = excluded.expires_at
+          WHERE julianday(_chimpbase_kv.expires_at) <= julianday('now')
+        `,
+      ).run(key, JSON.stringify(value ?? null), expiresAt);
+      return result.changes > 0;
+    },
     async listCronSchedules(): Promise<PersistedCronScheduleRow[]> {
       return parseRows(db.query(
         `

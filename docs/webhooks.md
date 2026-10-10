@@ -338,7 +338,7 @@ inbound: {
 | `deduplicationKey` | `(request, body) => string \| null` | — | Extract a dedup key. Return `null` to skip dedup for this request. |
 | `deduplicationTtlSeconds` | `number` | `86400` (24h) | How long to remember keys. Uses KV with TTL. |
 
-Under the hood, dedup keys are stored in the KV store with automatic TTL expiration. No cleanup cron needed per webhook source.
+Under the hood, dedup keys are reserved atomically in the KV store with automatic TTL expiration. Concurrent deliveries to hosts sharing a database publish once while the key is live. Failed acceptance rolls back the reservation so the delivery can be retried. No cleanup cron needed per webhook source.
 
 **Outbound subscriptions** are also deduplicated — they use the framework's built-in subscription idempotency (`idempotent: true`), so replayed events don't trigger duplicate deliveries.
 

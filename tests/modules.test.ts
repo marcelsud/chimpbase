@@ -560,6 +560,8 @@ describe("business modules", () => {
           return true;
         },
         async write(ctx, input) {
+          expect(await ctx.kv.setIfAbsent("same.reservation", input.value)).toBe(true);
+          expect(await ctx.kv.setIfAbsent("same.reservation", "replaced")).toBe(false);
           await ctx.kv.set("same", input.value);
           await ctx.collection.insert("same", { value: input.value });
           await ctx.stream.append("same", "written", input);
@@ -585,6 +587,8 @@ describe("business modules", () => {
           return await ctx.kv.get("same", v.string());
         },
         async write(ctx, input) {
+          expect(await ctx.kv.setIfAbsent("same.reservation", input.value)).toBe(true);
+          expect(await ctx.kv.setIfAbsent("same.reservation", "replaced")).toBe(false);
           await ctx.kv.set("same", input.value);
           return input.value;
         },

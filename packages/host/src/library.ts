@@ -388,16 +388,35 @@ async function startLoadedHost<TServer, THost extends ChimpbaseHost<TServer>>(
   serveOption?: boolean,
   runWorkerOption?: boolean,
 ): Promise<StartedChimpbaseProject<THost, TServer>> {
-  const started = await host.start({
-    runWorker: runWorkerOption,
-    serve: serveOption,
-  }) as StartedHost<THost, TServer>;
+  let started: StartedHost<THost, TServer>;
+  try {
+    started = await host.start({
+      runWorker: runWorkerOption,
+      serve: serveOption,
+    }) as StartedHost<THost, TServer>;
+  } catch (error) {
+    try {
+      await host.close();
+    } catch {
+      // The caller has no host handle to clean up after failed startup.
+    }
+    throw error;
+  }
 
   return {
     host,
     server: started.server,
     async stop() {
-      await started.stop();
+      try {
+        await started.stop();
+      } catch (error) {
+        try {
+          await host.close();
+        } catch {
+          // Preserve the stop error after attempting storage and sink cleanup.
+        }
+        throw error;
+      }
       await host.close();
     },
   };
