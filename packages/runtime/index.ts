@@ -850,6 +850,19 @@ export type ChimpbaseRouteHandler<TActions extends ChimpbaseActionMap = Chimpbas
   env: ChimpbaseRouteEnv<TActions>,
 ) => Response | null | Promise<Response | null>;
 
+export const CHIMPBASE_REQUEST_REJECTED_HEADER = "x-chimpbase-request-rejected";
+
+export interface ChimpbaseRoutePreparationEnv {
+  secret(name: string): string | null;
+}
+
+/** Prepare input without a database transaction; accepted handlers retain route order. */
+export type ChimpbaseRoutePreparer<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> = (
+  request: Request,
+  env: ChimpbaseRoutePreparationEnv,
+) => ChimpbaseRouteHandler<TActions> | Response | null
+  | Promise<ChimpbaseRouteHandler<TActions> | Response | null>;
+
 export type ChimpbaseMatchedRouteHandler<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry> = (
   request: Request,
   env: ChimpbaseRouteEnv<TActions> & { readonly params: Readonly<Record<string, string>> },
@@ -882,7 +895,11 @@ export interface ChimpbaseRegistrationTarget {
     schedule: string,
     handler: ChimpbaseCronHandler<TResult>,
   ): ChimpbaseCronHandler<TResult>;
-  registerRoute?(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler;
+  registerRoute?(
+    name: string,
+    handler: ChimpbaseRouteHandler,
+    options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
+  ): ChimpbaseRouteHandler;
   registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
   registerOnStop?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
   registerContextExtension?(registration: ChimpbaseContextExtensionRegistration): void;
@@ -966,6 +983,8 @@ export interface ChimpbaseRouteRegistration<
   handler: ChimpbaseRouteHandler<TActions>;
   kind: "route";
   name: string;
+  prepare?: ChimpbaseRoutePreparer<TActions>;
+  concurrencyGroup?: "rpc";
 }
 
 export interface ChimpbaseOnStartRegistration<
@@ -1731,7 +1750,7 @@ export function register(
           throw new Error(`registration target does not support route entries: ${entry.name}`);
         }
 
-        target.registerRoute(entry.name, entry.handler);
+        target.registerRoute(entry.name, entry.handler, { prepare: entry.prepare, concurrencyGroup: entry.concurrencyGroup });
         break;
       case "subscription":
         if (!isSubscriptionRegistrationHandler(entry.handler)) {

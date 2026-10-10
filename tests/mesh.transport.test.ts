@@ -1,7 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 
 import { createHttpDispatcher } from "../packages/mesh/src/transport-http.ts";
-import { MeshTimeoutError, type NodeRecord } from "../packages/mesh/src/types.ts";
+import { MeshCallError, MeshTimeoutError, type NodeRecord } from "../packages/mesh/src/types.ts";
+import { CHIMPBASE_REQUEST_REJECTED_HEADER, v } from "../packages/runtime/index.ts";
+import { createCallDispatcher } from "../packages/mesh/src/call.ts";
+import { MeshPeerCache } from "../packages/mesh/src/discovery.ts";
 
 const peer: NodeRecord = {
   advertisedUrl: "http://mesh-peer.test",
@@ -11,6 +14,45 @@ const peer: NodeRecord = {
   services: [],
   startedAtMs: Date.now(),
 };
+
+for (const marked of [false, true]) {
+  test(`HTTP 503 ${marked ? "before execution retries a healthy peer" : "from an application is not retried"}`, async () => {
+    const visited: string[] = [];
+    const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (
+      input: Parameters<typeof fetch>[0],
+    ) => {
+      const url = input instanceof Request ? input.url : String(input);
+      visited.push(url);
+      return url.includes("draining")
+        ? new Response("runtime is stopping", { status: 503, headers: marked ? { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" } : {} })
+        : Response.json({ ok: true, result: "healthy" });
+    }, { preconnect: () => {} }));
+    const cache = new MeshPeerCache(30_000);
+    for (const nodeId of ["draining", "healthy"]) {
+      cache.upsert({
+        ...peer, nodeId, advertisedUrl: `http://${nodeId}.test`,
+        services: [{ name: "test", version: 1, actions: ["v1.test.run"], events: [] }],
+      });
+    }
+    const call = createCallDispatcher({
+      cache, defaultRetries: 2, defaultStrategy: "local-first", defaultTimeoutMs: 1_000,
+      localActionNames: new Set(), localNodeId: "caller", middleware: [],
+      remoteDispatcher: createHttpDispatcher({ callerNodeId: "caller", rpcPath: "/rpc", tokenProvider: () => "token" }),
+    });
+    try {
+      const outcome = call({} as never, "v1.test.run", {}, v.string(), { retry: { attempts: 2, delayMs: 0 } });
+      if (marked) {
+        expect(await outcome).toBe("healthy");
+        expect(visited).toEqual(["http://draining.test/rpc", "http://healthy.test/rpc"]);
+      } else {
+        await expect(outcome).rejects.toBeInstanceOf(MeshCallError);
+        expect(visited).toEqual(["http://draining.test/rpc"]);
+      }
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+}
 
 for (const status of [200, 503]) {
   test(`HTTP deadline aborts a stalled ${status} response body`, async () => {

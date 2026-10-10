@@ -10,6 +10,7 @@ import {
   type ChimpbaseCronHandler,
   type ChimpbaseRegistrationTarget,
   type ChimpbaseRouteHandler,
+  type ChimpbaseRouteRegistration,
   type ChimpbaseSubscriptionHandler,
   type ChimpbaseSubscriptionOptions,
   type ChimpbaseValidator,
@@ -138,11 +139,15 @@ function createOwnedRegistrationTarget(
       registry.registrationOwnership.set(`cron:${registeredName}`, moduleName);
       return registered;
     },
-    registerRoute(name: string, handler: ChimpbaseRouteHandler): ChimpbaseRouteHandler {
+    registerRoute(
+      name: string,
+      handler: ChimpbaseRouteHandler,
+      options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
+    ): ChimpbaseRouteHandler {
       if (target.registerRoute === undefined) throw new Error(`registration target does not support route entries: ${name}`);
       const registeredName = chimpbaseModuleResourceName(moduleName, "route", name);
       ensureRegistrationAvailable(registry, "route", registeredName, moduleName);
-      const registered = target.registerRoute(registeredName, handler);
+      const registered = target.registerRoute(registeredName, handler, options);
       registry.registrationOwnership.set(`route:${registeredName}`, moduleName);
       return registered;
     },

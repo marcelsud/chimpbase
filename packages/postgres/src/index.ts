@@ -1,5 +1,5 @@
 import type { CompiledQuery, Kysely, QueryResult } from "kysely";
-import { Pool, type PoolClient } from "pg";
+import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import type {
   ChimpbaseBlobListMetaResult,
@@ -68,16 +68,33 @@ function parseKyselyRows<TResult>(rows: unknown): TResult[] {
 }
 
 
-type Queryable = Pool | PoolClient;
+interface Queryable {
+  query<T extends QueryResultRow = QueryResultRow>(sql: string, params?: unknown[]): Promise<{ rowCount: number | null; rows: T[] }>;
+}
 
-export function openPostgresPool(config: ChimpbaseProjectConfig): Pool {
+export function openPostgresPool(config: ChimpbaseProjectConfig, max = 10): Pool {
   if (!(config.storage.url !== null && config.storage.url.length > 0)) {
     throw new Error("postgres storage requires storage.url");
   }
 
-  return new Pool({
+  const connectionTimeoutMillis = config.storage.connectionTimeoutMs ?? 5_000;
+  const queryTimeoutMs = config.storage.queryTimeoutMs ?? 30_000;
+  for (const [name, value] of [["connectionTimeoutMs", connectionTimeoutMillis], ["queryTimeoutMs", queryTimeoutMs]] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+      throw new Error(`storage.${name} must be a positive integer no greater than 2147483647`);
+    }
+  }
+  const pool = new Pool({
     connectionString: config.storage.url,
+    max,
+    connectionTimeoutMillis,
+    query_timeout: queryTimeoutMs,
+    statement_timeout: queryTimeoutMs,
+    idle_in_transaction_session_timeout: queryTimeoutMs,
   });
+  // pg removes failed idle clients before emitting; the next checkout reconnects.
+  pool.on("error", () => {});
+  return pool;
 }
 
 export async function openPostgresStorage(
@@ -87,21 +104,29 @@ export async function openPostgresStorage(
   migrationsSql: string[],
 ) {
   const pool = openPostgresPool(config);
+  const isolatedPools = new Map<"rpc" | "detached", Pool>();
   try {
     await applyPostgresSqlMigrations(pool, migrations);
     await applyInlinePostgresMigrations(pool, migrationsSql);
     await ensurePostgresInternalTables(pool);
     return {
-      createAdapter() {
-        return createPostgresEngineAdapter(pool, platform);
+      createAdapter(group?: "rpc" | "detached") {
+        if (group === undefined) return createPostgresEngineAdapter(pool, platform);
+        let isolated = isolatedPools.get(group);
+        if (isolated === undefined) {
+          isolated = openPostgresPool(config, group === "detached" ? 2 : 10);
+          isolatedPools.set(group, isolated);
+        }
+        return createPostgresEngineAdapter(isolated, platform);
       },
       eventBus: new PostgresPollingEventBus({ pool }),
       storage: {
         close() {
-          return pool.end();
+          return Promise.all([pool, ...isolatedPools.values()].map((resource) => resource.end())).then(() => undefined);
         },
       },
       supportsConcurrentWorkers: true,
+      requestConcurrency: 10,
     };
   } catch (error) {
     try {
@@ -119,6 +144,7 @@ export async function applyPostgresSqlMigrations(
 ): Promise<void> {
   if (migrations.length === 0) return;
   const client = await pool.connect();
+  let failed = false;
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('_chimpbase_migrations'))");
@@ -134,10 +160,10 @@ export async function applyPostgresSqlMigrations(
     }
     await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK");
+    failed = true;
     throw error;
   } finally {
-    client.release();
+    client.release(failed);
   }
 }
 
@@ -154,10 +180,17 @@ export async function ensurePostgresInternalTables(pool: Pool): Promise<void> {
         id BIGSERIAL PRIMARY KEY,
         event_name TEXT NOT NULL,
         payload_json JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        transaction_id BIGINT NOT NULL DEFAULT txid_current()
       )
     `,
   );
+
+  await pool.query(`
+    ALTER TABLE _chimpbase_events ADD COLUMN IF NOT EXISTS transaction_id BIGINT;
+    ALTER TABLE _chimpbase_events ALTER COLUMN transaction_id SET DEFAULT txid_current();
+    CREATE INDEX IF NOT EXISTS idx_chimpbase_events_transaction_id ON _chimpbase_events(transaction_id)
+  `);
 
   await pool.query(
     `
@@ -397,8 +430,29 @@ export function createPostgresEngineAdapter(
   platform: ChimpbasePlatformShim,
 ): ChimpbaseEngineAdapter {
   let transactionClient: PoolClient | null = null;
+  let failedTransaction: { error: unknown } | null = null;
 
-  const queryable = (): Queryable => transactionClient ?? pool;
+  const failTransaction = (error: unknown) => {
+    if (transactionClient === null || failedTransaction !== null) return;
+    failedTransaction = { error };
+    transactionClient.removeListener("error", failTransaction);
+    transactionClient.release(true);
+  };
+  const transactionQueryable: Queryable = {
+    async query<T extends QueryResultRow>(sql: string, params?: unknown[]) {
+      if (failedTransaction !== null) throw failedTransaction.error;
+      if (transactionClient === null) throw new Error("PostgreSQL transaction is not active");
+      try {
+        return await transactionClient.query<T>(sql, params);
+      } catch (error) {
+        // Discard the socket: a timed-out SQL statement may still be executing.
+        failTransaction(error);
+        throw error;
+      }
+    },
+  };
+
+  const queryable = (): Queryable => transactionClient === null ? pool : transactionQueryable;
 
   return {
     async advanceCronSchedule(
@@ -432,7 +486,14 @@ export function createPostgresEngineAdapter(
       }
 
       transactionClient = await pool.connect();
-      await transactionClient.query("BEGIN");
+      transactionClient.on("error", failTransaction);
+      try {
+        await transactionQueryable.query("BEGIN");
+      } catch (error) {
+        transactionClient = null;
+        failedTransaction = null;
+        throw error;
+      }
     },
     async claimNextCronSchedule(leaseMs: number): Promise<(PersistedCronScheduleRow & { lease_token: string }) | null> {
       const now = platform.now();
@@ -649,7 +710,8 @@ export function createPostgresEngineAdapter(
     },
     async commitTransaction() {
       if ((transactionClient !== null)) {
-        await transactionClient.query("COMMIT");
+        await transactionQueryable.query("COMMIT");
+        transactionClient.removeListener("error", failTransaction);
         transactionClient.release();
         transactionClient = null;
       }
@@ -847,10 +909,12 @@ export function createPostgresEngineAdapter(
       }
 
       try {
-        await transactionClient.query("ROLLBACK");
+        if (failedTransaction === null) await transactionQueryable.query("ROLLBACK");
       } finally {
-        transactionClient.release();
+        transactionClient.removeListener("error", failTransaction);
+        if (failedTransaction === null) transactionClient.release();
         transactionClient = null;
+        failedTransaction = null;
       }
     },
     async streamAppend<TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number> {
@@ -1139,10 +1203,11 @@ export function createPostgresEngineAdapter(
       uploadId: string,
       finalMeta: ChimpbaseBlobMetaRow,
     ): Promise<void> {
-      const client = transactionClient ?? await pool.connect();
-      const ownsClient = !(transactionClient !== null);
+      const ownedClient = transactionClient === null ? await pool.connect() : null;
+      const client = ownedClient ?? transactionQueryable;
+      let failed = false;
       try {
-        if (ownsClient) await client.query("BEGIN");
+        if (ownedClient !== null) await client.query("BEGIN");
         await client.query(
           `
             INSERT INTO _chimpbase_blobs (
@@ -1172,14 +1237,12 @@ export function createPostgresEngineAdapter(
           "DELETE FROM _chimpbase_blob_uploads WHERE upload_id = $1",
           [uploadId],
         );
-        if (ownsClient) await client.query("COMMIT");
+        if (ownedClient !== null) await client.query("COMMIT");
       } catch (error) {
-        if (ownsClient) {
-          try { await client.query("ROLLBACK"); } catch {}
-        }
+        failed = true;
         throw error;
       } finally {
-        if (ownsClient) client.release();
+        ownedClient?.release(failed);
       }
     },
     async blobAbortUpload(uploadId: string): Promise<void> {

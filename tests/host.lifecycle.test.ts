@@ -5,7 +5,7 @@ import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEvent
 import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
-import { action, onStart, onStop, plugin, route, subscription, worker } from "../packages/runtime/index.ts";
+import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, worker } from "../packages/runtime/index.ts";
 
 class TestHost extends ChimpbaseHost<{ port: number }> {}
 
@@ -85,6 +85,37 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  test("a request whose preparation finishes after stop cannot execute", async () => {
+    const { library } = createTrackedRuntime();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let executed = false;
+    const host = await library.createChimpbase({ storage: { engine: "memory" } });
+    host.registerRoute("POST /prepared", async () => null, {
+      prepare: async () => {
+        entered.resolve();
+        await release.promise;
+        return async () => { executed = true; return new Response("finished"); };
+      },
+    });
+    const started = await host.start({ serve: false, runWorker: false });
+    const pending = host.executeRoute(new Request("http://localhost/prepared", { method: "POST" }));
+    try {
+      await entered.promise;
+      await started.stop();
+      release.resolve();
+      const outcome = await pending;
+      expect(outcome.response?.status).toBe(503);
+      expect(outcome.response?.headers.get(CHIMPBASE_REQUEST_REJECTED_HEADER)).toBe("1");
+      expect(executed).toBe(false);
+    } finally {
+      release.resolve();
+      await pending;
+      await started.stop();
+      await host.close();
+    }
+  });
+
   test("stop halts event sources, drains active delivery, and ignores late callbacks before onStop", async () => {
     const { calls, deliverEvents, library } = createTrackedRuntime();
     const entered = Promise.withResolvers<void>();

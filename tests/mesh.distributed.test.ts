@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Pool } from "pg";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
@@ -186,6 +186,47 @@ describeIfPg("mesh distributed request and event delivery", () => {
       await pool.query("DELETE FROM _chimpbase_events WHERE event_name LIKE $1", [`${event}%`]);
     }
   }, 15_000);
+
+  test("a poison broadcast rolls back independently and stops retrying while healthy events continue", async () => {
+    const prefix = `poison.${crypto.randomUUID()}`;
+    let failures = 0;
+    let healthy = 0;
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const host = await createChimpbase({ storage: { engine: "postgres", url: postgresUrl() } });
+    host.register(chimpbaseMesh({ heartbeatMs: 0, transport: "local-only", services: [service({
+      name: "events", events: {
+        [`${prefix}.bad`]: async (ctx) => {
+          failures += 1;
+          await ctx.kv.set(`${prefix}.rollback`, failures);
+          throw new Error("poison broadcast");
+        },
+        [`${prefix}.good`]: async (ctx) => {
+          healthy += 1;
+          await ctx.kv.set(`${prefix}.healthy`, healthy);
+        },
+      },
+    })] }));
+    const started = await host.start({ serve: false, runWorker: false });
+    try {
+      await Bun.sleep(30);
+      await pool.query("INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, '{}'), ($2, '{}')", [`${prefix}.bad`, `${prefix}.good`]);
+      await waitFor(() => failures === 3);
+      await pool.query("INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, '{}')", [`${prefix}.good`]);
+      await waitFor(() => healthy === 2);
+      await Bun.sleep(1_100);
+      expect(failures).toBe(3);
+      expect(healthy).toBe(2);
+      expect((await pool.query<{ key: string; value_json: number }>("SELECT key, value_json FROM _chimpbase_kv WHERE key LIKE $1", [`${prefix}%`])).rows)
+        .toEqual([{ key: `${prefix}.healthy`, value_json: 2 }]);
+      expect(errors.mock.calls.some((call: readonly unknown[]) => (call[1] as { exhausted?: boolean })?.exhausted === true)).toBe(true);
+    } finally {
+      errors.mockRestore();
+      await started.stop();
+      await host.close();
+      await pool.query("DELETE FROM _chimpbase_kv WHERE key LIKE $1", [`${prefix}%`]);
+      await pool.query("DELETE FROM _chimpbase_events WHERE event_name LIKE $1", [`${prefix}%`]);
+    }
+  }, 10_000);
 
   test("ordinary async subscriptions on a peer still receive events from a producer without subscribers", async () => {
     const event = `peer-only.${crypto.randomUUID()}`;

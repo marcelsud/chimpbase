@@ -68,6 +68,8 @@ export interface CreateChimpbaseRuntimeOptions {
     engine?: "memory" | "postgres" | "sqlite";
     path?: string | null;
     url?: string | null;
+    connectionTimeoutMs?: number;
+    queryTimeoutMs?: number;
   };
   subscriptions?: {
     dispatch?: "async" | "sync";
@@ -289,6 +291,8 @@ export function createChimpbaseRuntimeLibrary<
           ?? runtime.env.get("CHIMPBASE_DATABASE_URL")
           ?? runtime.env.get("DATABASE_URL")
           ?? null,
+        connectionTimeoutMs: options.storage?.connectionTimeoutMs,
+        queryTimeoutMs: options.storage?.queryTimeoutMs,
       },
       subscriptions: {
         dispatch: options.subscriptions?.dispatch ?? inferSubscriptionDispatchMode(runtime.env),

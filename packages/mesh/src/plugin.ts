@@ -14,6 +14,7 @@ import {
   type ChimpbasePluginRegistration,
   type ChimpbaseRegistrationSource,
   type ChimpbaseRouteHandler,
+  type ChimpbaseRoutePreparer,
   type ChimpbaseValidator,
 } from "@chimpbase/runtime";
 
@@ -83,6 +84,8 @@ export interface ChimpbaseMeshOptions {
   name?: string;
   offlineAfterMs?: number;
   rpcPath?: string;
+  rpcBodyTimeoutMs?: number;
+  rpcMaxBodyBytes?: number;
   services: readonly AnyServiceDefinition[];
   transport?: "local-only" | "http";
 }
@@ -117,6 +120,12 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   const defaultTimeoutMs = options.defaultTimeoutMs ?? 5_000;
   const defaultRetries = options.defaultRetries ?? 0;
   const rpcPath = options.rpcPath ?? DEFAULT_RPC_PATH;
+  const rpcBodyTimeoutMs = options.rpcBodyTimeoutMs ?? 5_000;
+  const rpcMaxBodyBytes = options.rpcMaxBodyBytes ?? 1_048_576;
+  if (!Number.isSafeInteger(rpcMaxBodyBytes) || rpcMaxBodyBytes <= 0
+    || !Number.isFinite(rpcBodyTimeoutMs) || rpcBodyTimeoutMs <= 0 || rpcBodyTimeoutMs > 2_147_483_647) {
+    throw new Error("chimpbaseMesh: RPC body limits must be finite positive values");
+  }
   const middleware = options.middleware ?? [];
   const metadata = { ...options.meta };
 
@@ -255,7 +264,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
       ),
     );
 
-    entries.push(createRpcRoute(rpcPath));
+    entries.push(createRpcRoute({ rpcPath, meshToken: options.meshToken!, rpcBodyTimeoutMs, rpcMaxBodyBytes }));
   }
 
   entries.push(
@@ -471,10 +480,15 @@ function buildServiceSelf(
   };
 }
 
-function createRpcRoute(rpcPath: string) {
-  const handler: ChimpbaseRouteHandler = async (request, env) => {
+function createRpcRoute(options: {
+  rpcPath: string;
+  meshToken: string;
+  rpcBodyTimeoutMs: number;
+  rpcMaxBodyBytes: number;
+}) {
+  const prepare: ChimpbaseRoutePreparer = async (request, env) => {
     const url = new URL(request.url);
-    if (url.pathname !== rpcPath) {
+    if (url.pathname !== options.rpcPath) {
       return null;
     }
 
@@ -483,36 +497,83 @@ function createRpcRoute(rpcPath: string) {
     }
 
     const token = request.headers.get(MESH_TOKEN_HEADER);
+    if (!compareTokens(env.secret(options.meshToken), token)) {
+      void request.body?.cancel().catch(() => {});
+      return rpcErrorResponse("unauthorized mesh rpc", 401);
+    }
 
     let envelope: unknown;
     try {
-      envelope = await request.json();
-    } catch {
-      return new Response(JSON.stringify({ ok: false, error: "invalid json body" }), {
-        headers: { "content-type": "application/json" },
-        status: 400,
-      });
+      envelope = await readRpcBody(request, options.rpcMaxBodyBytes, options.rpcBodyTimeoutMs);
+    } catch (error) {
+      return error instanceof Response ? error : rpcErrorResponse("invalid json body", 400);
     }
 
-    try {
-      const result = await env.action(RPC_EXECUTE_ACTION, envelope, token);
-      return new Response(JSON.stringify({ ok: true, result }), {
-        headers: { "content-type": "application/json" },
-        status: 200,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const status = message === "unauthorized mesh rpc" ? 401
-        : message === "invalid rpc envelope" ? 400
-        : message === "mesh rpc action is not registered" ? 403
-        : message === "mesh rpc deadline exceeded" ? 408
-        : 500;
-      throw new Response(
-        JSON.stringify({ error: message, ok: false }),
-        { headers: { "content-type": "application/json" }, status },
-      );
-    }
+    const handler: ChimpbaseRouteHandler = async (_request, routeEnv) => {
+      try {
+        const result = await routeEnv.action(RPC_EXECUTE_ACTION, envelope, token);
+        return new Response(JSON.stringify({ ok: true, result }), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message === "unauthorized mesh rpc" ? 401
+          : message === "invalid rpc envelope" ? 400
+          : message === "mesh rpc action is not registered" ? 403
+          : message === "mesh rpc deadline exceeded" ? 408
+          : 500;
+        throw rpcErrorResponse(message, status);
+      }
+    };
+    return handler;
   };
 
-  return route("__chimpbase.mesh.rpc.route", handler);
+  return {
+    ...route("__chimpbase.mesh.rpc.route", () => null),
+    concurrencyGroup: "rpc" as const,
+    prepare,
+  };
+}
+
+function rpcErrorResponse(error: string, status: number): Response {
+  return new Response(JSON.stringify({ error, ok: false }), {
+    headers: { "content-type": "application/json" }, status,
+  });
+}
+
+async function readRpcBody(request: Request, maxBytes: number, timeoutMs: number): Promise<unknown> {
+  const reader = request.body?.getReader();
+  if (reader === undefined) throw rpcErrorResponse("invalid json body", 400);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(rpcErrorResponse("mesh rpc body read timed out", 408)), timeoutMs);
+  });
+  let completed = false;
+  try {
+    const declaredLength = request.headers.get("content-length");
+    if (declaredLength !== null && Number(declaredLength) > maxBytes) {
+      throw rpcErrorResponse("mesh rpc body too large", 413);
+    }
+    const read = async () => {
+      let bytes = 0;
+      let body = "";
+      const decoder = new TextDecoder();
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > maxBytes) throw rpcErrorResponse("mesh rpc body too large", 413);
+        body += decoder.decode(chunk.value, { stream: true });
+      }
+      return JSON.parse(body + decoder.decode()) as unknown;
+    };
+    const result = await Promise.race([read(), expired]);
+    completed = true;
+    return result;
+  } finally {
+    clearTimeout(timer);
+    if (!completed) void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }

@@ -29,6 +29,23 @@ bunx chimpbase dev
 
 A nonempty `DATABASE_URL` or `CHIMPBASE_DATABASE_URL` selects PostgreSQL automatically. Use PostgreSQL when multiple processes need to share queues or other coordination state.
 
+PostgreSQL connection acquisition times out after 5 seconds. SQL queries and idle transactions have 30-second deadlines on the client and server, so a network failure cannot leave database locks held indefinitely. Set `storage.connectionTimeoutMs` and `storage.queryTimeoutMs` when creating the runtime to change these deadlines, including for long migrations, queries, or external waits inside a transaction. Both values must be positive finite integers:
+
+```ts
+import { createChimpbase } from "chimpbase/runtime/bun";
+
+const chimpbase = await createChimpbase({
+  storage: {
+    engine: "postgres",
+    url: process.env.DATABASE_URL,
+    connectionTimeoutMs: 5_000,
+    queryTimeoutMs: 120_000,
+  },
+});
+```
+
+Each PostgreSQL host admits at most 10 concurrent ordinary requests and 10 authenticated mesh RPC requests. Requests beyond these limits receive HTTP 503 before execution; direct `executeAction` calls reject. The pools reserve up to 10 connections for ordinary work and workers, 10 for RPC callbacks, and 2 for detached lifecycle work such as mesh heartbeats. The latter pools open lazily, so budget up to 22 database connections per host. Deeper call chains can exhaust the RPC pool; their acquisition and RPC deadlines remain finite. Failed queries discard the affected transaction connection and roll back its writes; the next transaction reconnects. If the connection fails while awaiting a commit reply, the commit outcome can be unknown, so retries of external effects still need idempotency.
+
 For temporary data in tests:
 
 ```bash

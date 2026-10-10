@@ -31,6 +31,7 @@ import {
 } from "@chimpbase/core";
 import {
   action as createActionEntry,
+  CHIMPBASE_REQUEST_REJECTED_HEADER,
   bindActionInvoker as bindActionReferenceInvoker,
   cron as createCronEntry,
   describeWorkflow,
@@ -54,6 +55,7 @@ import {
   type ChimpbaseRegistrationSource,
   type ChimpbaseRouteEnv,
   type ChimpbaseRouteHandler,
+  type ChimpbaseRouteRegistration,
   type ChimpbaseSubscriptionHandler,
   type ChimpbaseSubscriptionOptions,
   type ChimpbaseTelemetryPersistOption,
@@ -88,10 +90,11 @@ interface StorageHandle {
 }
 
 export interface StorageResources {
-  createAdapter(): ChimpbaseEngineAdapter;
+  createAdapter(group?: "rpc" | "detached"): ChimpbaseEngineAdapter;
   eventBus?: ChimpbaseEventBus;
   storage: StorageHandle;
   supportsConcurrentWorkers: boolean;
+  requestConcurrency?: number;
 }
 
 interface WorkerLane {
@@ -166,7 +169,7 @@ export interface CreateHostOptions {
 
 export interface RuntimeHostInstanceOptions<TServer> {
   config: ChimpbaseProjectConfig;
-  createWorkerEngine: () => ChimpbaseEngine;
+  createWorkerEngine: (group?: "rpc") => ChimpbaseEngine;
   debugEnabled: boolean;
   engine: ChimpbaseEngine;
   platform: ChimpbasePlatformShim;
@@ -175,6 +178,7 @@ export interface RuntimeHostInstanceOptions<TServer> {
   runtime: ChimpbaseRuntimeShim<TServer>;
   storage: StorageHandle;
   supportsConcurrentWorkers: boolean;
+  requestConcurrency?: number;
 }
 
 const IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX = "_chimpbase.sub.seen:";
@@ -186,6 +190,8 @@ const RESERVED_ENGINE_QUEUE_NAMES = new Set([
   "__chimpbase.subscription.run",
   "__chimpbase.workflow.run",
 ]);
+
+class ChimpbaseCapacityError extends Error {}
 
 function isRegisteredActionResult<TResult>(
   registry: ChimpbaseRegistry,
@@ -205,7 +211,7 @@ export class ChimpbaseHost<TServer> {
   readonly registry: ChimpbaseRegistry;
   private cronRegistryDirty = true;
   private cronSyncPromise: Promise<void> | null = null;
-  private readonly createWorkerEngine: () => ChimpbaseEngine;
+  private readonly createWorkerEngine: (group?: "rpc") => ChimpbaseEngine;
   private readonly debugEnabled: boolean;
   private readonly runtime: ChimpbaseRuntimeShim<TServer>;
   private serializedEngineOperations: Promise<void> = Promise.resolve();
@@ -214,6 +220,8 @@ export class ChimpbaseHost<TServer> {
   private acceptingRoutes = true;
   private readonly storage: StorageHandle;
   private readonly supportsConcurrentWorkers: boolean;
+  private readonly requestConcurrency: number;
+  private readonly concurrentOperations = { request: 0, rpc: 0 };
 
 
   constructor(options: RuntimeHostInstanceOptions<TServer>) {
@@ -227,6 +235,7 @@ export class ChimpbaseHost<TServer> {
     this.registry = options.registry;
     this.createWorkerEngine = options.createWorkerEngine;
     this.supportsConcurrentWorkers = options.supportsConcurrentWorkers;
+    this.requestConcurrency = options.requestConcurrency ?? Number.POSITIVE_INFINITY;
   }
 
   async executeAction<TAction extends ChimpbaseActionRegistrationLike>(
@@ -271,13 +280,24 @@ export class ChimpbaseHost<TServer> {
 
   async executeRoute(request: Request): Promise<RouteExecutionResult> {
     if (!this.acceptingRoutes) {
-      return { emittedEvents: [], response: new Response("runtime is stopping", { status: 503 }) };
+      return { emittedEvents: [], response: new Response("runtime is stopping", {
+        status: 503, headers: { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" },
+      }) };
     }
     const route = getRouteKey(request);
     this.debug("route executing", { route });
 
     try {
-      const outcome = await this.runEngineOperation(async (engine) => await engine.executeRoute(request), true);
+      const prepared = await this.engine.prepareRoute(request);
+      if (!this.acceptingRoutes) {
+        return { emittedEvents: [], response: new Response("runtime is stopping", {
+          status: 503, headers: { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" },
+        }) };
+      }
+      if (prepared.response !== null) return { emittedEvents: [], response: prepared.response };
+      const outcome = await this.runEngineOperation(
+        async (engine) => await engine.executeRoute(request, prepared), true, prepared.concurrencyGroup,
+      );
       this.debug("route completed", {
         emittedEvents: outcome.emittedEvents.length,
         route,
@@ -285,6 +305,11 @@ export class ChimpbaseHost<TServer> {
       });
       return outcome;
     } catch (error) {
+      if (error instanceof ChimpbaseCapacityError) {
+        return { emittedEvents: [], response: new Response(error.message, {
+          status: 503, headers: { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" },
+        }) };
+      }
       this.debug("route failed", { error: formatError(error), route });
       throw error;
     }
@@ -510,8 +535,10 @@ export class ChimpbaseHost<TServer> {
   registerRoute(
     name: string,
     handler: ChimpbaseRouteHandler,
+    options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
   ): ChimpbaseRouteHandler {
     this.registry.routes.push({
+      ...options,
       handler,
       kind: "route",
       name,
@@ -820,10 +847,17 @@ export class ChimpbaseHost<TServer> {
   private async runEngineOperation<TResult>(
     operation: (engine: ChimpbaseEngine) => Promise<TResult>,
     concurrent = false,
+    group?: "rpc",
   ): Promise<TResult> {
     const current = engineOperationContext.getStore();
     if (current?.host === this && current.active) return await operation(current.engine);
-    const engine = concurrent && this.supportsConcurrentWorkers ? this.createWorkerEngine() : this.engine;
+    const lane = group ?? "request";
+    const isConcurrent = concurrent && this.supportsConcurrentWorkers;
+    if (isConcurrent && this.concurrentOperations[lane] >= this.requestConcurrency) {
+      throw new ChimpbaseCapacityError("runtime request capacity exceeded");
+    }
+    const engine = isConcurrent ? this.createWorkerEngine(group) : this.engine;
+    if (isConcurrent) this.concurrentOperations[lane] += 1;
     const run = async () => {
       const context = { active: true, engine, host: this };
       try {
@@ -847,6 +881,7 @@ export class ChimpbaseHost<TServer> {
       return await queued;
     } finally {
       this.activeEngineOperations.delete(queued);
+      if (isConcurrent) this.concurrentOperations[lane] -= 1;
     }
   }
 
@@ -972,7 +1007,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
       : undefined;
     const engine = new ChimpbaseEngine({
       adapter: storageResources.createAdapter(),
-      createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter() : undefined,
+      createDetachedAdapter: storageResources.supportsConcurrentWorkers ? () => storageResources.createAdapter("detached") : undefined,
       blobs: blobsEngineConfig,
       eventBus: storageResources.eventBus,
       platform,
@@ -988,8 +1023,8 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
       },
       worker: options.config.worker,
     });
-    const createWorkerEngine = () => new ChimpbaseEngine({
-      adapter: storageResources.createAdapter(),
+    const createWorkerEngine = (group?: "rpc") => new ChimpbaseEngine({
+      adapter: storageResources.createAdapter(group),
       blobs: blobsEngineConfig,
       eventBus: storageResources.eventBus,
       platform,
@@ -1016,6 +1051,7 @@ export async function createRuntimeHost<TServer, THost extends ChimpbaseHost<TSe
       runtime,
       storage: storageResources.storage,
       supportsConcurrentWorkers: storageResources.supportsConcurrentWorkers,
+      requestConcurrency: storageResources.requestConcurrency,
     });
 
     if ((options.app !== undefined)) {

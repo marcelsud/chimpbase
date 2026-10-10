@@ -58,6 +58,8 @@ export function resolveService(
     Object.assign(merged.events, resolved.events);
     Object.assign(merged.methods, resolved.methods);
     Object.assign(merged.settings, resolved.settings);
+    merged.started = resolved.started ?? merged.started;
+    merged.stopped = resolved.stopped ?? merged.stopped;
   }
 
   if (isJsonObject(def.settings)) {

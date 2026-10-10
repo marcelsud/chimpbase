@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { isJsonObject, type ChimpbaseContext } from "@chimpbase/runtime";
+import { CHIMPBASE_REQUEST_REJECTED_HEADER, isJsonObject } from "@chimpbase/runtime";
 
 import type { NodeRecord } from "./types.ts";
 import { MeshCallError, MeshTimeoutError } from "./types.ts";
@@ -77,6 +77,8 @@ export function createHttpDispatcher(
           actionName,
           peer.nodeId,
           `mesh RPC returned ${response.status}: ${text}`,
+          undefined,
+          response.status === 503 && response.headers.get(CHIMPBASE_REQUEST_REJECTED_HEADER) === "1",
         );
       }
 
