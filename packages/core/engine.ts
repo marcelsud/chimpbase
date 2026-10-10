@@ -2831,12 +2831,16 @@ export class ChimpbaseEngine {
       try {
         await cleanup();
       } catch (error) {
-        this.recordLog(
-          { kind: "action", module: null, name: "__chimpbase.blobs.cleanup" },
-          "warn",
-          "blob payload cleanup failed",
-          { committed, error: error instanceof Error ? error.message : String(error) },
-        );
+        try {
+          this.recordLog(
+            { kind: "action", module: null, name: "__chimpbase.blobs.cleanup" },
+            "warn",
+            "blob payload cleanup failed",
+            { committed, error: error instanceof Error ? error.message : String(error) },
+          );
+        } catch {
+          // Cleanup diagnostics must not interrupt commit delivery or mask a rollback error.
+        }
       }
     }
   }
