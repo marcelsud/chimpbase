@@ -2,6 +2,7 @@ FROM denoland/deno:2.6.9
 
 WORKDIR /app
 COPY packages ./packages
+COPY examples/shared ./examples/shared
 COPY examples/deno/advanced ./examples/deno/advanced
 
 WORKDIR /app/examples/deno/advanced

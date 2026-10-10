@@ -3,7 +3,7 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import { createChimpbase } from "@chimpbase/deno";
 
 import app from "../../chimpbase.app.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 async function reservePort(): Promise<number> {
   const listener = Deno.listen({ port: 0, hostname: "127.0.0.1" });

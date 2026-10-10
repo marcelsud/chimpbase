@@ -6,7 +6,7 @@ import {
   isTerminal,
   normalizeAmount,
   normalizeCustomer,
-} from "../../src/modules/orders/order.domain.ts";
+} from "../../../../shared/orders/order.domain.ts";
 
 describe("order domain", () => {
   test("normalizes customer", () => {

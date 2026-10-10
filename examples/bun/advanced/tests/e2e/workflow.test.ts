@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { authedGet, authedPost, bootAdvanced } from "../support/harness.ts";
-import type { OrderRecord } from "../../src/modules/orders/order.types.ts";
+import type { OrderRecord } from "../../../../shared/orders/order.types.ts";
 
 describe("bun/advanced example — workflow", () => {
   let booted: Awaited<ReturnType<typeof bootAdvanced>>;

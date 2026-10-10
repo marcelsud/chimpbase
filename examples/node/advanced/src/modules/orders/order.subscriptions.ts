@@ -1,7 +1,7 @@
 import type { ChimpbaseContext } from "@chimpbase/runtime";
 
-import { insertAuditEntry } from "./order.repository.ts";
-import type { OrderRecord } from "./order.types.ts";
+import { insertAuditEntry } from "../../../../../shared/orders/order.repository.ts";
+import type { OrderRecord } from "../../../../../shared/orders/order.types.ts";
 
 export async function auditOrderCreated(ctx: ChimpbaseContext, order: OrderRecord): Promise<void> {
   await insertAuditEntry(ctx, { orderId: order.id, event: "order.created", payload: order });
