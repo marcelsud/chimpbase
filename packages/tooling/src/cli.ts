@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 import { parseArgs } from "node:util";
 
-import { parseJson } from "@chimpbase/runtime";
+import { parseJson, type ChimpbaseJob, type ChimpbaseJobListOptions, type ChimpbaseJobStatus } from "@chimpbase/runtime";
 
 import type { ChimpbaseSchemaSyncResult } from "./schema.ts";
 import type { SyncChimpbaseModuleArtifactsResult } from "./modules.ts";
@@ -28,7 +28,14 @@ interface StartedProject {
   stop(): Promise<void>;
 }
 
+interface JobsHost extends CliHost {
+  listJobs(options?: ChimpbaseJobListOptions): Promise<ChimpbaseJob[]>;
+  inspectJob(jobId: number): Promise<ChimpbaseJob | null>;
+  retryJob(jobId: number): Promise<ChimpbaseJob>;
+}
+
 export interface RunChimpbaseCliDependencies {
+  loadProject?(projectDir?: string): Promise<JobsHost>;
   runAction(
     actionName: string,
     args?: unknown[] | unknown,
@@ -84,15 +91,18 @@ export async function runChimpbaseCli(
   } as const : command === "schema" ? {
     ...commonOptions,
     "docker-image": { type: "string" }, "output-dir": { type: "string" },
+  } as const : command === "jobs" ? {
+    ...commonOptions,
+    queue: { type: "string" }, status: { type: "string" }, limit: { type: "string" },
   } as const : null;
   if (options === null) throw new Error(`unsupported command: ${command}`);
 
   let subcommand: string | null = null;
-  if ((command === "modules" || command === "schema") && rest[0] !== undefined && !rest[0].startsWith("-")) {
+  if ((command === "modules" || command === "schema" || command === "jobs") && rest[0] !== undefined && !rest[0].startsWith("-")) {
     subcommand = rest[0];
     rest = rest.slice(1);
   }
-  const { values: args } = parseArgs({ args: [...rest], options, strict: true, allowPositionals: false });
+  const { values: args, positionals } = parseArgs({ args: [...rest], options, strict: true, allowPositionals: command === "jobs" });
   if (args.help) {
     writeLine(CLI_HELP);
     return;
@@ -104,6 +114,40 @@ export async function runChimpbaseCli(
   }
   const projectDirArg = args["project-dir"];
   const projectDir = resolve(typeof projectDirArg === "string" ? projectDirArg : ".");
+
+  if (command === "jobs") {
+    if (subcommand !== "list" && subcommand !== "inspect" && subcommand !== "retry") {
+      throw new Error("jobs command expects `list`, `inspect ID` or `retry ID`");
+    }
+    const list = subcommand === "list";
+    if (positionals.length !== (list ? 0 : 1)) throw new Error(`jobs ${subcommand} expects ${list ? "no job id" : "one job id"}`);
+    if (!list && (args.queue !== undefined || args.status !== undefined || args.limit !== undefined)) {
+      throw new Error("--queue, --status and --limit apply only to jobs list");
+    }
+    const jobId = list ? 0 : Number(positionals[0]);
+    if (!list && (!/^\d+$/.test(positionals[0]!) || !Number.isSafeInteger(jobId) || jobId <= 0)) {
+      throw new Error("job id must be a positive safe integer");
+    }
+    const limit = args.limit === undefined ? undefined : Number(args.limit);
+    if (limit !== undefined && (!/^\d+$/.test(String(args.limit)) || !Number.isSafeInteger(limit) || limit <= 0 || limit > 1000)) {
+      throw new Error("--limit must be an integer between 1 and 1000");
+    }
+    const statuses: readonly string[] = ["pending", "processing", "completed", "failed", "dlq"];
+    if (args.status !== undefined && !statuses.includes(String(args.status))) throw new Error(`invalid job status: ${args.status}`);
+    if (dependencies.loadProject === undefined) throw new Error("runtime does not support job commands");
+    const host = await dependencies.loadProject(projectDir);
+    try {
+      if (list) {
+        writeLine(JSON.stringify(await host.listJobs({ queue: typeof args.queue === "string" ? args.queue : undefined,
+          status: args.status as ChimpbaseJobStatus | undefined, limit }), null, 2));
+      } else {
+        const job = subcommand === "inspect" ? await host.inspectJob(jobId) : await host.retryJob(jobId);
+        if (job === null) throw new Error(`job not found: ${jobId}`);
+        writeLine(JSON.stringify(job, null, 2));
+      }
+    } finally { await host.close(); }
+    return;
+  }
 
   if (command === "contracts") {
     const { host, result } = await dependencies.syncWorkflowContracts({
@@ -222,6 +266,13 @@ export async function runChimpbaseCli(
 }
 
 const CLI_HELP = `Usage: chimpbase [command] [options]
+
+jobs list              Inspect recent jobs, including queues without a local worker
+  --queue NAME         Filter by queue name
+  --status STATUS      pending, processing, completed, failed or dlq
+  --limit N            Maximum rows (default 100, maximum 1000)
+jobs inspect ID        Inspect one job and its payload/error
+jobs retry ID          Retry a failed or dlq user job; retires pending associated DLQ envelopes
 
 dev                    Start HTTP and the background worker (default command)
   --serve              Start HTTP only

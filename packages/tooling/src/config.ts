@@ -28,6 +28,7 @@ export async function loadProjectConfig(
   const server = getTable(parsed, "server");
   const storage = getTable(parsed, "storage");
   const worker = getTable(parsed, "worker");
+  const workerRetention = getTable(worker, "retention");
   const secrets = getTable(parsed, "secrets");
   const subscriptions = getTable(parsed, "subscriptions");
   const subscriptionsIdempotency = getTable(subscriptions, "idempotency");
@@ -62,10 +63,16 @@ export async function loadProjectConfig(
       },
     },
     worker: {
-      leaseMs: readNumber(worker, "lease_ms"),
-      maxAttempts: readNumber(worker, "max_attempts"),
-      pollIntervalMs: readNumber(worker, "poll_interval_ms"),
-      retryDelayMs: readNumber(worker, "retry_delay_ms"),
+      concurrency: readWorkerNumber(worker, "concurrency"),
+      leaseMs: readWorkerNumber(worker, "lease_ms"),
+      maxAttempts: readWorkerNumber(worker, "max_attempts"),
+      pollIntervalMs: readWorkerNumber(worker, "poll_interval_ms"),
+      retryDelayMs: readWorkerNumber(worker, "retry_delay_ms"),
+      retention: {
+        enabled: readBoolean(workerRetention, "enabled"),
+        maxAgeDays: readWorkerNumber(workerRetention, "max_age_days"),
+        schedule: readString(workerRetention, "schedule"),
+      },
     },
     secrets: {
       dir: readNullableString(secrets, "dir"),
@@ -238,6 +245,12 @@ function readNullableString(table: TomlTable | undefined, key: string): string |
 function readNumber(table: TomlTable | undefined, key: string): number | undefined {
   const value = table?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readWorkerNumber(table: TomlTable | undefined, key: string): number | undefined {
+  const value = table?.[key];
+  if (value !== undefined && typeof value !== "number") throw new Error(`worker.${key} must be a number`);
+  return value;
 }
 
 function readBoolean(table: TomlTable | undefined, key: string): boolean | undefined {

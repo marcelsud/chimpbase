@@ -593,6 +593,93 @@ describe("telemetry sink interface", () => {
     expect(scopes.some((s) => s.kind === "queue" && s.name === "test.worker")).toBe(true);
   });
 
+  test("queue span startup failures record terminal state and close partially opened spans", async () => {
+    const first = createMockSink();
+    const second = createMockSink();
+    const failure = new Error("queue tracing unavailable");
+    const firstStart = first.sink.startHandlerSpan.bind(first.sink);
+    first.sink.startHandlerSpan = (scope) => {
+      const span = firstStart(scope);
+      if (scope.kind !== "queue") return span;
+      return { ...span, end(status, message) {
+        span.end(status, message);
+        throw new Error("span cleanup failed");
+      } };
+    };
+    const secondStart = second.sink.startHandlerSpan.bind(second.sink);
+    second.sink.startHandlerSpan = (scope) => {
+      if (scope.kind === "queue") throw failure;
+      return secondStart(scope);
+    };
+    let executions = 0;
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, sinks: [first.sink, second.sink],
+      worker: { maxAttempts: 1, retryDelayMs: 0 }, registrations: [
+        action("enqueue", async (ctx) => await ctx.enqueue("broken.tracing", { value: "retained" })),
+        worker("broken.tracing", () => { executions += 1; }, { dlq: false }),
+      ],
+    });
+    cleanupHosts.push(host);
+    await host.executeAction("enqueue");
+    await expect(host.processNextQueueJob()).rejects.toBe(failure);
+    expect(executions).toBe(0);
+    expect(first.handlerSpanEnds.at(-1)).toEqual({ status: "error", errorMessage: failure.message });
+    expect(await host.engine.getBlobsAdapter().query(
+      "SELECT status, last_error, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs", [],
+      v.object({ status: v.string(), last_error: v.string(), attempt_count: v.number(), lease_expires_at_ms: v.number().nullable() }),
+    )).toEqual([{ status: "failed", last_error: failure.message, attempt_count: 1, lease_expires_at_ms: null }]);
+    expect(await host.processNextQueueJob()).toBeNull();
+  });
+
+  test("queue span completion failures preserve committed jobs", async () => {
+    const mock = createMockSink();
+    const failure = new Error("span completion failed");
+    const start = mock.sink.startHandlerSpan.bind(mock.sink);
+    mock.sink.startHandlerSpan = (scope) => {
+      const span = start(scope);
+      if (scope.kind !== "queue") return span;
+      return { ...span, end() { throw failure; } };
+    };
+    let executions = 0;
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, sinks: [mock.sink], registrations: [
+        action("enqueue", async (ctx) => await ctx.enqueue("committed", {})),
+        worker("committed", async (ctx) => { executions += 1; await ctx.kv.set("committed", true); }),
+      ],
+    });
+    cleanupHosts.push(host);
+    await host.executeAction("enqueue");
+    await expect(host.processNextQueueJob()).rejects.toBe(failure);
+    expect(await host.engine.getBlobsAdapter().query(
+      "SELECT status, attempt_count FROM _chimpbase_queue_jobs", [], v.object({ status: v.string(), attempt_count: v.number() }),
+    )).toEqual([{ status: "completed", attempt_count: 1 }]);
+    expect(await host.processNextQueueJob()).toBeNull();
+    expect(executions).toBe(1);
+  });
+
+  test("queue span startup closes opened spans when failure persistence rejects", async () => {
+    const first = createMockSink();
+    const second = createMockSink();
+    const tracingError = new Error("span startup failed");
+    const storageError = new Error("failure persistence unavailable");
+    const start = second.sink.startHandlerSpan.bind(second.sink);
+    second.sink.startHandlerSpan = (scope) => {
+      if (scope.kind === "queue") throw tracingError;
+      return start(scope);
+    };
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, sinks: [first.sink, second.sink], registrations: [
+        action("enqueue", async (ctx) => await ctx.enqueue("job", {})),
+        worker("job", () => {}),
+      ],
+    });
+    cleanupHosts.push(host);
+    await host.executeAction("enqueue");
+    host.engine.getBlobsAdapter().markQueueJobFailure = async () => { throw storageError; };
+    await expect(host.processNextQueueJob()).rejects.toBe(storageError);
+    expect(first.handlerSpanEnds.at(-1)).toEqual({ status: "error", errorMessage: tracingError.message });
+  });
+
   test("startHandlerSpan is called for cron execution", async () => {
     const mock = createMockSink();
     let now = Date.now();

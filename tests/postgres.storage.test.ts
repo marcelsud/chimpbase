@@ -19,6 +19,18 @@ const poolPrototype = Pool.prototype as unknown as {
 afterEach(() => mock.restore());
 
 describe("PostgreSQL storage startup", () => {
+  test("invalid queue delays fail before a PostgreSQL query", async () => {
+    const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
+    const pool = openPostgresPool(config);
+    try {
+      const adapter = createPostgresEngineAdapter(pool, platform);
+      for (const delayMs of [-1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER]) {
+        await expect(adapter.queueEnqueue("invalid-delay", {}, { delayMs })).rejects.toThrow("delayMs");
+      }
+      expect(query).not.toHaveBeenCalled();
+    } finally { await pool.end(); }
+  });
+
   test("configures finite database deadlines and preserves programmatic overrides", async () => {
     const pool = openPostgresPool(config);
     expect(pool.options.connectionTimeoutMillis).toBe(5_000);

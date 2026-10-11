@@ -13,7 +13,7 @@ import type {
 } from "./engine.ts";
 import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "./engine.ts";
 import { createSqliteKysely } from "./sqlite-kysely.ts";
-import type { ChimpbasePlatformShim } from "./host.ts";
+import { assertWorkerInteger, type ChimpbasePlatformShim } from "./host.ts";
 import type {
   ChimpbaseBlobListOptions,
   ChimpbaseBlobPutOptions,
@@ -24,6 +24,8 @@ import type {
   ChimpbaseKvListOptions,
   ChimpbaseValidator,
   ChimpbaseQueueEnqueueOptions,
+  ChimpbaseJob,
+  ChimpbaseJobListOptions,
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
@@ -99,6 +101,18 @@ const queueJobRowValidator = v.object({
   payload_json: v.string(),
   queue_name: v.string(),
 });
+const inspectedJobRowValidator = v.object({
+  id: v.number(), queue_name: v.string(), payload_json: v.string(),
+  status: v.union(v.literal("pending"), v.literal("processing"), v.literal("completed"), v.literal("failed"), v.literal("dlq")),
+  attempt_count: v.number(), available_at_ms: v.number(),
+  lease_expires_at_ms: v.number().nullable(), last_error: v.string().nullable(),
+});
+
+function inspectedJob(row: ReturnType<typeof inspectedJobRowValidator.parse>): Omit<ChimpbaseJob, "registered"> {
+  return { id: row.id, queue: row.queue_name, payload: parseJson(row.payload_json), status: row.status,
+    attempt: row.attempt_count, availableAtMs: row.available_at_ms, leaseExpiresAtMs: row.lease_expires_at_ms,
+    lastError: row.last_error };
+}
 const streamEventRowValidator = v.object({
   created_at: v.string(),
   event_name: v.string(),
@@ -317,6 +331,11 @@ export function createSqliteEngineAdapter(
       return db.query("SELECT id FROM _chimpbase_queue_jobs WHERE id = ?1 AND status = 'processing' AND attempt_count = ?2")
         .all(jobId, attempt).length > 0;
     },
+    async releaseQueueJob(jobId: number, attempt: number): Promise<void> {
+      db.query(`UPDATE _chimpbase_queue_jobs
+        SET status = 'pending', attempt_count = attempt_count - 1, lease_expires_at_ms = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1 AND status = 'processing' AND attempt_count = ?2`).run(jobId, attempt);
+    },
     async collectionDelete(name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> {
       const matched = findCollectionDocuments(db, name, filter);
       for (const row of matched) {
@@ -431,6 +450,42 @@ export function createSqliteEngineAdapter(
         "SELECT payload_json FROM _chimpbase_queue_jobs WHERE id = ?1 LIMIT 1",
       ).all(jobId), payloadJsonRowValidator, "queue payload rows");
       return job?.payload_json ?? null;
+    },
+    async listQueueJobs(options: ChimpbaseJobListOptions) {
+      return parseRows(db.query(`SELECT id, queue_name, payload_json, status, attempt_count,
+        available_at_ms, lease_expires_at_ms, last_error FROM _chimpbase_queue_jobs
+        WHERE (?1 IS NULL OR queue_name = ?1) AND (?2 IS NULL OR status = ?2)
+        ORDER BY id DESC LIMIT ?3`).all(options.queue ?? null, options.status ?? null, options.limit ?? 100),
+      inspectedJobRowValidator, "queue inspection rows").map(inspectedJob);
+    },
+    async getQueueJob(jobId: number) {
+      const [row] = parseRows(db.query(`SELECT id, queue_name, payload_json, status, attempt_count,
+        available_at_ms, lease_expires_at_ms, last_error FROM _chimpbase_queue_jobs WHERE id = ?1`).all(jobId),
+      inspectedJobRowValidator, "queue inspection rows");
+      return row === undefined ? null : inspectedJob(row);
+    },
+    async retryQueueJob(jobId: number, dlqName?: string) {
+      const [source] = parseRows(db.query(`SELECT id, queue_name, payload_json, status, attempt_count,
+        available_at_ms, lease_expires_at_ms, last_error FROM _chimpbase_queue_jobs WHERE id = ?1`).all(jobId),
+      inspectedJobRowValidator, "queue retry source");
+      if (source === undefined || source.queue_name.startsWith("__chimpbase.")
+        || (source.status !== "failed" && source.status !== "dlq")) return false;
+      if (source.status === "dlq") {
+        if (dlqName === undefined) return false;
+        const related = `id != ?1 AND queue_name = ?3 AND json_extract(payload_json, '$.queue') = ?2`;
+        const blocked = db.query(`SELECT id FROM _chimpbase_queue_jobs WHERE ${related}
+          AND ((json_extract(payload_json, '$.jobId') = ?1 AND status NOT IN ('pending', 'completed'))
+            OR (json_extract(payload_json, '$.jobId') IS NULL AND status != 'completed')) LIMIT 1`)
+          .all(jobId, source.queue_name, dlqName);
+        if (blocked.length > 0) return false;
+        db.query(`UPDATE _chimpbase_queue_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP, last_error = 'superseded by retry of job ' || ?1
+          WHERE ${related} AND json_extract(payload_json, '$.jobId') = ?1 AND status = 'pending'`)
+          .run(jobId, source.queue_name, dlqName);
+      }
+      return db.query(`UPDATE _chimpbase_queue_jobs SET status = 'pending', attempt_count = 0,
+        available_at_ms = ?2, lease_expires_at_ms = NULL, last_error = NULL, completed_at = NULL,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status IN ('failed', 'dlq')`).run(jobId, platform.now()).changes === 1;
     },
     async insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean> {
       const result = db.query(
@@ -563,8 +618,9 @@ export function createSqliteEngineAdapter(
       return runQuery(db, sql, params, validator);
     },
     async queueEnqueue<TPayload = unknown>(name: string, payload: TPayload, options?: ChimpbaseQueueEnqueueOptions) {
-      const availableAtMs = platform.now() + Math.max(0, options?.delayMs ?? 0);
-      db.query(
+      const now = platform.now();
+      const availableAtMs = now + assertWorkerInteger("delayMs", options?.delayMs ?? 0, 0, Number.MAX_SAFE_INTEGER - now);
+      const result = db.query(
         `
           INSERT INTO _chimpbase_queue_jobs (
             queue_name,
@@ -575,6 +631,7 @@ export function createSqliteEngineAdapter(
           ) VALUES (?1, ?2, 'pending', ?3, 0)
         `,
       ).run(name, JSON.stringify(payload ?? null), availableAtMs);
+      return Number(result.lastInsertRowid);
     },
     async releaseCronScheduleLease(scheduleName: string, leaseToken: string): Promise<void> {
       db.query(

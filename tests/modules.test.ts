@@ -25,6 +25,7 @@ import {
   worker,
   workflow,
   workflowActionStep,
+  type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
 import { createDefaultChimpbasePlatformShim } from "../packages/core/host.ts";
 import { createPostgresEngineAdapter } from "../packages/postgres/src/index.ts";
@@ -515,6 +516,94 @@ describe("business modules", () => {
       await expect(host.executeAction(privateAction)).rejects.toThrow("internal operation");
     } finally { await host.close(); }
   });
+
+  for (const source of ["worker", "cron"] as const) {
+    for (const target of ["own", "global", "foreign"] as const) {
+      test(`module ${source} imported actions preserve ownership (${target})`, async () => {
+        const calls: string[] = [];
+        const own = action("owned", (ctx) => { calls.push(ctx.module?.name ?? "none"); });
+        const global = action("global", () => { calls.push("global"); });
+        const foreign = action("foreign", () => { calls.push("foreign"); });
+        const selected = { own, global, foreign }[target];
+        const owner = defineChimpbaseModuleInterface({
+          name: "owner", version: 1, events: {},
+          calls: { enqueue: { input: v.object({}), output: v.boolean() } },
+        });
+        const other = defineChimpbaseModuleInterface({ name: "other", version: 1, events: {}, calls: {} });
+        const host = await createChimpbase({
+          storage: { engine: "memory" }, worker: { maxAttempts: 1, retryDelayMs: 0 },
+          registrations: [global],
+          modules: [
+            defineChimpbaseModuleImplementation({
+              interface: owner,
+              calls: { async enqueue(ctx) { await ctx.enqueue("job", {}); return true; } },
+              registrations: [own, source === "worker"
+                ? worker("job", async () => await selected(), { dlq: false })
+                : cron("tick", "* * * * *", async () => await selected())],
+            }),
+            defineChimpbaseModuleImplementation({ interface: other, calls: {}, registrations: [foreign] }),
+          ],
+        });
+        try {
+          if (source === "worker") await host.executeAction(owner.calls.enqueue.id, {});
+          else {
+            await host.syncCronSchedules();
+            await host.engine.getBlobsAdapter().query(
+              "UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = ?2",
+              [Date.now() - 1_000, chimpbaseModuleResourceName("owner", "cron", "tick")], v.object({}),
+            );
+            await host.processNextCronSchedule();
+          }
+          if (target === "own") {
+            expect(await host.processNextQueueJob()).not.toBeNull();
+            expect(calls).toEqual(["owner"]);
+          } else {
+            await expect(host.processNextQueueJob()).rejects.toThrow(target === "global" ? "unowned registration" : "internal operation");
+            expect(calls).toEqual([]);
+          }
+        } finally { await host.close(); }
+      });
+    }
+  }
+
+  for (const engine of ["memory", "sqlite"] as const) {
+    test(`module custom DLQs reach their local handler (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-module-dlq-"));
+      cleanupDirs.push(projectDir);
+      const mail = defineChimpbaseModuleInterface({
+        name: "mail", version: 1, events: {},
+        calls: { send: { input: v.object({}), output: v.boolean() } },
+      });
+      const failures: ChimpbaseDlqEnvelope[] = [];
+      const host = await createChimpbase({
+        projectDir, storage: { engine }, worker: { maxAttempts: 1, retryDelayMs: 0 },
+        modules: [defineChimpbaseModuleImplementation({
+          interface: mail,
+          calls: { async send(ctx) { await ctx.enqueue("send", { to: "test@example.com" }); return true; } },
+          registrations: [
+            worker("send", () => { throw new Error("mail provider unavailable"); }, { dlq: "failed" }),
+            worker<ChimpbaseDlqEnvelope>("failed", (ctx, payload) => {
+              expect(ctx.module?.name).toBe("mail");
+              failures.push(payload);
+            }, { dlq: false }),
+            worker("default", () => {}),
+          ],
+        })],
+      });
+      try {
+        expect(host.registry.workers.get(chimpbaseModuleResourceName("mail", "queue", "default"))?.definition.dlq)
+          .toBe(`${chimpbaseModuleResourceName("mail", "queue", "default")}.dlq`);
+        expect(host.registry.workers.get(chimpbaseModuleResourceName("mail", "queue", "failed"))?.definition.dlq).toBe(false);
+        await host.executeAction(mail.calls.send.id, {});
+        await expect(host.processNextQueueJob()).rejects.toThrow("mail provider unavailable");
+        expect((await host.processNextQueueJob())?.queueName).toBe(chimpbaseModuleResourceName("mail", "queue", "failed"));
+        expect(failures).toMatchObject([{
+          attempts: 1, error: "mail provider unavailable", payload: { to: "test@example.com" },
+          queue: chimpbaseModuleResourceName("mail", "queue", "send"),
+        }]);
+      } finally { await host.close(); }
+    });
+  }
 
   test("scopes route, worker, lifecycle, state, and raw SQL to the owning module", async () => {
     const left = defineChimpbaseModuleInterface({

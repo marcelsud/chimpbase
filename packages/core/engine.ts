@@ -30,6 +30,10 @@ import type {
   ChimpbaseKvListOptions,
   ChimpbaseLogger,
   ChimpbaseQueueEnqueueOptions,
+  ChimpbaseQueueClient,
+  ChimpbaseWorkerRegistration,
+  ChimpbaseJob,
+  ChimpbaseJobListOptions,
   ChimpbaseRouteEnv,
   ChimpbaseRouteHandler,
   ChimpbaseRouteRegistration,
@@ -64,6 +68,7 @@ import {
 import { computeNextCronFireTime } from "./cron.ts";
 import { NoopEventBus, type ChimpbaseEventBus } from "./event-bus.ts";
 import {
+  assertWorkerInteger,
   createDefaultChimpbasePlatformShim,
   type ChimpbaseDrainOptions,
   type ChimpbaseDrainResult,
@@ -300,7 +305,9 @@ function isSubscriptionHandler(
 
 function isWorkerHandler(
   value: unknown,
-): value is (ctx: ChimpbaseContext, payload: unknown, execution?: { attempt: number }) => unknown {
+): value is (ctx: ChimpbaseContext, payload: unknown, execution?: {
+  attempt: number; jobId: number; queue: string; signal: AbortSignal;
+}) => unknown {
   return typeof value === "function";
 }
 
@@ -362,8 +369,13 @@ export interface ChimpbaseEngineAdapter {
   commitTransaction(): Promise<void>;
   completeQueueJob(jobId: number): Promise<void>;
   lockQueueJob?(jobId: number, attempt: number): Promise<boolean>;
+  releaseQueueJob?(jobId: number, attempt: number): Promise<void>;
   deleteCronSchedule(scheduleName: string): Promise<void>;
   getQueueJobPayload(jobId: number): Promise<string | null>;
+  listQueueJobs?(options: ChimpbaseJobListOptions): Promise<Omit<ChimpbaseJob, "registered">[]>;
+  getQueueJob?(jobId: number): Promise<Omit<ChimpbaseJob, "registered"> | null>;
+  /** Called inside a transaction; resets terminal user jobs and retires their unclaimed DLQ envelopes. */
+  retryQueueJob?(jobId: number, dlqName?: string): Promise<boolean>;
   insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean>;
   kvDelete(key: string): Promise<void>;
   kvGet<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
@@ -384,7 +396,7 @@ export interface ChimpbaseEngineAdapter {
     name: string,
     payload: TPayload,
     options?: ChimpbaseQueueEnqueueOptions,
-  ): Promise<void>;
+  ): Promise<number>;
   releaseCronScheduleLease(scheduleName: string, leaseToken: string): Promise<void>;
   rollbackTransaction(): Promise<void>;
   streamAppend<TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number>;
@@ -600,6 +612,9 @@ export class ChimpbaseEngine {
   private readonly worker: ChimpbaseEngineOptions["worker"];
 
   constructor(options: ChimpbaseEngineOptions) {
+    assertWorkerInteger("worker.leaseMs", options.worker.leaseMs);
+    assertWorkerInteger("worker.maxAttempts", options.worker.maxAttempts);
+    assertWorkerInteger("worker.retryDelayMs", options.worker.retryDelayMs, 0);
     this.adapter = options.adapter;
     this.createDetachedAdapter = options.createDetachedAdapter;
     this.blobsConfig = options.blobs ?? null;
@@ -939,12 +954,54 @@ export class ChimpbaseEngine {
     }
   }
 
-  async processNextQueueJob(): Promise<ChimpbaseQueueExecutionResult | null> {
-    const [job] = await this.processNextQueueJobs(1);
+  async listJobs(options: ChimpbaseJobListOptions = {}): Promise<ChimpbaseJob[]> {
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1000) {
+      throw new Error("job list limit must be an integer between 1 and 1000");
+    }
+    if (options.status !== undefined && !["pending", "processing", "completed", "failed", "dlq"].includes(options.status)) {
+      throw new Error(`invalid job status: ${options.status}`);
+    }
+    if (this.adapter.listQueueJobs === undefined) throw new Error("storage adapter does not support job inspection");
+    const queues = new Set(this.getClaimableQueueNames());
+    return (await this.adapter.listQueueJobs({ ...options, limit }))
+      .map((job) => ({ ...job, registered: queues.has(job.queue) }));
+  }
+
+  async inspectJob(jobId: number): Promise<ChimpbaseJob | null> {
+    this.assertJobId(jobId);
+    if (this.adapter.getQueueJob === undefined) throw new Error("storage adapter does not support job inspection");
+    const job = await this.adapter.getQueueJob(jobId);
+    return job === null ? null : { ...job, registered: this.getClaimableQueueNames().includes(job.queue) };
+  }
+
+  async retryJob(jobId: number): Promise<ChimpbaseJob> {
+    this.assertJobId(jobId);
+    if (this.adapter.retryQueueJob === undefined) throw new Error("storage adapter does not support job retry");
+    return await this.runInTransaction(async () => {
+      const job = await this.inspectJob(jobId);
+      if (job === null) throw new Error(`job not found: ${jobId}`);
+      if (job.queue.startsWith("__chimpbase.")) throw new Error("internal coordination jobs cannot be retried; use the workflow or subscription API");
+      const dlqName = this.registry.workers.get(job.queue)?.definition.dlq;
+      if (job.status === "dlq" && typeof dlqName !== "string") throw new Error("register the original worker with its original DLQ configuration before retrying a dlq job");
+      if (!await this.adapter.retryQueueJob!(jobId, typeof dlqName === "string" ? dlqName : undefined)) {
+        throw new Error(`job ${jobId} cannot be retried; only failed or dlq jobs are eligible. Complete processing/failed DLQ jobs and legacy envelopes without jobId first`);
+      }
+      return (await this.inspectJob(jobId))!;
+    });
+  }
+
+  private assertJobId(jobId: number): void {
+    if (!Number.isSafeInteger(jobId) || jobId <= 0) throw new Error("job id must be a positive safe integer");
+  }
+
+  async processNextQueueJob(signal?: AbortSignal): Promise<ChimpbaseQueueExecutionResult | null> {
+    const [job] = await this.processNextQueueJobs(1, signal);
     return job ?? null;
   }
 
-  async processNextQueueJobs(limit: number): Promise<ChimpbaseQueueExecutionResult[]> {
+  async processNextQueueJobs(limit: number, signal = new AbortController().signal): Promise<ChimpbaseQueueExecutionResult[]> {
+    if (signal.aborted) return [];
     const batchSize = Math.max(1, Math.floor(limit));
     const queueNames = this.getClaimableQueueNames();
     const targets: ChimpbaseQueueClaimTargets = {
@@ -963,7 +1020,11 @@ export class ChimpbaseEngine {
     const errors: unknown[] = [];
     for (const job of claimedJobs) {
       try {
-        const result = await this.processClaimedQueueJob(job);
+        if (signal.aborted) {
+          await this.adapter.releaseQueueJob?.(job.id, job.attempt_count);
+          continue;
+        }
+        const result = await this.processClaimedQueueJob(job, signal);
         if (result !== null) results.push(result);
       } catch (error) {
         errors.push(error);
@@ -1004,7 +1065,7 @@ export class ChimpbaseEngine {
     return queueNames;
   }
 
-  private async processClaimedQueueJob(job: ChimpbaseQueueJobRecord): Promise<ChimpbaseQueueExecutionResult | null> {
+  private async processClaimedQueueJob(job: ChimpbaseQueueJobRecord, signal: AbortSignal): Promise<ChimpbaseQueueExecutionResult | null> {
     const telemetryStart = this.telemetryRecords.length;
     const worker = this.registry.workers.get(job.queue_name);
     if (!(worker !== undefined)) {
@@ -1018,25 +1079,27 @@ export class ChimpbaseEngine {
       module: worker.module ?? null,
       name: job.queue_name,
     };
-    const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
+    const handlerSpans: ChimpbaseSinkSpan[] = [];
     let committed = false;
     let executed = false;
+    let payload: unknown;
+    const execution = { attempt: job.attempt_count, jobId: job.id, queue: job.queue_name, signal };
 
     try {
       this.telemetryExecutionDepth += 1;
+      payload = JSON.parse(job.payload_json) as unknown;
+      for (const sink of this.sinks) handlerSpans.push(sink.startHandlerSpan(scope));
       const workerHandler: unknown = worker.handler;
       if (!isWorkerHandler(workerHandler)) {
         throw new TypeError(`queue ${job.queue_name} has an invalid handler`);
       }
-      const payload = JSON.parse(job.payload_json) as unknown;
-
       let invoke = async () => {
         await this.runInTransaction(async () => {
           if (this.adapter.lockQueueJob !== undefined && !await this.adapter.lockQueueJob(job.id, job.attempt_count)) return;
           executed = true;
           await this.runWithActionInvoker(async () => {
-            await workerHandler(this.createContext(scope), payload, { attempt: job.attempt_count });
-          });
+            await workerHandler(this.createContext(scope), payload, execution);
+          }, worker.module ?? null);
           await this.adapter.completeQueueJob(job.id);
         });
         committed = true;
@@ -1070,26 +1133,37 @@ export class ChimpbaseEngine {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const onFailure = worker.definition.onFailure;
-      if (!committed) {
-        await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count, onFailure === undefined ? undefined :
-          async () => await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null));
-        if (onFailure !== undefined) {
-          this.takeCommittedEvents();
+      try {
+        if (!committed) {
+          await this.failQueueJob(job.id, job.queue_name, message, job.attempt_count, onFailure === undefined ? undefined :
+            async () => await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error,
+              { ...execution, payload }), worker.module ?? null));
+          try {
+            this.recordLog(scope, "error", "queue job failed", {
+              attempt: job.attempt_count, error: message, jobId: job.id, queue: job.queue_name,
+            });
+          } catch {
+            // A sink failure must not mask the worker error after retry/DLQ state is durable.
+          }
+          if (onFailure !== undefined) this.takeCommittedEvents();
           try {
             await this.flushTelemetryToStreams(scope, telemetryStart);
           } catch {
             // Failure diagnostics must not mask the worker error after retry/DLQ state is durable.
           }
         }
+      } finally {
+        for (const span of handlerSpans) {
+          try { span.end("error", message); } catch { /* Span cleanup must preserve the execution error. */ }
+        }
       }
-      for (const span of handlerSpans) span.end("error", message);
       throw error;
     } finally {
       this.finishTelemetryExecution();
     }
   }
 
-  async drain(options: ChimpbaseDrainOptions = {}): Promise<ChimpbaseDrainResult> {
+  async drain(options: ChimpbaseDrainOptions = {}, signal?: AbortSignal): Promise<ChimpbaseDrainResult> {
     const startedAtMs = this.platform.now();
     const maxDurationMs = normalizeDrainMaxDuration(options.maxDurationMs);
     const maxRuns = normalizeDrainMaxRuns(options.maxRuns);
@@ -1109,8 +1183,8 @@ export class ChimpbaseEngine {
       }
 
       const outcomes: Awaited<ReturnType<typeof this.drainInPriorityOrder>> = nextPriority === "cron"
-        ? await this.drainInPriorityOrder(["cron", "queue"], startedAtMs, maxDurationMs)
-        : await this.drainInPriorityOrder(["queue", "cron"], startedAtMs, maxDurationMs);
+        ? await this.drainInPriorityOrder(["cron", "queue"], startedAtMs, maxDurationMs, signal)
+        : await this.drainInPriorityOrder(["queue", "cron"], startedAtMs, maxDurationMs, signal);
 
       if (outcomes.stopReason === "max_duration") {
         return {
@@ -1151,8 +1225,10 @@ export class ChimpbaseEngine {
     priorities: readonly ["cron", "queue"] | readonly ["queue", "cron"],
     startedAtMs: number,
     maxDurationMs: number,
+    signal?: AbortSignal,
   ): Promise<{ cronSchedules: number; queueJobs: number; stopReason?: "max_duration" }> {
     for (const priority of priorities) {
+      if (signal?.aborted) return { cronSchedules: 0, queueJobs: 0 };
       if (this.platform.now() - startedAtMs >= maxDurationMs) {
         return { cronSchedules: 0, queueJobs: 0, stopReason: "max_duration" };
       }
@@ -1165,7 +1241,7 @@ export class ChimpbaseEngine {
         continue;
       }
 
-      const job = await this.processNextQueueJob();
+      const job = await this.processNextQueueJob(signal);
       if ((job !== null)) {
         return { cronSchedules: 0, queueJobs: 1 };
       }
@@ -1350,14 +1426,15 @@ export class ChimpbaseEngine {
       module: registration.module ?? null,
       name: payload.scheduleName,
     };
-    const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
+    const handlerSpans: ChimpbaseSinkSpan[] = [];
 
     try {
+      for (const sink of this.sinks) handlerSpans.push(sink.startHandlerSpan(scope));
       let invoke = async () => {
         await this.runWithActionInvoker(async () => await registration.handler(
           this.createContext(scope),
           invocation,
-        ));
+        ), registration.module ?? null);
       };
 
       for (const span of handlerSpans) {
@@ -1372,7 +1449,9 @@ export class ChimpbaseEngine {
       for (const span of handlerSpans) span.end("ok");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      for (const span of handlerSpans) span.end("error", message);
+      for (const span of handlerSpans) {
+        try { span.end("error", message); } catch { /* Span cleanup must preserve the execution error. */ }
+      }
       throw error;
     }
   }
@@ -1390,11 +1469,25 @@ export class ChimpbaseEngine {
       const namespace = chimpbaseModuleResourcePrefix(moduleName, "workflow-instance");
       return workflowId.startsWith(namespace) ? workflowId : `${namespace}${workflowId}`;
     };
-    const enqueue = async <TPayload = unknown>(
-      name: string,
-      payload: TPayload,
+    const enqueue: ChimpbaseQueueClient["enqueue"] = async (
+      nameOrReference: string | ChimpbaseWorkerRegistration<never, unknown>,
+      payload: unknown,
       options?: ChimpbaseQueueEnqueueOptions,
-    ): Promise<void> => await this.adapter.queueEnqueue(qualify("queue", name), payload, options);
+    ): Promise<number> => {
+      if (typeof nameOrReference !== "string" && (nameOrReference === null || typeof nameOrReference !== "object")) {
+        throw new Error("enqueue expects a queue name or registered worker reference");
+      }
+      const name = typeof nameOrReference === "string" ? nameOrReference : nameOrReference.name;
+      if (typeof name !== "string" || name.length === 0) throw new Error("queue name must be nonempty");
+      const qualifiedName = qualify("queue", name);
+      if (typeof nameOrReference !== "string") {
+        const worker = this.registry.workers.get(qualifiedName);
+        if (nameOrReference.kind !== "worker" || worker === undefined || worker.handler !== nameOrReference.handler) {
+          throw new Error(`worker reference is not registered in this context: ${qualifiedName}`);
+        }
+      }
+      return await this.adapter.queueEnqueue(qualifiedName, payload, options);
+    };
     const adapter = this.adapter;
     async function query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
     async function query<T>(
@@ -3023,6 +3116,7 @@ export class ChimpbaseEngine {
         if ((payloadJson !== null && payloadJson.length > 0)) {
           const envelope: ChimpbaseDlqEnvelope = {
             attempts,
+            jobId,
             error: errorMessage,
             failedAt: this.timestampNow(),
             payload: JSON.parse(payloadJson) as unknown,

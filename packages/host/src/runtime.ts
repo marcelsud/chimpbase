@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
   ChimpbaseEngine,
+  assertWorkerInteger,
   createDefaultChimpbasePlatformShim,
   listChimpbaseMigrationsForEngine,
   type ChimpbaseBlobDriver,
@@ -63,6 +64,8 @@ import {
   type ChimpbaseValidator,
   type ChimpbaseWorkerDefinition,
   type ChimpbaseWorkerHandler,
+  type ChimpbaseJob,
+  type ChimpbaseJobListOptions,
   type ChimpbaseWorkflowContract,
   type ChimpbaseTelemetrySink,
   type ChimpbaseWorkflowDefinition,
@@ -222,6 +225,8 @@ export class ChimpbaseHost<TServer> {
 
 
   constructor(options: RuntimeHostInstanceOptions<TServer>) {
+    assertWorkerInteger("worker.concurrency", options.config.worker.concurrency);
+    assertWorkerInteger("worker.pollIntervalMs", options.config.worker.pollIntervalMs, 1, 2_147_483_647);
     this.projectDir = options.projectDir;
     this.config = options.config;
     this.platform = options.platform;
@@ -336,10 +341,22 @@ export class ChimpbaseHost<TServer> {
     return outcome;
   }
 
-  async drain(options: DrainOptions = {}): Promise<DrainResult> {
+  async listJobs(options: ChimpbaseJobListOptions = {}): Promise<ChimpbaseJob[]> {
+    return await this.runEngineOperation(async (engine) => await engine.listJobs(options));
+  }
+
+  async inspectJob(jobId: number): Promise<ChimpbaseJob | null> {
+    return await this.runEngineOperation(async (engine) => await engine.inspectJob(jobId));
+  }
+
+  async retryJob(jobId: number): Promise<ChimpbaseJob> {
+    return await this.runEngineOperation(async (engine) => await engine.retryJob(jobId));
+  }
+
+  async drain(options: DrainOptions = {}, signal?: AbortSignal): Promise<DrainResult> {
     const outcome = await this.runEngineOperation(async (engine) => {
       await this.syncCronSchedulesIfNeeded();
-      return await engine.drain(options);
+      return await engine.drain(options, signal);
     });
     this.debug("worker drain completed", {
       cronSchedules: outcome.cronSchedules,
@@ -478,6 +495,16 @@ export class ChimpbaseHost<TServer> {
     handler: ChimpbaseWorkerHandler<TPayload, TResult>,
     definition?: ChimpbaseWorkerDefinition,
   ): ChimpbaseWorkerHandler<TPayload, TResult> {
+    if (RESERVED_ENGINE_QUEUE_NAMES.has(name)) {
+      throw new Error(`reserved queue name cannot be registered: ${name}`);
+    }
+    const ownership = this.registry.registrationOwnership.get(`worker:${name}`);
+    if (ownership !== undefined) {
+      throw new Error(`worker ${name} is owned by module ${ownership} and cannot be replaced`);
+    }
+    if (this.registry.workers.has(name)) {
+      throw new Error(`duplicate worker registration: ${name}`);
+    }
     const registration: ChimpbaseWorkerRegistration = {
       definition: {
         onFailure: definition?.onFailure,
@@ -705,6 +732,7 @@ export class ChimpbaseHost<TServer> {
 
   startWorker(): WorkerHandle {
     let stopped = false;
+    const shutdown = new AbortController();
     if (!this.supportsConcurrentWorkers) {
       let running = false;
       const activeTicks = new Set<Promise<void>>();
@@ -717,7 +745,7 @@ export class ChimpbaseHost<TServer> {
         running = true;
         try {
           while (!stopped) {
-            const outcome = await this.drain({ maxRuns: 1 });
+            const outcome = await this.drain({ maxRuns: 1 }, shutdown.signal);
             if (outcome.idle) {
               break;
             }
@@ -745,6 +773,7 @@ export class ChimpbaseHost<TServer> {
         async stop() {
           stopped = true;
           clearInterval(interval);
+          shutdown.abort();
           await Promise.allSettled([...activeTicks]);
         },
       };
@@ -763,7 +792,7 @@ export class ChimpbaseHost<TServer> {
           const outcome = await this.runWorkerLaneOperation(lane, async () => {
             await this.syncCronSchedulesIfNeeded();
             const scheduled = await lane.engine.processNextCronSchedule();
-            const queueJobs = await lane.engine.processNextQueueJobs(this.getWorkerQueueBatchSize());
+            const queueJobs = await lane.engine.processNextQueueJobs(this.getWorkerQueueBatchSize(), shutdown.signal);
             return {
               cronSchedules: (scheduled !== null) ? 1 : 0,
               idle: !(scheduled !== null) && queueJobs.length === 0,
@@ -810,6 +839,7 @@ export class ChimpbaseHost<TServer> {
       async stop() {
         stopped = true;
         clearInterval(interval);
+        shutdown.abort();
         await Promise.allSettled([...activeTicks]);
       },
     };
@@ -1161,12 +1191,15 @@ export function inferStorageEngine(
 
 export function inferNumberEnv(env: ChimpbaseRuntimeEnvironment, name: string): number | undefined {
   const value = env.get(name);
-  if (!(value !== undefined && value.length > 0)) {
+  if (value === undefined) {
     return undefined;
   }
 
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  if (value.trim() === "" || !Number.isFinite(parsed)) {
+    throw new Error(`${name} must be a finite number`);
+  }
+  return parsed;
 }
 
 export function inferSubscriptionDispatchMode(
@@ -1274,6 +1307,24 @@ function registerInternalCleanupCrons<TServer>(
   config: ChimpbaseProjectConfig,
   platform: ChimpbasePlatformShim,
 ): void {
+  if (config.worker.retention.enabled) {
+    host.registerCron(
+      "__chimpbase.worker.cleanup",
+      config.worker.retention.schedule,
+      async (ctx) => {
+        const cutoff = new Date(platform.now() - config.worker.retention.maxAgeDays * 86_400_000).toISOString();
+        // Preserve SQLite's high-water row because INTEGER PRIMARY KEY can reuse a deleted maximum ID.
+        await ctx.db.query(
+          `DELETE FROM _chimpbase_queue_jobs WHERE status = 'completed' AND ${
+            config.storage.engine === "postgres" ? "completed_at < ?1" : "julianday(completed_at) < julianday(?1)"
+          }${config.storage.engine === "postgres" ? "" : " AND id < (SELECT MAX(id) FROM _chimpbase_queue_jobs)"}`,
+          [cutoff],
+        );
+      },
+    );
+    host.setTelemetryOverride("cron:__chimpbase.worker.cleanup", false);
+  }
+
   if (config.telemetry.retention.enabled) {
     host.registerCron(
       "__chimpbase.telemetry.cleanup",

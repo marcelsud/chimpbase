@@ -4,13 +4,16 @@ import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-import type { ChimpbaseRegistration } from "../packages/runtime/index.ts";
+import type { ChimpbaseJob, ChimpbaseRegistration } from "../packages/runtime/index.ts";
+import { parseJson } from "../packages/runtime/index.ts";
 import { loadProjectAppDefinition } from "../packages/tooling/src/app.ts";
 import {
   runChimpbaseCli,
   type RunChimpbaseCliDependencies,
 } from "../packages/tooling/src/cli.ts";
 import { loadProjectConfig } from "../packages/tooling/src/config.ts";
+import { defineChimpbaseApp, normalizeProjectConfig } from "../packages/core/index.ts";
+import { inferNumberEnv } from "../packages/host/src/runtime.ts";
 import {
   loadProjectMigrations,
   loadProjectPostgresMigrations,
@@ -32,6 +35,31 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/tooling", () => {
+  test("worker settings reject malformed, unsafe and out-of-range numbers at configuration boundaries", async () => {
+    for (const key of ["concurrency", "leaseMs", "maxAttempts", "pollIntervalMs"] as const) {
+      for (const value of [0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => normalizeProjectConfig({ worker: { [key]: value } })).toThrow(`worker.${key}`);
+      }
+    }
+    for (const value of [-1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => normalizeProjectConfig({ worker: { retryDelayMs: value } })).toThrow("worker.retryDelayMs");
+      expect(() => defineChimpbaseApp({ worker: { retryDelayMs: value } })).toThrow("worker.retryDelayMs");
+    }
+    expect(() => defineChimpbaseApp({ worker: { maxAttempts: NaN } })).toThrow("worker.maxAttempts");
+    expect(() => normalizeProjectConfig({ worker: { pollIntervalMs: 2_147_483_648 } })).toThrow("worker.pollIntervalMs");
+    expect(normalizeProjectConfig({ worker: { retryDelayMs: 0 } }).worker.retryDelayMs).toBe(0);
+    expect(() => normalizeProjectConfig({ worker: { retention: { maxAgeDays: 0 } } })).toThrow("worker.retention.maxAgeDays");
+
+    for (const value of ["", " ", "NaN", "Infinity", "oops"]) {
+      expect(() => inferNumberEnv({ get: () => value, toObject: () => ({}) }, "CHIMPBASE_WORKER_LEASE_MS"))
+        .toThrow("CHIMPBASE_WORKER_LEASE_MS");
+    }
+    expect(inferNumberEnv({ get: () => undefined, toObject: () => ({}) }, "CHIMPBASE_WORKER_LEASE_MS")).toBeUndefined();
+    const projectDir = await createTempDir("invalid-worker-config");
+    await writeFile(resolve(projectDir, "chimpbase.toml"), '[worker]\nmax_attempts = "NaN"\n');
+    await expect(loadProjectConfig(projectDir)).rejects.toThrow("worker.max_attempts");
+  });
+
   test("loads chimpbase.toml with nested telemetry sections", async () => {
     const projectDir = await createTempDir("config");
     await writeFile(
@@ -61,6 +89,12 @@ describe("@chimpbase/tooling", () => {
         "max_attempts = 9",
         "poll_interval_ms = 800",
         "retry_delay_ms = 1200",
+        "concurrency = 2",
+        "",
+        "[worker.retention]",
+        "enabled = false",
+        "max_age_days = 60",
+        'schedule = "15 3 * * *"',
         "",
         "[secrets]",
         'dir = "run/secrets"',
@@ -105,11 +139,12 @@ describe("@chimpbase/tooling", () => {
       },
     });
     expect(config.worker).toEqual({
-      concurrency: 1,
+      concurrency: 2,
       leaseMs: 45000,
       maxAttempts: 9,
       pollIntervalMs: 800,
       retryDelayMs: 1200,
+      retention: { enabled: false, maxAgeDays: 60, schedule: "15 3 * * *" },
     });
     expect(config.secrets).toEqual({
       dir: "run/secrets",
@@ -161,6 +196,7 @@ describe("@chimpbase/tooling", () => {
           maxAttempts: 5,
           pollIntervalMs: 250,
           retryDelayMs: 1000,
+          retention: { enabled: true, maxAgeDays: 30, schedule: "0 3 * * *" },
         },
         kv: { retention: { enabled: false, schedule: "0 3 * * *" } },
         workflows: { contractsDir: "workflow-contracts" },
@@ -341,6 +377,7 @@ describe("@chimpbase/tooling", () => {
     let calls = 0;
     const unexpected = async (): Promise<never> => { calls += 1; throw new Error("project was started"); };
     const dependencies: RunChimpbaseCliDependencies = {
+      loadProject: unexpected,
       runAction: unexpected, startProject: unexpected, syncModules: unexpected,
       syncSchema: unexpected, syncWorkflowContracts: unexpected, writeLine() {},
     };
@@ -351,10 +388,42 @@ describe("@chimpbase/tooling", () => {
       ["dev", "--action", "ping", "--watch"], ["dev", "--action", "ping", "--worker"],
       ["dev", "--args", "not-json", "--action", "ping"], ["schema", "generate", "--watch"],
       ["contracts", "--serve"], ["modules", "sync", "--modules-dir"], ["schema", "unknown"],
+      ["jobs", "unknown"], ["jobs", "inspect"], ["jobs", "inspect", "0"], ["jobs", "retry", "1.5"],
+      ["jobs", "list", "1"], ["jobs", "list", "--limit", "Infinity"], ["jobs", "list", "--status", "bogus"],
+      ["jobs", "inspect", "1", "--queue", "email"], ["jobs", "retry", "1", "--typo"],
     ]) {
       await expect(runChimpbaseCli(argv, dependencies)).rejects.toThrow();
     }
     expect(calls).toBe(0);
+  });
+
+  test("CLI job commands expose unregistered queues and always close the host", async () => {
+    const lines: string[] = [];
+    const calls: unknown[] = [];
+    let closed = 0;
+    const job: ChimpbaseJob = { id: 7, queue: "email.dlq", payload: { error: "provider down" }, status: "pending",
+      attempt: 0, availableAtMs: 0, leaseExpiresAtMs: null, lastError: null, registered: false };
+    const unexpected = async (): Promise<never> => { throw new Error("unrelated project operation"); };
+    const dependencies: RunChimpbaseCliDependencies = {
+      runAction: unexpected, startProject: unexpected, syncModules: unexpected, syncSchema: unexpected,
+      syncWorkflowContracts: unexpected, writeLine(line) { lines.push(line); },
+      async loadProject(projectDir) {
+        calls.push(projectDir);
+        return { config: { project: { name: "jobs" } }, async close() { closed += 1; },
+          async listJobs(options) { calls.push(options); return [job]; },
+          async inspectJob(id) { calls.push(id); return id === 7 ? job : null; },
+          async retryJob(id) { calls.push(id); if (id !== 7) throw new Error("job in progress"); return job; },
+        };
+      },
+    };
+    await runChimpbaseCli(["jobs", "list", "--queue", "email.dlq", "--status", "dlq", "--limit", "4"], dependencies);
+    expect(calls[1]).toEqual({ queue: "email.dlq", status: "dlq", limit: 4 });
+    expect(parseJson(lines[0]!)).toEqual([job]);
+    await runChimpbaseCli(["jobs", "inspect", "7"], dependencies);
+    await runChimpbaseCli(["jobs", "retry", "7"], dependencies);
+    await expect(runChimpbaseCli(["jobs", "inspect", "8"], dependencies)).rejects.toThrow("job not found");
+    await expect(runChimpbaseCli(["jobs", "retry", "8"], dependencies)).rejects.toThrow("job in progress");
+    expect(closed).toBe(5);
   });
 
   test("CLI help exits without invoking any project operation", async () => {

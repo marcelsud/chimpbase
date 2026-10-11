@@ -90,6 +90,7 @@ export interface CreateChimpbaseRuntimeOptions {
     concurrency?: number;
     leaseMs?: number;
     pollIntervalMs?: number;
+    retention?: { enabled?: boolean; maxAgeDays?: number; schedule?: string };
   };
 }
 
@@ -311,6 +312,7 @@ export function createChimpbaseRuntimeLibrary<
         maxAttempts: app.worker.maxAttempts,
         pollIntervalMs: options.workerRuntime?.pollIntervalMs ?? inferNumberEnv(runtime.env, "CHIMPBASE_WORKER_POLL_INTERVAL_MS"),
         retryDelayMs: app.worker.retryDelayMs,
+        retention: options.workerRuntime?.retention,
       },
       workflows: {
         contractsDir: app.workflows.contractsDir ?? undefined,

@@ -106,6 +106,8 @@ For Node, put `CHIMPBASE_STORAGE_ENGINE=memory` before the matching start comman
 
 `CHIMPBASE_DATABASE_URL` takes precedence over `DATABASE_URL`; `CHIMPBASE_SERVER_PORT` takes precedence over `PORT`. `memory` explicitly selects memory storage. A database URL takes precedence over `CHIMPBASE_STORAGE_ENGINE=sqlite`; use a programmatic `storage.engine` override to force SQLite in that case.
 
+Worker concurrency and leases must be positive safe integers. The poll interval must be an integer from `1` to `2147483647`. Explicitly empty, malformed, fractional or nonfinite worker values fail at startup. App retry settings require positive safe integer `maxAttempts` and nonnegative safe integer `retryDelayMs`. Completed jobs are removed daily after 30 days; configure `workerRuntime.retention` in a custom entry point to change or disable cleanup. See [Workers & Queues](/workers#configuration).
+
 The secret loader combines `.env`, process environment and mounted secret files, in that order; later values win. It does not copy `.env` values into the process environment. Export runtime configuration variables in your shell or provide them through your process manager.
 
 ## CLI
@@ -127,6 +129,11 @@ bunx chimpbase dev --worker
 
 # Call an action; --args is JSON
 bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
+
+# Inspect durable background work and retry a terminal failed job
+bunx chimpbase jobs list --status failed
+bunx chimpbase jobs inspect 42
+bunx chimpbase jobs retry 42
 
 # Show commands and options without starting the app
 bunx chimpbase --help

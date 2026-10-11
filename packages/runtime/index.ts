@@ -184,7 +184,39 @@ export interface ChimpbaseQueueEnqueueOptions {
 export interface ChimpbaseWorkerDefinition {
   dlq?: false | string;
   /** Runs in a fresh transaction after failed execution has rolled back. */
-  onFailure?: (ctx: ChimpbaseContext, error: unknown) => void | Promise<void>;
+  onFailure?: (ctx: ChimpbaseContext, error: unknown, execution?: ChimpbaseWorkerFailureExecution) => void | Promise<void>;
+}
+
+export interface ChimpbaseWorkerExecution {
+  attempt: number;
+  jobId: number;
+  queue: string;
+  signal: AbortSignal;
+}
+
+export interface ChimpbaseWorkerFailureExecution extends ChimpbaseWorkerExecution {
+  payload: unknown;
+}
+
+export type ChimpbaseJobStatus = "pending" | "processing" | "completed" | "failed" | "dlq";
+
+export interface ChimpbaseJob {
+  id: number;
+  queue: string;
+  payload: unknown;
+  status: ChimpbaseJobStatus;
+  attempt: number;
+  availableAtMs: number;
+  leaseExpiresAtMs: number | null;
+  lastError: string | null;
+  /** Whether this host can process the queue. Another host may own an unregistered queue. */
+  registered: boolean;
+}
+
+export interface ChimpbaseJobListOptions {
+  queue?: string;
+  status?: ChimpbaseJobStatus;
+  limit?: number;
 }
 
 export interface ChimpbaseCronInvocation {
@@ -196,6 +228,8 @@ export interface ChimpbaseCronInvocation {
 
 export interface ChimpbaseDlqEnvelope<TPayload = unknown> {
   attempts: number;
+  /** Original job identifier; older persisted envelopes may omit it. */
+  jobId?: number;
   error: string;
   failedAt: string;
   payload: TPayload;
@@ -203,11 +237,16 @@ export interface ChimpbaseDlqEnvelope<TPayload = unknown> {
 }
 
 export interface ChimpbaseQueueClient {
+  enqueue<TPayload, TResult>(
+    reference: ChimpbaseWorkerRegistration<TPayload, TResult>,
+    payload: NoInfer<TPayload>,
+    options?: ChimpbaseQueueEnqueueOptions,
+  ): Promise<number>;
   enqueue<TPayload = unknown>(
     name: string,
     payload: TPayload,
     options?: ChimpbaseQueueEnqueueOptions,
-  ): Promise<void>;
+  ): Promise<number>;
 }
 
 export interface ChimpbaseWorkflowRuntimeState<TInput = unknown, TState = unknown> {
@@ -710,11 +749,7 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
   collection: ChimpbaseCollectionClient;
   stream: ChimpbaseStreamClient;
   blobs: ChimpbaseBlobsClient;
-  enqueue<TPayload = unknown>(
-    name: string,
-    payload: TPayload,
-    options?: ChimpbaseQueueEnqueueOptions,
-  ): Promise<void>;
+  enqueue: ChimpbaseQueueClient["enqueue"];
   /** @deprecated Use `ctx.enqueue(...)` instead. */
   queue: ChimpbaseQueueClient;
   workflow: ChimpbaseWorkflowClient;
@@ -823,13 +858,14 @@ export type ChimpbaseWorkerHandler<
 > = (
   ctx: ChimpbaseContext<TActions>,
   payload: TPayload,
-  execution?: { attempt: number },
+  execution?: ChimpbaseWorkerExecution,
 ) => Promise<TResult> | TResult;
 
 type ChimpbaseWorkerMethod<TThis, TPayload = unknown, TResult = unknown> = (
   this: TThis,
   ctx: ChimpbaseContext,
   payload: TPayload,
+  execution?: ChimpbaseWorkerExecution,
 ) => TResult | Promise<TResult>;
 
 export type ChimpbaseCronHandler<
@@ -2095,8 +2131,8 @@ export function Worker(name: string, definition?: ChimpbaseWorkerDefinition) {
     registerDecoratedMethod(
       "Worker",
       args,
-      (boundValue) => worker(name, (ctx, payload) =>
-        invokeDecoratorMethod(boundValue, [ctx, payload]), definition
+      (boundValue) => worker(name, (ctx, payload, execution) =>
+        invokeDecoratorMethod(boundValue, [ctx, payload, execution]), definition
       ),
     );
   };

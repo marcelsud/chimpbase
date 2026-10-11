@@ -44,6 +44,25 @@ try {
   },
   { file: "docs/actions.md", name: "validators", check: "" },
   {
+    file: "docs/workers.md",
+    name: "worker-email",
+    check: `
+import app from "./worker-email.ts";
+import { createChimpbase } from "chimpbase/runtime/bun";
+const host = await createChimpbase({ ...app, storage: { engine: "memory" } });
+try {
+  await host.executeAction("requestEmail", { to: "user@example.com", subject: "Welcome!", body: "Thanks for signing up." });
+  assert.equal((await host.executeAction("lastRecipient")).result, null);
+  const job = await host.processNextQueueJob();
+  assert.equal(job.queueName, "email.send");
+  assert.equal((await host.executeAction("lastRecipient")).result, "user@example.com");
+  assert.equal(await host.processNextQueueJob(), null);
+} finally {
+  await host.close();
+}
+`,
+  },
+  {
     file: "docs/advanced/workflows.md",
     name: "workflow-registration",
     check: `

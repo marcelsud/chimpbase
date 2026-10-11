@@ -1,11 +1,11 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord } from "../packages/core/index.ts";
+import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord, type ChimpbaseQueueJobRecord } from "../packages/core/index.ts";
 import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
-import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, worker, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, v, worker, type ChimpbaseContext } from "../packages/runtime/index.ts";
 
 class TestHost extends ChimpbaseHost<{ port: number }> {}
 
@@ -85,6 +85,108 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  test("worker registration rejects duplicate and reserved names without replacing handlers", async () => {
+    const { library } = createTrackedRuntime();
+    const calls: string[] = [];
+    const host = await library.createChimpbase({ storage: { engine: "memory" } });
+    try {
+      host.registerWorker("job", () => { calls.push("first"); });
+      expect(() => host.registerWorker("job", () => { calls.push("second"); })).toThrow("duplicate worker registration: job");
+      for (const name of ["__chimpbase.cron.run", "__chimpbase.subscription.run", "__chimpbase.workflow.run"]) {
+        expect(() => host.registerWorker(name, () => {})).toThrow("reserved queue name");
+      }
+      host.register(action("enqueue", async (ctx) => await ctx.enqueue("job", {})));
+      await host.executeAction("enqueue");
+      await host.processNextQueueJob();
+      expect(calls).toEqual(["first"]);
+    } finally { await host.close(); }
+    await expect(library.createChimpbase({ storage: { engine: "memory" }, registrations: [
+      worker("duplicate", () => {}), worker("duplicate", () => {}),
+    ] })).rejects.toThrow("duplicate worker registration: duplicate");
+  });
+
+  for (const concurrent of [false, true]) {
+    test(`worker shutdown aborts I/O and waits for its transaction (${concurrent ? "concurrent" : "serialized"})`, async () => {
+      const entered = Promise.withResolvers<void>();
+      const aborted = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const order: string[] = [];
+      let runs = 0;
+      const runtime: ChimpbaseRuntimeShim<{ port: number }> = {
+        ...bunRuntimeShim,
+        server: { create: ({ port }) => ({ port }), async stop() {} },
+        storage: { async open(...args) {
+          const resources = await bunRuntimeShim.storage.open(...args);
+          return { ...resources, supportsConcurrentWorkers: concurrent,
+            createAdapter(group) {
+              const adapter = resources.createAdapter(group);
+              if (concurrent) adapter.claimNextQueueJobs = async (leaseMs, limit, queues, targets) => {
+                const jobs: ChimpbaseQueueJobRecord[] = [];
+                for (let i = 0; i < limit; i += 1) {
+                  const job = await adapter.claimNextQueueJob(leaseMs, queues, targets);
+                  if (!job) break;
+                  jobs.push(job);
+                }
+                return jobs;
+              };
+              return adapter;
+            },
+          };
+        } },
+      };
+      const library = createChimpbaseRuntimeLibrary(TestHost, runtime);
+      const host = await library.createChimpbase({
+        storage: { engine: "memory" }, workerRuntime: { concurrency: 1 },
+        registrations: [
+          action("enqueue", async (ctx) => {
+            await ctx.enqueue("job", {});
+            await ctx.enqueue("job", {});
+          }),
+          action("inspect", async (ctx) => await ctx.kv.get("finished")),
+          worker("job", async (ctx, _payload, execution) => {
+            runs += 1;
+            if (!execution) throw new Error("worker execution metadata missing");
+            expect(execution.signal.aborted).toBe(false);
+            execution.signal.addEventListener("abort", () => { aborted.resolve(); }, { once: true });
+            entered.resolve();
+            await aborted.promise;
+            order.push("aborted");
+            await release.promise;
+            await ctx.kv.set("finished", true);
+            order.push("finished");
+          }),
+          onStop("cleanup", () => { order.push("cleanup"); }),
+        ],
+      });
+      await host.executeAction("enqueue");
+      const started = await host.start({ serve: false, runWorker: true });
+      let stopping: Promise<void> | undefined;
+      try {
+        await entered.promise;
+        stopping = started.stop();
+        await aborted.promise;
+        await Bun.sleep(10);
+        expect(order).toEqual(["aborted"]);
+        release.resolve();
+        await stopping;
+        expect(order).toEqual(["aborted", "finished", "cleanup"]);
+        expect(runs).toBe(1);
+        expect((await host.executeAction("inspect")).result).toBe(true);
+        expect(await host.engine.getBlobsAdapter().query(
+          "SELECT status, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs ORDER BY id", [],
+          v.object({ status: v.string(), attempt_count: v.number(), lease_expires_at_ms: v.number().nullable() }),
+        )).toEqual([
+          { status: "completed", attempt_count: 1, lease_expires_at_ms: null },
+          { status: "pending", attempt_count: 0, lease_expires_at_ms: null },
+        ]);
+      } finally {
+        release.resolve();
+        await (stopping ?? started.stop());
+        await host.close();
+      }
+    });
+  }
+
   test("ready hooks run after ordinary hooks, HTTP and the event bus, and unwind on failure", async () => {
     const failure = new Error("ready hook failed");
     const { calls, library } = createTrackedRuntime();

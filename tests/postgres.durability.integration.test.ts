@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
+import { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
+import { createDefaultChimpbasePlatformShim, normalizeProjectConfig } from "../packages/core/index.ts";
 import { applyPostgresSqlMigrations } from "../packages/postgres/src/index.ts";
 import {
   action,
@@ -46,6 +48,50 @@ describeIfPg("PostgreSQL queue durability", () => {
     await pool.end();
   });
 
+  test("worker retention deletes only old completions in PostgreSQL", async () => {
+    const schema = `retention_test_${crypto.randomUUID().replaceAll("-", "")}`;
+    const scopedUrl = new URL(postgresUrl());
+    scopedUrl.searchParams.set("options", `-c search_path=${schema}`);
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    let host: ChimpbaseBunHost | undefined;
+    try {
+      const now = Date.parse("2026-10-11T12:00:00.000Z");
+      const cutoff = now - 86_400_000;
+      host = await ChimpbaseBunHost.create({
+        config: normalizeProjectConfig({
+          storage: { engine: "postgres", url: scopedUrl.href }, worker: { retention: { maxAgeDays: 1 } },
+        }),
+        platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+      });
+      const cleanup = host.registry.crons.get("__chimpbase.worker.cleanup");
+      if (!cleanup) throw new Error("missing worker cleanup cron");
+      host.registerAction("cleanup", async (ctx) => await cleanup.handler(ctx, {
+        fireAt: new Date(now).toISOString(), fireAtMs: now, name: cleanup.name, schedule: cleanup.schedule,
+      }));
+      const adapter = host.engine.getBlobsAdapter();
+      for (const [id, status, completedAt] of [
+        [1, "completed", new Date(cutoff - 1).toISOString()],
+        [2, "completed", new Date(cutoff).toISOString()],
+        [3, "pending", "2000-01-01T00:00:00.000Z"],
+        [4, "processing", "2000-01-01T00:00:00.000Z"],
+        [5, "failed", "2000-01-01T00:00:00.000Z"],
+        [6, "dlq", "2000-01-01T00:00:00.000Z"],
+        [7, "completed", "2000-01-01T00:00:00.000Z"],
+      ] as const) {
+        await adapter.query(
+          "INSERT INTO _chimpbase_queue_jobs (id, queue_name, payload_json, status, available_at_ms, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+          [id, "retention-fixture", JSON.stringify({ id }), status, now + 60_000, completedAt], v.object({}),
+        );
+      }
+      await host.executeAction("cleanup");
+      const rows = await adapter.query("SELECT id::int AS id FROM _chimpbase_queue_jobs ORDER BY id", [], v.object({ id: v.number() }));
+      expect(rows.map((row) => row.id)).toEqual([2, 3, 4, 5, 6]);
+    } finally {
+      await host?.close();
+      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
   test("a failing job does not abandon later jobs in its claimed batch", async () => {
     const queueName = uniqueName("batch-failure");
     queueNames.add(queueName);
@@ -86,6 +132,49 @@ describeIfPg("PostgreSQL queue durability", () => {
         Array.from({ length: 8 }, (_, id) => `${queueName}:${id}`),
       ]);
     }
+  });
+
+  test("shutdown releases unstarted batch jobs without consuming attempts or replacing newer claims", async () => {
+    const queueName = uniqueName("batch-shutdown");
+    queueNames.add(queueName);
+    const shutdown = new AbortController();
+    const calls: number[] = [];
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, registrations: [
+        worker(queueName, (_ctx, payload: { id: number }) => {
+          calls.push(payload.id);
+          if (payload.id === 0) shutdown.abort();
+        }),
+        action("enqueue", async (ctx) => {
+          for (let id = 0; id < 3; id += 1) await ctx.enqueue(queueName, { id });
+        }),
+      ],
+    });
+    try {
+      await host.executeAction("enqueue");
+      expect(await host.engine.processNextQueueJobs(3, shutdown.signal)).toHaveLength(1);
+      expect(calls).toEqual([0]);
+      const rows = await pool.query<{ id: number; status: string; attempt_count: number; lease_expires_at_ms: number | null }>(
+        "SELECT id, status, attempt_count, lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE queue_name = $1 ORDER BY id", [queueName],
+      );
+      expect(rows.rows.map(({ id: _id, ...state }) => state)).toEqual([
+        { status: "completed", attempt_count: 1, lease_expires_at_ms: null },
+        { status: "pending", attempt_count: 0, lease_expires_at_ms: null },
+        { status: "pending", attempt_count: 0, lease_expires_at_ms: null },
+      ]);
+      expect(await host.engine.processNextQueueJobs(3)).toHaveLength(2);
+      expect(calls).toEqual([0, 1, 2]);
+      const newerId = rows.rows[2]?.id;
+      if (newerId === undefined) throw new Error("batch job missing");
+      await pool.query("UPDATE _chimpbase_queue_jobs SET status = 'processing', attempt_count = 2, lease_expires_at_ms = $2 WHERE id = $1",
+        [newerId, Date.now() + 60_000]);
+      const adapter = host.engine.getBlobsAdapter();
+      if (!adapter.releaseQueueJob) throw new Error("PostgreSQL claim release unavailable");
+      await adapter.releaseQueueJob(newerId, 1);
+      expect((await pool.query<{ status: string; attempt_count: number }>(
+        "SELECT status, attempt_count FROM _chimpbase_queue_jobs WHERE id = $1", [newerId],
+      )).rows).toEqual([{ status: "processing", attempt_count: 2 }]);
+    } finally { await host.close(); }
   });
 
   test("concurrent first boot initializes an empty internal schema on every node", async () => {
@@ -277,7 +366,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       name: "enqueueRetryJob",
       args: v.object({ id: v.string() }),
       async handler(ctx, input) {
-        await ctx.enqueue(queueName, input);
+        return await ctx.enqueue(queueName, input);
       },
     });
 
@@ -300,7 +389,7 @@ describeIfPg("PostgreSQL queue durability", () => {
     const started = await host.start({ serve: false, runWorker: false });
 
     try {
-      await host.executeAction("enqueueRetryJob", { id: "retry-me" });
+      const jobId = (await host.executeAction("enqueueRetryJob", { id: "retry-me" })).result;
       await expect(host.processNextQueueJob()).rejects.toThrow("expected retry failure");
       await expect(host.processNextQueueJob()).rejects.toThrow("expected retry failure");
       await host.processNextQueueJob();
@@ -309,6 +398,7 @@ describeIfPg("PostgreSQL queue durability", () => {
       expect(deadLetters).toHaveLength(1);
       expect(deadLetters[0]).toMatchObject({
         attempts: 2,
+        jobId,
         payload: { id: "retry-me" },
         queue: queueName,
       });
