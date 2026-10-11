@@ -318,6 +318,185 @@ describeIfPg("PostgreSQL queue durability", () => {
     }
   });
 
+  for (const hookFailure of ["throw", "SQL failure"] as const) {
+    for (const terminalStatus of ["failed", "dlq"] as const) {
+      test(`a failure hook ${hookFailure} cannot prevent retries ending in ${terminalStatus}`, async () => {
+        const queueName = uniqueName("failure-hook");
+        const dlqName = `${queueName}.dlq`;
+        queueNames.add(queueName);
+        queueNames.add(dlqName);
+        const workerError = new Error("original worker failure");
+        let attempts = 0;
+        let hooks = 0;
+        const host = await createChimpbase({
+          storage: { engine: "postgres", url: postgresUrl() },
+          worker: { maxAttempts: 2, retryDelayMs: 0 },
+          registrations: [
+            worker(queueName, async () => { attempts += 1; throw workerError; }, {
+              dlq: terminalStatus === "dlq" ? dlqName : false,
+              async onFailure(ctx, error) {
+                expect(error).toBe(workerError);
+                hooks += 1;
+                await ctx.kv.set(queueName, { hook: hooks });
+                ctx.pubsub.publish(queueName, { hook: hooks });
+                if (hookFailure === "SQL failure") {
+                  await ctx.db.query("SELECT 1 / 0", [], v.object({ value: v.number() }));
+                }
+                throw new Error("failure hook unavailable");
+              },
+            }),
+            action("enqueue", async (ctx) => await ctx.enqueue(queueName, { id: "keep-me" })),
+          ],
+        });
+        try {
+          await host.executeAction("enqueue");
+          for (const attempt of [1, 2]) {
+            expect(await host.processNextQueueJob().catch((error: unknown) => error)).toBe(workerError);
+            expect((await pool.query<{
+              attempt_count: number; status: string; last_error: string; lease_expires_at_ms: number | null;
+            }>(
+              "SELECT attempt_count, status, last_error, lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE queue_name = $1",
+              [queueName],
+            )).rows).toEqual([{
+              attempt_count: attempt, status: attempt === 1 ? "pending" : terminalStatus,
+              last_error: workerError.message, lease_expires_at_ms: null,
+            }]);
+          }
+          expect(attempts).toBe(2);
+          expect(hooks).toBe(2);
+          expect(await host.processNextQueueJob()).toBeNull();
+          expect((await pool.query<{ key: string }>("SELECT key FROM _chimpbase_kv WHERE key = $1", [queueName])).rows).toEqual([]);
+          expect((await pool.query<{ id: string }>("SELECT id FROM _chimpbase_events WHERE event_name = $1", [queueName])).rows).toEqual([]);
+          const deadLetters = await pool.query<{ payload_json: ChimpbaseDlqEnvelope }>(
+            "SELECT payload_json FROM _chimpbase_queue_jobs WHERE queue_name = $1", [dlqName],
+          );
+          expect(deadLetters.rows).toHaveLength(terminalStatus === "dlq" ? 1 : 0);
+          if (terminalStatus === "dlq") {
+            expect(deadLetters.rows[0]?.payload_json).toMatchObject({
+              attempts: 2, queue: queueName, payload: { id: "keep-me" }, error: workerError.message,
+            });
+          }
+        } finally {
+          await host.close();
+          await pool.query("DELETE FROM _chimpbase_kv WHERE key = $1", [queueName]);
+          await pool.query("DELETE FROM _chimpbase_events WHERE event_name = $1", [queueName]);
+        }
+      });
+    }
+  }
+
+  test("a successful failure hook commits with the terminal job state", async () => {
+    const queueName = uniqueName("successful-failure-hook");
+    queueNames.add(queueName);
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, worker: { maxAttempts: 1 },
+      registrations: [
+        worker(queueName, async () => { throw new Error("worker failed"); }, {
+          dlq: false,
+          async onFailure(ctx) {
+            await ctx.kv.set(queueName, { recorded: true });
+            ctx.pubsub.publish(queueName, { recorded: true });
+          },
+        }),
+        action("enqueue", async (ctx) => await ctx.enqueue(queueName, {})),
+      ],
+    });
+    try {
+      await host.executeAction("enqueue");
+      await expect(host.processNextQueueJob()).rejects.toThrow("worker failed");
+      expect((await pool.query<{ key: string }>("SELECT key FROM _chimpbase_kv WHERE key = $1", [queueName])).rows).toHaveLength(1);
+      expect((await pool.query<{ id: string }>("SELECT id FROM _chimpbase_events WHERE event_name = $1", [queueName])).rows).toHaveLength(1);
+      expect((await pool.query<{ status: string }>(
+        "SELECT status FROM _chimpbase_queue_jobs WHERE queue_name = $1", [queueName],
+      )).rows).toEqual([{ status: "failed" }]);
+    } finally {
+      await host.close();
+      await pool.query("DELETE FROM _chimpbase_kv WHERE key = $1", [queueName]);
+      await pool.query("DELETE FROM _chimpbase_events WHERE event_name = $1", [queueName]);
+    }
+  });
+
+  test("failure state SQL errors roll back successful hooks and remain observable", async () => {
+    const queueName = uniqueName("failure-state-sql");
+    queueNames.add(queueName);
+    let hooks = 0;
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, worker: { maxAttempts: 1 },
+      registrations: [
+        worker(queueName, async () => { throw new Error("worker failed"); }, {
+          dlq: false,
+          async onFailure(ctx) { hooks += 1; await ctx.kv.set(queueName, { recorded: true }); },
+        }),
+        action("enqueue", async (ctx) => await ctx.enqueue(queueName, {})),
+      ],
+    });
+    const adapter = host.engine.getBlobsAdapter();
+    const markFailure = adapter.markQueueJobFailure.bind(adapter);
+    adapter.markQueueJobFailure = async () => { await adapter.query("SELECT 1 / 0", [], v.object({ value: v.number() })); };
+    try {
+      await host.executeAction("enqueue");
+      await expect(host.processNextQueueJob()).rejects.toThrow("division by zero");
+      expect(hooks).toBe(1);
+      expect((await pool.query<{ key: string }>("SELECT key FROM _chimpbase_kv WHERE key = $1", [queueName])).rows).toEqual([]);
+      expect((await pool.query<{ status: string; attempt_count: number; last_error: string | null }>(
+        "SELECT status, attempt_count, last_error FROM _chimpbase_queue_jobs WHERE queue_name = $1", [queueName],
+      )).rows).toEqual([{ status: "processing", attempt_count: 1, last_error: null }]);
+      adapter.markQueueJobFailure = markFailure;
+      await pool.query("UPDATE _chimpbase_queue_jobs SET lease_expires_at_ms = 0 WHERE queue_name = $1", [queueName]);
+      await expect(host.processNextQueueJob()).rejects.toThrow("worker failed");
+      expect(hooks).toBe(2);
+      expect((await pool.query<{ status: string }>(
+        "SELECT status FROM _chimpbase_queue_jobs WHERE queue_name = $1", [queueName],
+      )).rows).toEqual([{ status: "failed" }]);
+    } finally {
+      adapter.markQueueJobFailure = markFailure;
+      await host.close();
+      await pool.query("DELETE FROM _chimpbase_kv WHERE key = $1", [queueName]);
+    }
+  });
+
+  test("hook warning sink and persistence failures cannot mask the original worker error", async () => {
+    const queueName = uniqueName("failure-hook-warning");
+    queueNames.add(queueName);
+    const workerError = new Error("original worker failure");
+    let warnings = 0;
+    let persistenceAttempts = 0;
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, worker: { maxAttempts: 1 },
+      telemetry: { persist: { log: true, metric: false, trace: false } },
+      sinks: [{
+        onLog(_scope, _level, message) {
+          if (message === "queue failure hook failed") { warnings += 1; throw new Error("warning sink failed"); }
+        },
+        onMetric() {},
+        startSpan() { return { setAttribute() {}, end() {} }; },
+        startHandlerSpan() { return { setAttribute() {}, end() {} }; },
+      }],
+      registrations: [
+        worker(queueName, async () => { throw workerError; }, {
+          dlq: false, onFailure() { throw new Error("hook failed"); },
+        }),
+        action("enqueue", async (ctx) => await ctx.enqueue(queueName, {})),
+      ],
+    });
+    const adapter = host.engine.getBlobsAdapter();
+    const append = adapter.streamAppend.bind(adapter);
+    try {
+      await host.executeAction("enqueue");
+      adapter.streamAppend = async () => { persistenceAttempts += 1; throw new Error("warning persistence failed"); };
+      expect(await host.processNextQueueJob().catch((error: unknown) => error)).toBe(workerError);
+      expect(warnings).toBe(1);
+      expect(persistenceAttempts).toBe(1);
+      expect((await pool.query<{ status: string; last_error: string }>(
+        "SELECT status, last_error FROM _chimpbase_queue_jobs WHERE queue_name = $1", [queueName],
+      )).rows).toEqual([{ status: "failed", last_error: workerError.message }]);
+      expect(await host.processNextQueueJob()).toBeNull();
+    } finally {
+      adapter.streamAppend = append;
+      await host.close();
+    }
+  });
+
   test("two hosts claim each queued job at most once", async () => {
     const queueName = uniqueName("concurrency");
     queueNames.add(queueName);
@@ -492,50 +671,60 @@ describeIfPg("PostgreSQL queue durability", () => {
     });
   }
 
-  test("a stale failure cannot run hooks or overwrite a recovered job", async () => {
-    const queueName = uniqueName("stale-failure");
-    const dlqName = `${queueName}.dlq`;
-    queueNames.add(queueName);
-    queueNames.add(dlqName);
-    let rolledBack!: () => void;
-    let release!: () => void;
-    const entered = new Promise<void>((resolve) => { rolledBack = resolve; });
-    const blocked = new Promise<void>((resolve) => { release = resolve; });
-    let hooks = 0;
-    const a = await createChimpbase({
-      storage: { engine: "postgres", url: postgresUrl() }, workerRuntime: { leaseMs: 30 }, worker: { maxAttempts: 1 },
-      registrations: [worker(queueName, async () => { throw new Error("old attempt failed"); }, {
-        dlq: dlqName, onFailure: async () => { hooks += 1; },
-      }), action("enqueue", async (ctx) => await ctx.enqueue(queueName, {}))],
+  for (const pauseAfter of ["handler rollback", "hook rollback"] as const) {
+    test(`a stale failure after ${pauseAfter} cannot overwrite a recovered job`, async () => {
+      const queueName = uniqueName("stale-failure");
+      const dlqName = `${queueName}.dlq`;
+      queueNames.add(queueName);
+      queueNames.add(dlqName);
+      let rolledBack!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { rolledBack = resolve; });
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      let hooks = 0;
+      const a = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() }, workerRuntime: { leaseMs: 30 }, worker: { maxAttempts: 1 },
+        registrations: [worker(queueName, async () => { throw new Error("old attempt failed"); }, {
+          dlq: dlqName, onFailure: async () => { hooks += 1; throw new Error("hook failed"); },
+        }), action("enqueue", async (ctx) => await ctx.enqueue(queueName, {}))],
+      });
+      const b = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() }, registrations: [worker(queueName, async () => {})],
+      });
+      const adapter = a.engine.getBlobsAdapter();
+      const rollback = adapter.rollbackTransaction.bind(adapter);
+      let rollbacks = 0;
+      adapter.rollbackTransaction = async () => {
+        await rollback();
+        rollbacks += 1;
+        if (rollbacks === (pauseAfter === "handler rollback" ? 1 : 2)) {
+          rolledBack();
+          await blocked;
+        }
+      };
+      let running: Promise<unknown> | undefined;
+      try {
+        await a.executeAction("enqueue");
+        running = a.processNextQueueJob().catch((error: unknown) => error);
+        await entered;
+        await Bun.sleep(60);
+        expect(await b.processNextQueueJob()).not.toBeNull();
+        release();
+        expect(await running).toMatchObject({ message: "old attempt failed" });
+        expect(hooks).toBe(pauseAfter === "handler rollback" ? 0 : 1);
+        const rows = await pool.query<{ attempt_count: number; status: string; queue_name: string }>(
+          "SELECT attempt_count, status, queue_name FROM _chimpbase_queue_jobs WHERE queue_name = ANY($1::text[])", [[queueName, dlqName]],
+        );
+        expect(rows.rows).toEqual([{ attempt_count: 2, status: "completed", queue_name: queueName }]);
+      } finally {
+        release();
+        await running;
+        adapter.rollbackTransaction = rollback;
+        await a.close();
+        await b.close();
+      }
     });
-    const b = await createChimpbase({
-      storage: { engine: "postgres", url: postgresUrl() }, registrations: [worker(queueName, async () => {})],
-    });
-    const adapter = a.engine.getBlobsAdapter();
-    const rollback = adapter.rollbackTransaction.bind(adapter);
-    adapter.rollbackTransaction = async () => { await rollback(); rolledBack(); await blocked; };
-    let running: Promise<unknown> | undefined;
-    try {
-      await a.executeAction("enqueue");
-      running = a.processNextQueueJob().catch((error: unknown) => error);
-      await entered;
-      await Bun.sleep(60);
-      expect(await b.processNextQueueJob()).not.toBeNull();
-      release();
-      expect(await running).toMatchObject({ message: "old attempt failed" });
-      expect(hooks).toBe(0);
-      const rows = await pool.query<{ attempt_count: number; status: string; queue_name: string }>(
-        "SELECT attempt_count, status, queue_name FROM _chimpbase_queue_jobs WHERE queue_name = ANY($1::text[])", [[queueName, dlqName]],
-      );
-      expect(rows.rows).toEqual([{ attempt_count: 2, status: "completed", queue_name: queueName }]);
-    } finally {
-      release();
-      await running;
-      adapter.rollbackTransaction = rollback;
-      await a.close();
-      await b.close();
-    }
-  });
+  }
 
   test("a workflow waiting for a signal resumes on a replacement host", async () => {
     const workflowName = uniqueName("workflow");

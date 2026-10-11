@@ -51,6 +51,8 @@ PostgreSQL holds the claimed job's row lock throughout execution, so an expired 
 
 A failed job does not abandon the remaining jobs already claimed in its batch. Each job keeps its own transaction and retry handling; the batch reports its first failure after attempting the remaining jobs.
 
+An `onFailure` hook runs after the handler transaction rolls back. Successful hook writes and events commit with the job's retry or terminal state. If the hook throws, its writes and events roll back, the runtime still records the original worker error and advances retry/DLQ handling, and a warning identifies the hook failure. A recovered claim cannot be overwritten during this fallback. Database failures while recording the job state still propagate and leave the claim recoverable after lease expiry.
+
 Nodes sharing a database may register different handlers. Internal subscription jobs are claimed only by nodes registering their event and subscription name, cron jobs only by nodes registering their schedule, and workflow jobs only by nodes registering the persisted workflow name and version. Unsupported work stays queued without consuming a retry attempt. Use unique subscription names for different handler sets; unnamed or duplicate-name handlers remain a shared group. See [Event bus transports](/advanced/event-bus) for existing unnamed jobs and deployment guidance.
 
 ## Dead Letter Queue (DLQ)

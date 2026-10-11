@@ -94,64 +94,87 @@ describeIfPg("PostgreSQL event delivery", () => {
     }
   });
 
-  test("concurrent consumers reserve one subscription delivery before running its handler", async () => {
-    const pool = new Pool({ connectionString: PG_URL });
-    const name = `subscription.${crypto.randomUUID()}`;
-    await ensurePostgresInternalTables(pool);
-    const { rows: [row] } = await pool.query<{ id: number }>(
-      "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, '{}') RETURNING id::double precision AS id", [name],
-    );
-    const events = [{ id: row.id, name, payload: {}, payloadJson: "{}" }];
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    let calls = 0;
-    const consumers = Array.from({ length: 2 }, () => {
-      const platform = createDefaultChimpbasePlatformShim();
-      const registry = createChimpbaseRegistry();
-      registry.subscriptions.set(name, [{
-        name, idempotent: true,
-        handler: async (ctx) => {
-          calls += 1;
-          await ctx.kv.set(name, calls);
-          entered.resolve();
-          await release.promise;
-        },
-      }]);
-      let callback: ChimpbaseEventBusCallback | undefined;
-      const engine = new ChimpbaseEngine({
-        adapter: createPostgresEngineAdapter(pool, platform), platform, registry,
-        eventBus: { publish: async () => {}, start(handler) { callback = handler; }, stop() {} },
-        secrets: { get: () => null }, subscriptions: { dispatch: "sync" },
-        telemetry: { minLevel: "error", persist: { log: false, metric: false, trace: false } },
-        worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
+  for (const failFirst of [false, true]) {
+    test(`concurrent consumers reserve all group handlers and ${failFirst ? "retry after rollback" : "skip after commit"}`, async () => {
+      const pool = new Pool({ connectionString: PG_URL });
+      const name = `subscription.${crypto.randomUUID()}`;
+      await ensurePostgresInternalTables(pool);
+      const { rows: [row] } = await pool.query<{ id: number }>(
+        "INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, '{}') RETURNING id::double precision AS id", [name],
+      );
+      const events = [{ id: row.id, name, payload: {}, payloadJson: "{}" }];
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const calls: string[] = [];
+      const consumers = Array.from({ length: 2 }, (_, index) => {
+        const platform = createDefaultChimpbasePlatformShim();
+        const registry = createChimpbaseRegistry();
+        registry.subscriptions.set(name, [
+          {
+            name, idempotent: true,
+            handler: async (ctx) => {
+              calls.push(`${index}:left`);
+              await ctx.kv.set(`${name}.left`, index);
+              entered.resolve();
+              await release.promise;
+            },
+          },
+          {
+            name, idempotent: true,
+            handler: async (ctx) => {
+              calls.push(`${index}:right`);
+              await ctx.kv.set(`${name}.right`, index);
+              if (failFirst && index === 0) throw new Error("last handler failed");
+            },
+          },
+        ]);
+        let callback: ChimpbaseEventBusCallback | undefined;
+        const engine = new ChimpbaseEngine({
+          adapter: createPostgresEngineAdapter(pool, platform), platform, registry,
+          eventBus: { publish: async () => {}, start(handler) { callback = handler; }, stop() {} },
+          secrets: { get: () => null }, subscriptions: { dispatch: "sync" },
+          telemetry: { minLevel: "error", persist: { log: false, metric: false, trace: false } },
+          worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
+        });
+        engine.startEventBus();
+        return { engine, deliver: async () => {
+          if (callback === undefined) throw new Error("bus did not start");
+          await callback(events);
+        } };
       });
-      engine.startEventBus();
-      return { engine, deliver: async () => {
-        if (callback === undefined) throw new Error("bus did not start");
-        await callback(events);
-      } };
+      const deliveries: Promise<void>[] = [];
+      try {
+        deliveries.push(consumers[0].deliver());
+        await entered.promise;
+        deliveries.push(consumers[1].deliver());
+        await Bun.sleep(30);
+        expect(calls).toEqual(["0:left"]);
+        release.resolve();
+        const results = await Promise.allSettled(deliveries);
+        expect(results.map((result) => result.status)).toEqual([failFirst ? "rejected" : "fulfilled", "fulfilled"]);
+        const expectedCalls = failFirst ? ["0:left", "0:right", "1:left", "1:right"] : ["0:left", "0:right"];
+        expect(calls).toEqual(expectedCalls);
+        expect((await pool.query<{ key: string; value_json: number }>(
+          "SELECT key, value_json FROM _chimpbase_kv WHERE key = ANY($1::text[]) ORDER BY key",
+          [[`${name}.left`, `${name}.right`]],
+        )).rows).toEqual([
+          { key: `${name}.left`, value_json: failFirst ? 1 : 0 },
+          { key: `${name}.right`, value_json: failFirst ? 1 : 0 },
+        ]);
+        await Promise.all(consumers.map((consumer) => consumer.deliver()));
+        expect(calls).toEqual(expectedCalls);
+      } finally {
+        release.resolve();
+        await Promise.allSettled(deliveries);
+        for (const consumer of consumers) consumer.engine.stopEventBus();
+        await pool.query("DELETE FROM _chimpbase_kv WHERE key = ANY($1::text[])", [
+          [`${name}.left`, `${name}.right`, `_chimpbase.sub.seen:${row.id}:sync:${name}`],
+        ]);
+        await pool.query("DELETE FROM _chimpbase_events WHERE id = $1", [row.id]);
+        await pool.end();
+      }
     });
-    const deliveries: Promise<void>[] = [];
-    try {
-      deliveries.push(consumers[0].deliver());
-      await entered.promise;
-      deliveries.push(consumers[1].deliver());
-      await Bun.sleep(30);
-      expect(calls).toBe(1);
-      release.resolve();
-      await Promise.all(deliveries);
-      expect(calls).toBe(1);
-      expect((await pool.query<{ value_json: number }>("SELECT value_json FROM _chimpbase_kv WHERE key = $1", [name])).rows)
-        .toEqual([{ value_json: 1 }]);
-    } finally {
-      release.resolve();
-      await Promise.allSettled(deliveries);
-      for (const consumer of consumers) consumer.engine.stopEventBus();
-      await pool.query("DELETE FROM _chimpbase_kv WHERE key = ANY($1::text[])", [[name, `_chimpbase.sub.seen:${row.id}:${name}`]]);
-      await pool.query("DELETE FROM _chimpbase_events WHERE id = $1", [row.id]);
-      await pool.end();
-    }
-  });
+  }
 
   test("publishing a local event preserves an earlier unseen peer event and filters only local IDs", async () => {
     const pool = new Pool({ connectionString: PG_URL, max: 1 });

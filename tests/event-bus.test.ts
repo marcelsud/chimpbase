@@ -89,25 +89,30 @@ describe("event bus", () => {
   });
 
   for (const name of ["", "shared-name"]) {
-    test(`external async events deliver shared ${name === "" ? "unnamed" : "named"} subscription identities once`, async () => {
-      let deliver: ChimpbaseEventBusCallback | undefined;
-      const { db, engine, registry } = await createTestEngine({
-        publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
-      }, "async");
-      const calls: string[] = [];
-      registry.subscriptions.set("shared", [
-        { name, idempotent: false, handler: () => { calls.push("left"); } },
-        { name, idempotent: false, handler: () => { calls.push("right"); } },
-      ]);
-      try {
-        engine.startEventBus();
-        if (deliver === undefined) throw new Error("event bus did not start");
-        await deliver([{ id: 42, name: "shared", payload: {}, payloadJson: "{}" }]);
-        expect(await engine.processNextQueueJob()).not.toBeNull();
-        expect(calls).toEqual(["left", "right"]);
-        expect(await engine.processNextQueueJob()).toBeNull();
-      } finally { engine.stopEventBus(); db.close(); }
-    });
+    for (const idempotent of [false, true]) {
+      test(`external async events deliver shared ${name === "" ? "unnamed" : "named"} ${idempotent ? "idempotent" : "non-idempotent"} groups`, async () => {
+        let deliver: ChimpbaseEventBusCallback | undefined;
+        const { db, engine, registry } = await createTestEngine({
+          publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+        }, "async");
+        const calls: string[] = [];
+        registry.subscriptions.set("shared", [
+          { name, idempotent, handler: () => { calls.push("left"); } },
+          { name, idempotent, handler: () => { calls.push("right"); } },
+        ]);
+        try {
+          engine.startEventBus();
+          if (deliver === undefined) throw new Error("event bus did not start");
+          const event = { id: 42, name: "shared", payload: {}, payloadJson: "{}" };
+          await deliver([event, event]);
+          expect(await engine.processNextQueueJob()).not.toBeNull();
+          expect(calls).toEqual(["left", "right"]);
+          expect(await engine.processNextQueueJob()).not.toBeNull();
+          expect(calls).toEqual(idempotent ? ["left", "right"] : ["left", "right", "left", "right"]);
+          expect(await engine.processNextQueueJob()).toBeNull();
+        } finally { engine.stopEventBus(); db.close(); }
+      });
+    }
   }
 
   test("external async events persist separate named deliveries for partial handler sets", async () => {
@@ -152,6 +157,67 @@ describe("event bus", () => {
       expect(await engine.processNextQueueJob()).toBeNull();
     } finally { db.close(); }
   });
+
+  test("same-name idempotent groups reserve sync and async deliveries independently", async () => {
+    let deliver: ChimpbaseEventBusCallback | undefined;
+    const { db, engine, registry } = await createTestEngine({
+      publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+    });
+    const calls: string[] = [];
+    registry.actions.set("emit", action("emit", (ctx) => { ctx.pubsub.publish("mixed", {}); }));
+    registry.subscriptions.set("mixed", [
+      { dispatch: "async", name: "group", idempotent: true, handler: () => { calls.push("async-left"); } },
+      { dispatch: "sync", name: "group", idempotent: true, handler: () => { calls.push("sync-left"); } },
+      { dispatch: "async", name: "group", idempotent: true, handler: () => { calls.push("async-right"); } },
+      { dispatch: "sync", name: "group", idempotent: true, handler: () => { calls.push("sync-right"); } },
+    ]);
+    try {
+      engine.startEventBus();
+      const emitted = await engine.executeAction("emit");
+      expect(calls).toEqual(["sync-left", "sync-right"]);
+      await engine.processNextQueueJob();
+      expect(calls).toEqual(["sync-left", "sync-right", "async-left", "async-right"]);
+      if (deliver === undefined) throw new Error("bus did not start");
+      await deliver(emitted.emittedEvents);
+      await engine.processNextQueueJob();
+      expect(calls).toEqual(["sync-left", "sync-right", "async-left", "async-right"]);
+      expect(await engine.processNextQueueJob()).toBeNull();
+    } finally { engine.stopEventBus(); db.close(); }
+  });
+
+  for (const dispatch of ["sync", "async"] as const) {
+    test(`${dispatch} mixed groups deduplicate only idempotent handlers and preserve registration order`, async () => {
+      let deliver: ChimpbaseEventBusCallback | undefined;
+      const { db, engine, registry } = await createTestEngine({
+        publish: async () => {}, start(callback) { deliver = callback; }, stop() {},
+      }, dispatch);
+      const calls: string[] = [];
+      registry.subscriptions.set("mixed", [
+        { name: "group", idempotent: true, handler: () => { calls.push("left"); } },
+        { name: "other", idempotent: true, handler: () => { calls.push("other"); } },
+        { name: "group", idempotent: false, handler: () => { calls.push("repeat"); } },
+        { name: "group", idempotent: true, handler: () => { calls.push("right"); } },
+      ]);
+      try {
+        engine.startEventBus();
+        if (deliver === undefined) throw new Error("bus did not start");
+        const events = [{ id: 42, name: "mixed", payload: {}, payloadJson: "{}" }];
+        await deliver(events);
+        if (dispatch === "async") {
+          await engine.processNextQueueJob();
+          await engine.processNextQueueJob();
+        }
+        expect(calls).toEqual(dispatch === "sync" ? ["left", "other", "repeat", "right"] : ["left", "repeat", "right", "other"]);
+        await deliver(events);
+        if (dispatch === "async") {
+          await engine.processNextQueueJob();
+          await engine.processNextQueueJob();
+        }
+        expect(calls.filter((call) => call !== "repeat")).toEqual(dispatch === "sync" ? ["left", "other", "right"] : ["left", "right", "other"]);
+        expect(calls.filter((call) => call === "repeat")).toHaveLength(2);
+      } finally { engine.stopEventBus(); db.close(); }
+    });
+  }
 
   for (const mode of ["wake", "delivery"] as const) {
     test(`${mode} buses keep synchronous subscription overrides out of async queue delivery`, async () => {
@@ -239,7 +305,7 @@ describe("event bus", () => {
           await host.processNextQueueJob();
         }
         expect(db.query("SELECT key FROM _chimpbase_kv ORDER BY key").all()).toEqual([
-          { key: "_chimpbase.sub.seen:42:external" }, { key: "delivered" },
+          { key: `_chimpbase.sub.seen:42:${dispatch}:external` }, { key: "delivered" },
         ]);
       } finally {
         release.resolve();
@@ -249,34 +315,49 @@ describe("event bus", () => {
     });
   }
 
-  test("failed bus delivery rolls back its idempotency reservation and can retry", async () => {
-    let callback: ChimpbaseEventBusCallback | undefined;
-    const { db, engine, registry } = await createTestEngine({
-      publish: async () => {}, start(handler) { callback = handler; }, stop() {},
-    });
-    let calls = 0;
-    registry.subscriptions.set("external", [{
-      name: "retry", idempotent: true,
-      handler: async (ctx) => {
-        calls += 1;
-        await ctx.kv.set("effect", calls);
-        if (calls === 1) throw new Error("delivery failed");
-      },
-    }]);
-    engine.startEventBus();
-    const events = [{ id: 43, name: "external", payload: {}, payloadJson: "{}" }];
-    try {
-      if (callback === undefined) throw new Error("bus did not start");
-      await expect(callback(events)).rejects.toThrow("delivery failed");
-      expect(db.query("SELECT key FROM _chimpbase_kv").all()).toEqual([]);
-      await callback(events);
-      await callback(events);
-      expect(calls).toBe(2);
-      expect(db.query("SELECT key, value_json FROM _chimpbase_kv ORDER BY key").all()).toEqual([
-        { key: "_chimpbase.sub.seen:43:retry", value_json: "true" }, { key: "effect", value_json: "2" },
+  for (const dispatch of ["sync", "async"] as const) {
+    test(`${dispatch} delivery rolls back the whole group when its last handler fails`, async () => {
+      let callback: ChimpbaseEventBusCallback | undefined;
+      const { db, engine, registry } = await createTestEngine({
+        publish: async () => {}, start(handler) { callback = handler; }, stop() {},
+      }, dispatch);
+      let calls = 0;
+      registry.subscriptions.set("external", [
+        {
+          name: "retry", idempotent: true,
+          handler: async (ctx) => {
+            calls += 1;
+            await ctx.kv.set("first", calls);
+          },
+        },
+        {
+          name: "retry", idempotent: true,
+          handler: async (ctx) => {
+            await ctx.kv.set("last", calls);
+            if (calls === 1) throw new Error("delivery failed");
+          },
+        },
       ]);
-    } finally { engine.stopEventBus(); db.close(); }
-  });
+      engine.startEventBus();
+      const events = [{ id: 43, name: "external", payload: {}, payloadJson: "{}" }];
+      try {
+        if (callback === undefined) throw new Error("bus did not start");
+        const onEvent = callback;
+        const deliver = dispatch === "async" ? () => engine.processNextQueueJob() : () => onEvent(events);
+        if (dispatch === "async") await onEvent(events);
+        await expect(deliver()).rejects.toThrow("delivery failed");
+        expect(db.query("SELECT key FROM _chimpbase_kv").all()).toEqual([]);
+        await deliver();
+        await onEvent(events);
+        if (dispatch === "async") await engine.processNextQueueJob();
+        expect(calls).toBe(2);
+        expect(db.query("SELECT key, value_json FROM _chimpbase_kv ORDER BY key").all()).toEqual([
+          { key: `_chimpbase.sub.seen:43:${dispatch}:retry`, value_json: "true" },
+          { key: "first", value_json: "2" }, { key: "last", value_json: "2" },
+        ]);
+      } finally { engine.stopEventBus(); db.close(); }
+    });
+  }
 
   for (const publisher of ["action", "route", "worker"] as const) {
     test(`failing cascaded sync subscription rolls back its ${publisher} publisher`, async () => {
@@ -343,8 +424,8 @@ describe("event bus", () => {
           v.object({ id: v.number() }).parse(row).id
         ));
         expect(db.query("SELECT key FROM _chimpbase_kv ORDER BY key").all()).toEqual([
-          { key: `_chimpbase.sub.seen:${ids?.[0]}:first` },
-          { key: `_chimpbase.sub.seen:${ids?.[1]}:second` },
+          { key: `_chimpbase.sub.seen:${ids?.[0]}:sync:first` },
+          { key: `_chimpbase.sub.seen:${ids?.[1]}:sync:second` },
         ]);
         expect(published).toHaveLength(1);
         await callback?.(published[0]);

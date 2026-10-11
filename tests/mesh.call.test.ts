@@ -8,6 +8,8 @@ import {
   service,
   MeshNoAvailableNodeError,
   MeshCallError,
+  MeshConfigurationError,
+  type CallOptions,
   type MeshCallMiddleware,
 } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
@@ -75,6 +77,104 @@ test("HTTP dispatcher wraps malformed JSON as MeshCallError", async () => {
 });
 
 describe("@chimpbase/mesh ctx.mesh.call", () => {
+  test("rejects invalid dispatcher defaults before constructing middleware", () => {
+    let middlewareCreated = 0;
+    const defaults = {
+      cache: new MeshPeerCache(30_000),
+      defaultRetries: 0,
+      defaultStrategy: "local-first" as const,
+      defaultTimeoutMs: 1_000,
+      localActionNames: new Set<string>(),
+      localNodeId: "local",
+      middleware: [(next: Parameters<MeshCallMiddleware>[0]) => { middlewareCreated += 1; return next; }],
+      remoteDispatcher: null,
+    };
+    for (const invalid of [
+      { defaultRetries: -1 }, { defaultRetries: 0.5 }, { defaultRetries: NaN },
+      { defaultRetries: Infinity }, { defaultRetries: Number.MAX_SAFE_INTEGER + 1 },
+      { defaultTimeoutMs: 0 }, { defaultTimeoutMs: -1 }, { defaultTimeoutMs: NaN },
+      { defaultTimeoutMs: Infinity }, { defaultTimeoutMs: 2_147_483_648 },
+    ]) {
+      expect(() => createCallDispatcher({ ...defaults, ...invalid })).toThrow(MeshConfigurationError);
+    }
+    expect(middlewareCreated).toBe(0);
+  });
+
+  test("rejects invalid call options before middleware, action execution, and fallback", async () => {
+    const host = await createMeshHost();
+    let callOptions: CallOptions = {};
+    let middlewareCalls = 0;
+    let executions = 0;
+    let fallbacks = 0;
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0,
+      transport: "local-only",
+      middleware: [(next) => async (name, args, validator, options) => {
+        middlewareCalls += 1;
+        return await next(name, args, validator, options);
+      }],
+      services: [service({ name: "numeric", actions: {
+        target: () => { executions += 1; return "ok"; },
+        run: async (ctx) => {
+          if (ctx.mesh === undefined) throw new Error("mesh missing");
+          return await ctx.mesh.call("v1.numeric.target", {}, v.string(), {
+            ...callOptions,
+            fallback: () => { fallbacks += 1; return "fallback"; },
+          });
+        },
+      } })],
+    }));
+    const started = await host.start({ serve: false, runWorker: false });
+    try {
+      const invalidOptions: CallOptions[] = [
+        ...[0, -1, NaN, Infinity, 2_147_483_648].map((timeoutMs) => ({ timeoutMs })),
+        ...[-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((attempts) => ({ retry: { attempts } })),
+        ...[-1, NaN, Infinity, 2_147_483_648].map((delayMs) => ({ retry: { attempts: 0, delayMs } })),
+      ];
+      for (const invalid of invalidOptions) {
+        callOptions = invalid;
+        await expect(host.executeAction("v1.numeric.run")).rejects.toBeInstanceOf(MeshConfigurationError);
+      }
+      expect(middlewareCalls).toBe(0);
+      expect(executions).toBe(0);
+      expect(fallbacks).toBe(0);
+      callOptions = { timeoutMs: 2_147_483_647, retry: { attempts: 0, delayMs: 0 } };
+      expect((await host.executeAction("v1.numeric.run")).result).toBe("ok");
+      expect(middlewareCalls).toBe(1);
+      expect(executions).toBe(1);
+      expect(fallbacks).toBe(0);
+    } finally {
+      await started.stop();
+      await host.close();
+    }
+  });
+
+  test("rejects invalid options introduced by middleware before executing the action", async () => {
+    const host = await createMeshHost();
+    let executions = 0;
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0,
+      transport: "local-only",
+      middleware: [(next) => async (name, args, validator, options) =>
+        await next(name, args, validator, { ...options, timeoutMs: Infinity })],
+      services: [service({ name: "numeric", actions: {
+        target: () => { executions += 1; return "ok"; },
+        run: async (ctx) => {
+          if (ctx.mesh === undefined) throw new Error("mesh missing");
+          return await ctx.mesh.call("v1.numeric.target", {}, v.string());
+        },
+      } })],
+    }));
+    const started = await host.start({ serve: false, runWorker: false });
+    try {
+      await expect(host.executeAction("v1.numeric.run")).rejects.toBeInstanceOf(MeshConfigurationError);
+      expect(executions).toBe(0);
+    } finally {
+      await started.stop();
+      await host.close();
+    }
+  });
+
   test("preserves arrays and omitted payloads while ctx.action remains variadic", async () => {
     const host = await createMeshHost();
     try {
