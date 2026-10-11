@@ -37,6 +37,8 @@ The app definition contains registrations, migrations, optional `httpHandler`, w
 
 Runtime settings such as storage, server port, worker concurrency, secrets, blob drivers and telemetry sinks belong to the host options. When you need those options in code, use a custom entry point.
 
+Export worker registrations and pass them to `ctx.enqueue(workerRegistration, payload)` so producers share the worker's payload type. Duplicate worker names fail during registration. Runtime worker settings also include `workerRuntime.retention`: completed jobs are cleaned up after 30 days by default, while unresolved jobs remain inspectable with `jobs list` and `jobs inspect`. See [Workers & Queues](/workers).
+
 ## Custom entry point
 
 Save this as `app.ts` beside `chimpbase.app.ts`:
@@ -56,6 +58,8 @@ const started = await startChimpbaseApp({
 ```
 
 Run `bun app.ts`. `startChimpbaseApp` loads the definition and starts HTTP plus the worker. Its `stop()` stops the runtime and closes storage and telemetry sinks.
+
+Stopping aborts running workers' `execution.signal` and waits for their handlers. Combine that signal with a network deadline for external calls. SQLite holds its serialized database transaction throughout a worker handler, so unbounded external waits also delay request actions; a shorter lease does not interrupt them.
 
 Select `chimpbase/runtime/node` for the Node host. The application registrations remain portable.
 

@@ -3,6 +3,7 @@
 import { installCliShutdownHandler, runChimpbaseCli } from "@chimpbase/tooling/cli";
 
 import {
+  loadChimpbaseProject,
   runChimpbaseAction,
   startChimpbaseProject,
   syncChimpbaseModules,
@@ -11,6 +12,7 @@ import {
 } from "./library.ts";
 
 await runChimpbaseCli(Bun.argv.slice(2), {
+  loadProject: loadChimpbaseProject,
   installShutdownHandler: installCliShutdownHandler,
   runAction: runChimpbaseAction,
   startProject: startChimpbaseProject,

@@ -19,6 +19,7 @@ import type {
   ChimpbaseWorkflowDefinitionLike,
 } from "@chimpbase/runtime";
 import {
+  assertWorkerInteger,
   defineChimpbaseMigrations,
   type ChimpbaseMigrationsDefinition,
   type ChimpbaseMigrationsDefinitionInput,
@@ -66,6 +67,7 @@ export interface ChimpbaseProjectConfig {
     maxAttempts: number;
     pollIntervalMs: number;
     retryDelayMs: number;
+    retention: { enabled: boolean; maxAgeDays: number; schedule: string };
   };
   secrets: {
     dir: string | null;
@@ -105,6 +107,7 @@ export interface ChimpbaseProjectConfigInput {
     maxAttempts?: number;
     pollIntervalMs?: number;
     retryDelayMs?: number;
+    retention?: { enabled?: boolean; maxAgeDays?: number; schedule?: string };
   };
   secrets?: {
     dir?: string | null;
@@ -287,11 +290,16 @@ export function normalizeProjectConfig(
       },
     },
     worker: {
-      concurrency: input.worker?.concurrency ?? 1,
-      leaseMs: input.worker?.leaseMs ?? 30_000,
-      maxAttempts: input.worker?.maxAttempts ?? 5,
-      pollIntervalMs: input.worker?.pollIntervalMs ?? 250,
-      retryDelayMs: input.worker?.retryDelayMs ?? 1_000,
+      concurrency: assertWorkerInteger("worker.concurrency", input.worker?.concurrency ?? 1),
+      leaseMs: assertWorkerInteger("worker.leaseMs", input.worker?.leaseMs ?? 30_000),
+      maxAttempts: assertWorkerInteger("worker.maxAttempts", input.worker?.maxAttempts ?? 5),
+      pollIntervalMs: assertWorkerInteger("worker.pollIntervalMs", input.worker?.pollIntervalMs ?? 250, 1, 2_147_483_647),
+      retryDelayMs: assertWorkerInteger("worker.retryDelayMs", input.worker?.retryDelayMs ?? 1_000, 0),
+      retention: {
+        enabled: input.worker?.retention?.enabled ?? true,
+        maxAgeDays: assertWorkerInteger("worker.retention.maxAgeDays", input.worker?.retention?.maxAgeDays ?? 30, 1, 100_000_000),
+        schedule: input.worker?.retention?.schedule ?? "0 3 * * *",
+      },
     },
     secrets: {
       dir: input.secrets?.dir ?? null,
@@ -355,8 +363,8 @@ export function defineChimpbaseApp(
       },
     },
     worker: {
-      maxAttempts: input.worker?.maxAttempts ?? 5,
-      retryDelayMs: input.worker?.retryDelayMs ?? 1_000,
+      maxAttempts: assertWorkerInteger("worker.maxAttempts", input.worker?.maxAttempts ?? 5),
+      retryDelayMs: assertWorkerInteger("worker.retryDelayMs", input.worker?.retryDelayMs ?? 1_000, 0),
     },
     workflows: {
       contractsDir: input.workflows?.contractsDir ?? "workflow-contracts",
@@ -411,7 +419,7 @@ export {
 export { registerChimpbaseModuleImplementations } from "./module-registration.ts";
 export { ChimpbaseKyselyDriver, createSqliteKysely, type ChimpbaseKyselyExecutor } from "./sqlite-kysely.ts";
 export { ensureSqliteInternalTables } from "./sqlite-schema.ts";
-export { applySqliteMigrations } from "./host.ts";
+export { applySqliteMigrations, assertWorkerInteger } from "./host.ts";
 export {
   createSqliteEngineAdapter,
   type ChimpbaseSqliteDatabase,

@@ -16,6 +16,7 @@ import type {
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
 import {
+  assertWorkerInteger,
   assertChimpbaseModuleCompiledSql,
   createChimpbaseEventDeliveryPayloads,
   escapeSqlLikePrefix,
@@ -32,6 +33,8 @@ import type {
   ChimpbaseCollectionPatch,
   ChimpbaseKvListOptions,
   ChimpbaseQueueEnqueueOptions,
+  ChimpbaseJob,
+  ChimpbaseJobListOptions,
   ChimpbaseStreamEvent,
   ChimpbaseStreamReadOptions,
 } from "@chimpbase/runtime";
@@ -56,6 +59,29 @@ interface PersistedCronScheduleRow {
   cron_expression: string;
   next_fire_at_ms: number;
   schedule_name: string;
+}
+
+function queueJobId(value: number | string): number {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error("queue job id exceeds the supported safe integer range");
+  return id;
+}
+
+interface InspectedJobRow extends QueryResultRow {
+  id: number | string;
+  queue_name: string;
+  payload_json: string;
+  status: ChimpbaseJob["status"];
+  attempt_count: number;
+  available_at_ms: number | string;
+  lease_expires_at_ms: number | string | null;
+  last_error: string | null;
+}
+
+function inspectedJob(row: InspectedJobRow): Omit<ChimpbaseJob, "registered"> {
+  return { id: queueJobId(row.id), queue: row.queue_name, payload: parseJson(row.payload_json), status: row.status,
+    attempt: row.attempt_count, availableAtMs: Number(row.available_at_ms),
+    leaseExpiresAtMs: row.lease_expires_at_ms === null ? null : Number(row.lease_expires_at_ms), lastError: row.last_error };
 }
 
 function queueTargetFilter(paramIndex: number): string {
@@ -615,7 +641,8 @@ export function createPostgresEngineAdapter(
         `,
         [now, leaseExpiresAtMs, queueNames, JSON.stringify(targets)],
       );
-      return result.rows[0] ?? null;
+      const row = result.rows[0];
+      return row === undefined ? null : { ...row, id: queueJobId(row.id) };
     },
     async claimNextQueueJobs(
       leaseMs: number,
@@ -664,7 +691,7 @@ export function createPostgresEngineAdapter(
         [now, leaseExpiresAtMs, queueNames, batchSize, JSON.stringify(targets)],
       );
 
-      return result.rows;
+      return result.rows.map((row) => ({ ...row, id: queueJobId(row.id) }));
     },
     async lockQueueJob(jobId: number, attempt: number): Promise<boolean> {
       const result = await queryable().query<{ id: number }>(
@@ -672,6 +699,11 @@ export function createPostgresEngineAdapter(
         [jobId, attempt],
       );
       return result.rows.length > 0;
+    },
+    async releaseQueueJob(jobId: number, attempt: number): Promise<void> {
+      await queryable().query(`UPDATE _chimpbase_queue_jobs
+        SET status = 'pending', attempt_count = attempt_count - 1, lease_expires_at_ms = NULL, updated_at = NOW()
+        WHERE id = $1 AND status = 'processing' AND attempt_count = $2`, [jobId, attempt]);
     },
     async collectionDelete(name: string, filter: ChimpbaseCollectionFilter = {}): Promise<number> {
       const { where, params } = collectionWhere(name, filter);
@@ -794,6 +826,40 @@ export function createPostgresEngineAdapter(
         [jobId],
       );
       return result.rows[0]?.payload_json ?? null;
+    },
+    async listQueueJobs(options: ChimpbaseJobListOptions) {
+      const result = await queryable().query<InspectedJobRow>(`SELECT id, queue_name, payload_json::text,
+        status, attempt_count, available_at_ms, lease_expires_at_ms, last_error FROM _chimpbase_queue_jobs
+        WHERE ($1::text IS NULL OR queue_name = $1) AND ($2::text IS NULL OR status = $2)
+        ORDER BY id DESC LIMIT $3`, [options.queue ?? null, options.status ?? null, options.limit ?? 100]);
+      return result.rows.map(inspectedJob);
+    },
+    async getQueueJob(jobId: number) {
+      const result = await queryable().query<InspectedJobRow>(`SELECT id, queue_name, payload_json::text,
+        status, attempt_count, available_at_ms, lease_expires_at_ms, last_error
+        FROM _chimpbase_queue_jobs WHERE id = $1`, [jobId]);
+      return result.rows[0] === undefined ? null : inspectedJob(result.rows[0]);
+    },
+    async retryQueueJob(jobId: number, dlqName?: string) {
+      const source = (await queryable().query<InspectedJobRow>(`SELECT id, queue_name, status
+        FROM _chimpbase_queue_jobs WHERE id = $1 FOR UPDATE`, [jobId])).rows[0];
+      if (source === undefined || source.queue_name.startsWith("__chimpbase.")
+        || (source.status !== "failed" && source.status !== "dlq")) return false;
+      if (source.status === "dlq") {
+        if (dlqName === undefined) return false;
+        const related = `id != $1 AND queue_name = $3 AND payload_json->>'queue' = $2
+          AND (payload_json->>'jobId' = $1::text OR payload_json->>'jobId' IS NULL)`;
+        const envelopes = await queryable().query<{ status: string; job_id: string | null }>(`SELECT status, payload_json->>'jobId' AS job_id
+          FROM _chimpbase_queue_jobs WHERE ${related} FOR UPDATE`, [jobId, source.queue_name, dlqName]);
+        if (envelopes.rows.some((row) => row.status !== "completed" && (row.job_id === null || row.status !== "pending"))) return false;
+        await queryable().query(`UPDATE _chimpbase_queue_jobs SET status = 'completed', completed_at = NOW(),
+          updated_at = NOW(), last_error = 'superseded by retry of job ' || $1::text
+          WHERE ${related} AND payload_json->>'jobId' = $1::text AND status = 'pending'`, [jobId, source.queue_name, dlqName]);
+      }
+      const result = await queryable().query(`UPDATE _chimpbase_queue_jobs SET status = 'pending', attempt_count = 0,
+        available_at_ms = $2, lease_expires_at_ms = NULL, last_error = NULL, completed_at = NULL,
+        updated_at = NOW() WHERE id = $1 AND status IN ('failed', 'dlq')`, [jobId, platform.now()]);
+      return result.rowCount === 1;
     },
     async insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean> {
       const result = await queryable().query(
@@ -928,8 +994,9 @@ export function createPostgresEngineAdapter(
       return validator.array().parse(result.rows, "database query rows");
     },
     async queueEnqueue<TPayload = unknown>(name: string, payload: TPayload, options?: ChimpbaseQueueEnqueueOptions) {
-      const availableAtMs = platform.now() + Math.max(0, options?.delayMs ?? 0);
-      await queryable().query(
+      const now = platform.now();
+      const availableAtMs = now + assertWorkerInteger("delayMs", options?.delayMs ?? 0, 0, Number.MAX_SAFE_INTEGER - now);
+      const result = await queryable().query<{ id: number | string }>(
         `
           INSERT INTO _chimpbase_queue_jobs (
             queue_name,
@@ -938,9 +1005,11 @@ export function createPostgresEngineAdapter(
             available_at_ms,
             attempt_count
           ) VALUES ($1, $2::jsonb, 'pending', $3, 0)
+          RETURNING id
         `,
         [name, JSON.stringify(payload ?? null), availableAtMs],
       );
+      return queueJobId(result.rows[0]!.id);
     },
     async releaseCronScheduleLease(scheduleName: string, leaseToken: string): Promise<void> {
       await queryable().query(

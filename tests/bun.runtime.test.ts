@@ -17,9 +17,73 @@ import {
   workflow,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
-import { applySqliteMigrations, defineChimpbaseMigrations, ensureSqliteInternalTables, normalizeProjectConfig } from "../packages/core/index.ts";
+import { applySqliteMigrations, createDefaultChimpbasePlatformShim, defineChimpbaseMigrations, ensureSqliteInternalTables, normalizeProjectConfig } from "../packages/core/index.ts";
 
 const cleanupDirs: string[] = [];
+
+test("invalid queue delays fail before SQLite insertion", async () => {
+  const host = await createChimpbase({ storage: { engine: "memory" } });
+  try {
+    const adapter = host.engine.getBlobsAdapter();
+    for (const delayMs of [-1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER]) {
+      await expect(adapter.queueEnqueue("invalid-delay", {}, { delayMs })).rejects.toThrow("delayMs");
+    }
+    expect(await adapter.query("SELECT id FROM _chimpbase_queue_jobs", [], v.object({ id: v.number() }))).toEqual([]);
+    await adapter.queueEnqueue("valid-delay", {}, { delayMs: 0 });
+    expect(await adapter.query("SELECT queue_name FROM _chimpbase_queue_jobs", [], v.object({ queue_name: v.string() })))
+      .toEqual([{ queue_name: "valid-delay" }]);
+  } finally { await host.close(); }
+});
+
+for (const engine of ["sqlite", "memory"] as const) {
+  test(`worker retention prunes only old completions and preserves SQLite job IDs (${engine})`, async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-worker-retention-"));
+    cleanupDirs.push(projectDir);
+    const now = Date.parse("2026-10-11T12:00:00.000Z");
+    const cutoff = now - 86_400_000;
+    const host = await ChimpbaseBunHost.create({
+      projectDir,
+      config: normalizeProjectConfig({ storage: { engine, path: "retention.db" }, worker: { retention: { maxAgeDays: 1 } } }),
+      platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+    });
+    try {
+      const cleanup = host.registry.crons.get("__chimpbase.worker.cleanup");
+      if (!cleanup) throw new Error("missing worker cleanup cron");
+      host.registerAction("cleanup", async (ctx) => await cleanup.handler(ctx, {
+        fireAt: new Date(now).toISOString(), fireAtMs: now, name: cleanup.name, schedule: cleanup.schedule,
+      }));
+      const adapter = host.engine.getBlobsAdapter();
+      for (const [id, status, completedAt] of [
+        [1, "completed", new Date(cutoff - 1).toISOString()],
+        [2, "completed", "2000-01-01 00:00:00"],
+        [3, "completed", new Date(cutoff).toISOString()],
+        [4, "pending", "2000-01-01 00:00:00"],
+        [5, "processing", "2000-01-01 00:00:00"],
+        [6, "failed", "2000-01-01 00:00:00"],
+        [7, "dlq", "2000-01-01 00:00:00"],
+        [8, "completed", "2000-01-01 00:00:00"],
+      ] as const) {
+        await adapter.query(
+          "INSERT INTO _chimpbase_queue_jobs (id, queue_name, payload_json, status, available_at_ms, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+          [id, "retention-fixture", JSON.stringify({ id }), status, now + 60_000, completedAt], v.object({}),
+        );
+      }
+      await host.executeAction("cleanup");
+      const rows = await adapter.query("SELECT id FROM _chimpbase_queue_jobs ORDER BY id", [], v.object({ id: v.number() }));
+      expect(rows.map((row) => row.id)).toEqual([3, 4, 5, 6, 7, 8]);
+      await adapter.queueEnqueue("new-job", {}, { delayMs: 0 });
+      expect(await adapter.query("SELECT id FROM _chimpbase_queue_jobs WHERE queue_name = 'new-job'", [], v.object({ id: v.number() })))
+        .toEqual([{ id: 9 }]);
+      expect(await adapter.query("SELECT payload_json FROM _chimpbase_queue_jobs WHERE id = 8", [], v.object({ payload_json: v.string() })))
+        .toEqual([{ payload_json: JSON.stringify({ id: 8 }) }]);
+      await host.executeAction("cleanup");
+      expect(await adapter.query("SELECT id FROM _chimpbase_queue_jobs WHERE id = 8", [], v.object({ id: v.number() }))).toEqual([]);
+    } finally { await host.close(); }
+    const disabled = await createChimpbase({ storage: { engine: "memory" }, workerRuntime: { retention: { enabled: false } } });
+    try { expect(disabled.registry.crons.has("__chimpbase.worker.cleanup")).toBe(false); }
+    finally { await disabled.close(); }
+  });
+}
 
 test("SQLite internal upgrades propagate failures and can retry without losing KV data", async () => {
   const db = new Database(":memory:");

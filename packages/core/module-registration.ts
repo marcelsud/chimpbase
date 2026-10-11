@@ -115,7 +115,12 @@ function createOwnedRegistrationTarget(
     ): ChimpbaseWorkerHandler<TPayload, TResult> {
       const registeredName = chimpbaseModuleResourceName(moduleName, "queue", name);
       ensureRegistrationAvailable(registry, "worker", registeredName, moduleName);
-      const registered = target.registerWorker(registeredName, handler, definition);
+      const registered = target.registerWorker(registeredName, handler, definition === undefined ? undefined : {
+        ...definition,
+        dlq: typeof definition.dlq === "string"
+          ? chimpbaseModuleResourceName(moduleName, "queue", definition.dlq)
+          : definition.dlq,
+      });
       const entry = registry.workers.get(registeredName);
       if (entry === undefined) throw new Error(`worker registration failed: ${registeredName}`);
       entry.module = moduleName;

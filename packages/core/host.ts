@@ -8,6 +8,18 @@ export interface ChimpbaseSecretsSource {
   get(name: string): string | null;
 }
 
+export function assertWorkerInteger(
+  name: string,
+  value: number,
+  minimum = 1,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be a ${minimum === 0 ? "nonnegative" : "positive"} safe integer <= ${maximum}`);
+  }
+  return value;
+}
+
 export type ChimpbaseStorageEngine = "memory" | "postgres" | "sqlite";
 export type ChimpbaseMigrationEngine = Exclude<ChimpbaseStorageEngine, "memory">;
 
