@@ -66,13 +66,12 @@ See [Configuration](docs/configuration.md) for storage, CLI commands and runtime
 |------|--------|
 | Bun | `chimpbase/runtime/bun` |
 | Node | `chimpbase/runtime/node` |
-| Deno | `chimpbase/runtime/deno` |
 
 `chimpbase` and `chimpbase/runtime` expose the same portable DSL. They do not select a host automatically. Public imports are subpaths of `chimpbase`; the scoped repository workspaces are private implementation packages.
 
 ## Examples and advanced guides
 
-Start with the smallest runnable example for your host: [Bun](examples/bun/basic), [Node](examples/node/basic), or [Deno](examples/deno/basic).
+Start with the smallest runnable example for your host: [Bun](examples/bun/basic) or [Node](examples/node/basic).
 
 [Advanced guides](docs/advanced/index.md) collect workflows, business modules, plugins, framework integrations and deployment recipes. The intermediate and advanced examples live under each host's example directory.
 

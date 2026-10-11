@@ -57,7 +57,7 @@ const started = await startChimpbaseApp({
 
 Run `bun app.ts`. `startChimpbaseApp` loads the definition and starts HTTP plus the worker. Its `stop()` stops the runtime and closes storage and telemetry sinks.
 
-Select `chimpbase/runtime/node` or `chimpbase/runtime/deno` for another host. The application registrations remain portable.
+Select `chimpbase/runtime/node` for the Node host. The application registrations remain portable.
 
 To start only one role, add these host options:
 

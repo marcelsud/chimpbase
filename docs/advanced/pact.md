@@ -111,7 +111,7 @@ interface PactVerificationHost {
 }
 ```
 
-This matches `ChimpbaseHost` from any runtime (Bun, Node, Deno), so verification is not coupled to a specific platform.
+This matches `ChimpbaseHost` from either runtime (Bun or Node), so verification is not coupled to a specific platform.
 
 ### Verification Result
 

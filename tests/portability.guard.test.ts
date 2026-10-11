@@ -14,10 +14,6 @@ const bannedChecks = [
     pattern: /\bBun\b/,
   },
   {
-    label: "Deno global",
-    pattern: /\bDeno\b/,
-  },
-  {
     label: "process global",
     pattern: /\bprocess\b/,
   },
@@ -68,8 +64,8 @@ describe("portable package guards", () => {
     });
   }
 
-  test("@chimpbase/deno stays free of Bun globals", async () => {
-    const packageDir = resolve(repoRoot, "packages", "deno");
+  test("@chimpbase/node stays free of Bun globals", async () => {
+    const packageDir = resolve(repoRoot, "packages", "node");
     const files = await listTypescriptFiles(packageDir);
     const violations: string[] = [];
 
@@ -97,7 +93,7 @@ describe("portable package guards", () => {
   });
 
   test("published packages do not use workspace protocol for internal runtime dependencies", async () => {
-    const packageDirs = ["bun", "core", "deno", "postgres", "rest-collections", "runtime", "tooling"] as const;
+    const packageDirs = ["bun", "core", "host", "node", "postgres", "rest-collections", "runtime", "tooling"] as const;
     const violations: string[] = [];
 
     for (const packageName of packageDirs) {
@@ -115,8 +111,8 @@ describe("portable package guards", () => {
     expect(violations).toEqual([]);
   });
 
-  test("packages consumed by the Deno host publish JavaScript runtime exports", async () => {
-    const packageDirs = ["runtime", "core", "tooling", "postgres", "rest-collections", "deno"] as const;
+  test("packages consumed by the Node host publish JavaScript runtime exports", async () => {
+    const packageDirs = ["runtime", "core", "tooling", "postgres", "rest-collections", "host", "node"] as const;
     const violations: string[] = [];
 
     for (const packageName of packageDirs) {

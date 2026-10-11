@@ -34,10 +34,6 @@ const packageConfigs = {
     dir: "packages/mesh",
     types: ["node"],
   },
-  deno: {
-    dir: "packages/deno",
-    types: ["node"],
-  },
   node: {
     dir: "packages/node",
     types: ["node"],
@@ -359,7 +355,7 @@ function internalPublicRoot(specifier) {
   if (packageName === "runtime") {
     return "chimpbase/runtime";
   }
-  if (packageName === "node" || packageName === "bun" || packageName === "deno") {
+  if (packageName === "node" || packageName === "bun") {
     return `chimpbase/runtime/${packageName}`;
   }
   return `chimpbase/${packageName}`;

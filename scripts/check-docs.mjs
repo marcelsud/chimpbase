@@ -197,7 +197,7 @@ try {
   const gettingStarted = await readFile(join(repoRoot, "docs/getting-started.md"), "utf8");
   const configuration = await readFile(join(repoRoot, "docs/configuration.md"), "utf8");
   await writeFile(join(stageRoot, "chimpbase.app.ts"), extractSnippet(gettingStarted, "getting-started"));
-  for (const [runtime, markdown] of [["bun", gettingStarted], ["node", configuration], ["deno", configuration]]) {
+  for (const [runtime, markdown] of [["bun", gettingStarted], ["node", configuration]]) {
     await checkLaunch(runtime, extractSnippet(markdown, runtime, "chimpbase-run"), gettingStarted, binDir);
   }
 } finally {

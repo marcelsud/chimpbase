@@ -16,7 +16,7 @@ Every customer app that runs on the cloud is orchestrated by [`@chimpbase/deploy
 - **Observability** — logs + metrics in the dashboard. OpenTelemetry sink for traces.
 - **Idle sleep** — apps sleep after inactivity and wake on the next request.
 - **Secrets** — `chimpctl secrets set NAME VALUE`, AES-256-GCM envelope-encrypted at rest, rotated via the same command.
-- **Builds** — `git push` or `chimpctl deploy` → rootless kaniko build → private registry → deploy. Supports Bun, Node, and Deno out of the box; buildpacks for everything else.
+- **Builds** — `git push` or `chimpctl deploy` → rootless kaniko build → private registry → deploy. Supports Bun and Node out of the box; buildpacks for everything else.
 
 ## How you'll deploy
 

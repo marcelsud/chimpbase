@@ -13,7 +13,6 @@
     "packages/blobs/dist",
     "packages/bun/dist",
     "packages/core/dist",
-    "packages/deno/dist",
     "packages/host/dist",
     "packages/mesh/dist",
     "packages/node/dist",
@@ -103,16 +102,6 @@
       "import": "./packages/bun/dist/src/cli.js",
       "default": "./packages/bun/dist/src/cli.js"
     },
-    "./runtime/deno": {
-      "types": "./packages/deno/dist/src/library.d.ts",
-      "import": "./packages/deno/dist/src/library.js",
-      "default": "./packages/deno/dist/src/library.js"
-    },
-    "./runtime/deno/cli": {
-      "types": "./packages/deno/dist/src/cli.d.ts",
-      "import": "./packages/deno/dist/src/cli.js",
-      "default": "./packages/deno/dist/src/cli.js"
-    },
     "./runtime/node": {
       "types": "./packages/node/dist/src/library.d.ts",
       "import": "./packages/node/dist/src/library.js",
@@ -180,7 +169,7 @@
     }
   },
   "scripts": {
-    "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host deno node bun rest-collections otel auth blobs webhooks pact mesh",
+    "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host node bun rest-collections otel auth blobs webhooks pact mesh",
     "build:check": "node ./scripts/build-package.mjs --check",
     "ci:check": "bun run modules:check && bun run typecheck && bun run check:any && bun run test && bun run docs:check && bun run docs:build && bun run publish:dry-run",
     "check:any": "node ./scripts/check-any.mjs",
@@ -191,9 +180,6 @@
     "dev:node:basic": "bun run --filter @chimpbase/example-node-basic dev",
     "dev:node:intermediate": "bun run --filter @chimpbase/example-node-intermediate dev",
     "dev:node:advanced": "bun run --filter @chimpbase/example-node-advanced dev",
-    "dev:deno:basic": "cd examples/deno/basic && deno task dev",
-    "dev:deno:intermediate": "cd examples/deno/intermediate && deno task dev",
-    "dev:deno:advanced": "cd examples/deno/advanced && deno task dev",
     "prepack": "bun run build:publish:packages && bun run smoke:package",
     "publish:dry-run": "npm pack --dry-run",
     "release:check": "bun run ci:check",

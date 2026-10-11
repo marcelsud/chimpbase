@@ -22,8 +22,6 @@ const expectedExports = {
   "./runtime": "./packages/runtime/dist/index.js",
   "./runtime/bun": "./packages/bun/dist/src/library.js",
   "./runtime/bun/cli": "./packages/bun/dist/src/cli.js",
-  "./runtime/deno": "./packages/deno/dist/src/library.js",
-  "./runtime/deno/cli": "./packages/deno/dist/src/cli.js",
   "./runtime/node": "./packages/node/dist/src/library.js",
   "./runtime/node/cli": "./packages/node/dist/src/cli.js",
   "./tooling": "./packages/tooling/dist/src/index.js",
@@ -46,7 +44,6 @@ const expectedFiles = [
   "packages/blobs/dist",
   "packages/bun/dist",
   "packages/core/dist",
-  "packages/deno/dist",
   "packages/host/dist",
   "packages/mesh/dist",
   "packages/node/dist",
@@ -76,7 +73,7 @@ const expectedDependencies = {
   typescript: "^5.9.3",
 };
 const expectedScripts = {
-  "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host deno node bun rest-collections otel auth blobs webhooks pact mesh",
+  "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host node bun rest-collections otel auth blobs webhooks pact mesh",
   "build:check": "node ./scripts/build-package.mjs --check",
   prepack: "bun run build:publish:packages && bun run smoke:package",
   "publish:dry-run": "npm pack --dry-run",
@@ -180,7 +177,6 @@ async function validateStagedPackage(exports) {
     const importsByRuntime = {
       node: [],
       bun: [],
-      deno: [],
     };
     for (const [exportName, conditions] of Object.entries(exports)) {
       if (exportName.startsWith("./runtime/") && exportName.endsWith("/cli")) {
@@ -188,16 +184,13 @@ async function validateStagedPackage(exports) {
       }
       const runtime = exportName === "./runtime/bun"
         ? "bun"
-        : exportName === "./runtime/deno"
-          ? "deno"
-          : "node";
+        : "node";
       importsByRuntime[runtime].push(pathToFileURL(resolve(stageRoot, conditions.default)).href);
     }
 
     for (const [runtime, command, commandArgs] of [
       ["node", process.execPath, ["--input-type=module", "--eval"]],
       ["bun", "bun", ["--eval"]],
-      ["deno", "deno", ["eval"]],
     ]) {
       const source = `for (const specifier of ${JSON.stringify(importsByRuntime[runtime])}) await import(specifier);`;
       await runSubprocess(`${runtime} library exports`, command, [...commandArgs, source], stageRoot);
@@ -206,7 +199,6 @@ async function validateStagedPackage(exports) {
     for (const [exportName, command, commandArgs] of [
       ["./runtime/node/cli", process.execPath, []],
       ["./runtime/bun/cli", "bun", []],
-      ["./runtime/deno/cli", "deno", ["run", "--allow-env"]],
     ]) {
       const target = resolve(stageRoot, exports[exportName].default);
       await runExpectedFailure(
