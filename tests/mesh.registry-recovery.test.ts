@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
@@ -179,5 +180,61 @@ testPg("heartbeat recovery commits independently of an action rollback", async (
     release();
     await host.close();
     await pool.end();
+  }
+});
+
+testPg("shutdown releases every service resource when PostgreSQL connections are unavailable", async () => {
+  if (!pgUrl) throw new Error("PostgreSQL test URL missing");
+  const upstreamUrl = new URL(pgUrl);
+  const sockets = new Set<Socket>();
+  const proxy = createServer((client) => {
+    const upstream = connect({ host: upstreamUrl.hostname, port: Number(upstreamUrl.port || 5432) });
+    sockets.add(client); sockets.add(upstream);
+    client.pipe(upstream); upstream.pipe(client);
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+    client.on("close", () => { sockets.delete(client); upstream.destroy(); });
+    upstream.on("close", () => { sockets.delete(upstream); client.destroy(); });
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const address = proxy.address();
+  if (address === null || typeof address === "string") throw new Error("proxy address missing");
+  const url = new URL(pgUrl); url.hostname = "127.0.0.1"; url.port = String(address.port);
+  const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-mesh-shutdown-"));
+  cleanupDirs.push(projectDir);
+  const host = await createChimpbase({
+    projectDir, storage: { engine: "postgres", url: url.toString(), connectionTimeoutMs: 100, queryTimeoutMs: 100 },
+  });
+  const stopped: string[] = [];
+  const cleanupFailure = new Error("first resource cleanup failed");
+  const reported = spyOn(console, "error").mockImplementation(() => {});
+  host.register(chimpbaseMesh({
+    heartbeatMs: 20, transport: "local-only", services: [
+      service({ name: "first", stopped: () => { stopped.push("first"); throw cleanupFailure; } }),
+      service({ name: "second", stopped: () => { stopped.push("second"); } }),
+    ],
+  }), action("unavailableDatabase", () => "unexpected invocation"));
+  try {
+    const started = await host.start({ serve: false, runWorker: false });
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    await expect(host.executeAction("unavailableDatabase")).rejects.toThrow();
+    await started.stop();
+    expect(stopped).toEqual(["first", "second"]);
+    const reports: readonly (readonly unknown[])[] = reported.mock.calls;
+    const shutdownReports = reports.filter((call) => call[0] === 'onStop hook "__chimpbase.mesh.shutdown" failed:');
+    expect(shutdownReports).toHaveLength(1);
+    const error: unknown = shutdownReports[0]?.[1];
+    expect(error).toBeInstanceOf(AggregateError);
+    if (!(error instanceof AggregateError)) throw new Error("expected aggregate shutdown error");
+    const causes: readonly unknown[] = error.errors;
+    expect(causes).toHaveLength(2);
+    expect(causes[0]).toBeInstanceOf(Error);
+    expect(causes[1]).toBe(cleanupFailure);
+  } finally {
+    reported.mockRestore();
+    await host.close();
+    for (const socket of sockets) socket.destroy();
+    if (proxy.listening) await new Promise<void>((resolve) => proxy.close(() => resolve()));
   }
 });

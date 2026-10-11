@@ -901,7 +901,11 @@ export interface ChimpbaseRegistrationTarget {
     options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
   ): ChimpbaseRouteHandler;
   registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
-  registerOnStop?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
+  registerOnStop?(
+    name: string,
+    handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+    options?: Pick<ChimpbaseOnStopRegistration, "transactional">,
+  ): void;
   registerContextExtension?(registration: ChimpbaseContextExtensionRegistration): void;
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
@@ -1001,6 +1005,7 @@ export interface ChimpbaseOnStopRegistration<
   handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void;
   kind: "onStop";
   name: string;
+  transactional?: boolean;
 }
 
 export type ChimpbasePluginDependency = string | ChimpbasePluginRegistration;
@@ -1392,8 +1397,9 @@ export function onStart<TActions extends ChimpbaseActionMap = ChimpbaseActionReg
 export function onStop<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
   name: string,
   handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void,
+  options?: Pick<ChimpbaseOnStopRegistration, "transactional">,
 ): ChimpbaseOnStopRegistration<TActions> {
-  return { handler, kind: "onStop", name };
+  return { ...options, handler, kind: "onStop", name };
 }
 
 export function contextExtension<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
@@ -1786,7 +1792,7 @@ export function register(
         target.registerOnStart?.(entry.name, entry.handler);
         break;
       case "onStop":
-        target.registerOnStop?.(entry.name, entry.handler);
+        target.registerOnStop?.(entry.name, entry.handler, { transactional: entry.transactional });
         break;
       case "contextExtension":
         if (typeof target.registerContextExtension !== "function") {

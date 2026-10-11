@@ -329,15 +329,32 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
         clearInterval(heartbeatState.timer);
         heartbeatState.timer = null;
       }
-      await heartbeatState.running;
-      await ctx.action("__chimpbase.mesh.deregister");
+      const errors: unknown[] = [];
+      try {
+        await heartbeatState.running;
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await ctx.action("__chimpbase.mesh.deregister");
+      } catch (error) {
+        errors.push(error);
+      }
 
       for (const svc of services) {
         if ((svc.stopped !== undefined)) {
-          await svc.stopped();
+          try {
+            await svc.stopped();
+          } catch (error) {
+            errors.push(error);
+          }
         }
       }
-    }),
+
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "mesh shutdown failed");
+      }
+    }, { transactional: false }),
   );
 
   entries.push(

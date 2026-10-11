@@ -6,6 +6,7 @@ import { applyPostgresSqlMigrations } from "../packages/postgres/src/index.ts";
 import {
   action,
   cron,
+  subscription,
   v,
   worker,
   workflow,
@@ -598,4 +599,164 @@ describeIfPg("PostgreSQL queue durability", () => {
       await pool.query("DELETE FROM _chimpbase_cron_schedules WHERE schedule_name = $1", [scheduleName]);
     }
   });
+
+  test("heterogeneous hosts preserve foreign crons and leave their schedules and jobs for a replacement host", async () => {
+    const scheduleA = uniqueName("cron-owner-a");
+    const scheduleB = uniqueName("cron-owner-b");
+    let executions = 0;
+    const registrationA = cron(scheduleA, "* * * * *", () => { executions += 1; });
+    const a = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() }, registrations: [registrationA],
+    });
+    const b = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() },
+      registrations: [cron(scheduleB, "* * * * *", () => { throw new Error("foreign cron ran"); })],
+    });
+    let replacement: typeof a | undefined;
+    let aClosed = false;
+    try {
+      await a.syncCronSchedules();
+      await b.syncCronSchedules();
+      await a.close();
+      aClosed = true;
+      await pool.query("UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = $1 WHERE schedule_name = $2", [Date.now() - 120_000, scheduleA]);
+      expect(await b.processNextCronSchedule()).toBeNull();
+      const schedules = await pool.query<{ schedule_name: string; lease_token: string | null }>(
+        "SELECT schedule_name, lease_token FROM _chimpbase_cron_schedules WHERE schedule_name = ANY($1::text[]) ORDER BY schedule_name",
+        [[scheduleA, scheduleB]],
+      );
+      expect(schedules.rows).toEqual([
+        { schedule_name: scheduleA, lease_token: null }, { schedule_name: scheduleB, lease_token: null },
+      ]);
+      replacement = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() }, registrations: [registrationA],
+      });
+      expect((await replacement.processNextCronSchedule())?.scheduleName).toBe(scheduleA);
+      expect(await b.processNextQueueJob()).toBeNull();
+      const jobs = await pool.query<{ status: string; attempt_count: number }>(
+        "SELECT status, attempt_count FROM _chimpbase_queue_jobs WHERE payload_json->>'scheduleName' = $1", [scheduleA],
+      );
+      expect(jobs.rows).toEqual([{ status: "pending", attempt_count: 0 }]);
+      expect(await replacement.processNextQueueJob()).not.toBeNull();
+      expect(executions).toBe(1);
+    } finally {
+      if (!aClosed) await a.close();
+      await b.close();
+      await replacement?.close();
+      await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'scheduleName' = ANY($1::text[])", [[scheduleA, scheduleB]]);
+      await pool.query("DELETE FROM _chimpbase_cron_runs WHERE schedule_name = ANY($1::text[])", [[scheduleA, scheduleB]]);
+      await pool.query("DELETE FROM _chimpbase_cron_schedules WHERE schedule_name = ANY($1::text[])", [[scheduleA, scheduleB]]);
+    }
+  });
+
+  for (const claimMode of ["single", "batch"] as const) {
+    test(`async deliveries target exact subscriptions and skip unsupported legacy events (${claimMode})`, async () => {
+      const eventName = uniqueName(`subscription-${claimMode}`);
+      const legacyEvent = uniqueName(`legacy-${claimMode}`);
+      const calls: string[] = [];
+      const a = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        registrations: [
+          subscription(eventName, () => { calls.push("left"); }, { dispatch: "async", name: "left" }),
+          subscription(eventName, () => { throw new Error("right belongs to the replacement"); }, { dispatch: "async", name: "right" }),
+          action("emit", (ctx) => { ctx.pubsub.publish(eventName, { value: 1 }); }),
+        ],
+      });
+      const b = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        registrations: [
+          subscription(eventName, () => { calls.push("right"); }, { dispatch: "async", name: "right" }),
+          subscription(legacyEvent, () => { calls.push("legacy"); }, { dispatch: "async", name: "legacy" }),
+        ],
+      });
+      if (claimMode === "single") {
+        a.engine.getBlobsAdapter().claimNextQueueJobs = undefined;
+        b.engine.getBlobsAdapter().claimNextQueueJobs = undefined;
+      }
+      try {
+        await a.executeAction("emit");
+        a.registry.subscriptions.set(eventName, (a.registry.subscriptions.get(eventName) ?? []).filter((entry) => entry.name === "left"));
+        await pool.query(
+          "INSERT INTO _chimpbase_queue_jobs (queue_name, payload_json, status, available_at_ms, attempt_count) VALUES ($1, $2::jsonb, 'pending', 0, 0)",
+          ["__chimpbase.subscription.run", JSON.stringify({ eventName: legacyEvent, payload: {}, payloadJson: "{}" })],
+        );
+        expect(await a.processNextQueueJob()).not.toBeNull();
+        expect(calls).toEqual(["left"]);
+        expect(await a.processNextQueueJob()).toBeNull();
+        const pending = await pool.query<{ subscription: string | null; attempt_count: number }>(
+          "SELECT payload_json->>'subscriptionName' AS subscription, attempt_count FROM _chimpbase_queue_jobs WHERE payload_json->>'eventName' = ANY($1::text[]) AND status = 'pending' ORDER BY id",
+          [[eventName, legacyEvent]],
+        );
+        expect(pending.rows).toEqual([{ subscription: "right", attempt_count: 0 }, { subscription: null, attempt_count: 0 }]);
+        expect(await b.engine.processNextQueueJobs(5)).toHaveLength(claimMode === "single" ? 1 : 2);
+        if (claimMode === "single") expect(await b.processNextQueueJob()).not.toBeNull();
+        expect(calls).toEqual(["left", "right", "legacy"]);
+        expect(await b.processNextQueueJob()).toBeNull();
+        const completed = await pool.query<{ status: string; attempt_count: number }>(
+          "SELECT status, attempt_count FROM _chimpbase_queue_jobs WHERE payload_json->>'eventName' = ANY($1::text[]) ORDER BY id", [[eventName, legacyEvent]],
+        );
+        expect(completed.rows).toEqual(Array.from({ length: 3 }, () => ({ status: "completed", attempt_count: 1 })));
+      } finally {
+        await a.close();
+        await b.close();
+        await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'eventName' = ANY($1::text[])", [[eventName, legacyEvent]]);
+        await pool.query("DELETE FROM _chimpbase_events WHERE event_name = $1", [eventName]);
+      }
+    });
+
+    test(`workflow claims respect exact persisted definitions across restarts and expired leases (${claimMode})`, async () => {
+      const workflowName = uniqueName(`workflow-version-${claimMode}`);
+      const workflowA = uniqueName("workflow-a");
+      const workflowB = uniqueName("workflow-b");
+      const executions: number[] = [];
+      const definition = (version: number) => workflow({
+        name: workflowName, version, initialState: () => ({}),
+        run(ctx) { executions.push(version); return ctx.complete(); },
+      });
+      const a = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        registrations: [definition(1), action("launch", async (ctx) => await ctx.workflow.start(workflowName, {}, { workflowId: workflowA }))],
+      });
+      const b = await createChimpbase({
+        storage: { engine: "postgres", url: postgresUrl() },
+        registrations: [definition(2), action("launch", async (ctx) => await ctx.workflow.start(workflowName, {}, { workflowId: workflowB }))],
+      });
+      let replacement: typeof a | undefined;
+      let aClosed = false;
+      if (claimMode === "single") b.engine.getBlobsAdapter().claimNextQueueJobs = undefined;
+      try {
+        await a.executeAction("launch");
+        await a.close();
+        aClosed = true;
+        await pool.query(
+          "UPDATE _chimpbase_queue_jobs SET status = 'processing', attempt_count = 1, lease_expires_at_ms = 0 WHERE payload_json->>'workflowId' = $1",
+          [workflowA],
+        );
+        expect(await b.processNextQueueJob()).toBeNull();
+        const untouched = await pool.query<{ status: string; attempt_count: number; lease_expires_at_ms: number }>(
+          "SELECT status, attempt_count, lease_expires_at_ms::double precision AS lease_expires_at_ms FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1",
+          [workflowA],
+        );
+        expect(untouched.rows).toEqual([{ status: "processing", attempt_count: 1, lease_expires_at_ms: 0 }]);
+        await b.executeAction("launch");
+        expect(await b.processNextQueueJob()).not.toBeNull();
+        expect(executions).toEqual([2]);
+        replacement = await createChimpbase({ storage: { engine: "postgres", url: postgresUrl() }, registrations: [definition(1)] });
+        if (claimMode === "single") replacement.engine.getBlobsAdapter().claimNextQueueJobs = undefined;
+        expect(await replacement.processNextQueueJob()).not.toBeNull();
+        expect(executions).toEqual([2, 1]);
+        const completed = await pool.query<{ status: string; attempt_count: number }>(
+          "SELECT status, attempt_count FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = ANY($1::text[]) ORDER BY id",
+          [[workflowA, workflowB]],
+        );
+        expect(completed.rows).toEqual([{ status: "completed", attempt_count: 2 }, { status: "completed", attempt_count: 1 }]);
+      } finally {
+        if (!aClosed) await a.close();
+        await b.close();
+        await replacement?.close();
+        await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = ANY($1::text[])", [[workflowA, workflowB]]);
+        await pool.query("DELETE FROM _chimpbase_workflow_instances WHERE workflow_id = ANY($1::text[])", [[workflowA, workflowB]]);
+      }
+    });
+  }
 });

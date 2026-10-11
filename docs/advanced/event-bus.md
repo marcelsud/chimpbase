@@ -6,7 +6,11 @@ An event bus delivers committed pub/sub events to other processes. For applicati
 
 PostgreSQL hosts create a `PostgresPollingEventBus` automatically. Each host starts it when `host.start()` runs. SQLite and memory do not provide cross-process event delivery.
 
-With `subscriptions.dispatch: "async"`, subscription jobs are also stored in the shared queue. Any worker with the same registrations can execute them. Use stable names and `idempotent: true` to deduplicate successful subscription deliveries.
+With `subscriptions.dispatch: "async"`, subscription jobs are also stored in the shared queue. New jobs target each distinct subscription name for the event; only workers registering that asynchronous handler can claim them. Nodes with different handler sets cannot complete each other's named deliveries. Give handlers stable, unique names when distributing different handler sets across nodes, and use `idempotent: true` to deduplicate successful deliveries.
+
+Handlers without a name share one event group, and duplicate names share one named group. Each group's job runs all matching handlers on the claiming node once; replicas processing that group must register the same handlers.
+
+Older jobs without a subscription name keep their event-wide dispatch behavior. Before deploying nodes with different subscriptions to the same event, drain those jobs on workers registering the complete historical handler set. Their envelopes do not record the original individual destinations.
 
 Queue retries can repeat external effects. Use an idempotency key for email, payments, or calls to another service. See [Workers](/workers) for the transaction and retry behavior.
 

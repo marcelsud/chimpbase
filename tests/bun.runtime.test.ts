@@ -66,6 +66,89 @@ test("named SQLite migrations run once, apply new names and roll back failed bat
   }
 });
 
+test("shared SQLite claims only registered cron, subscription and workflow destinations", async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-shared-destinations-"));
+  cleanupDirs.push(projectDir);
+  const storage = { engine: "sqlite" as const, path: join(projectDir, "shared.sqlite") };
+  const calls: string[] = [];
+  const a = await createChimpbase({
+    projectDir, storage,
+    registrations: [
+      cron("cron-a", "* * * * *", () => { calls.push("cron"); }),
+      subscription("shared", () => { calls.push("left"); }, { dispatch: "async", name: "left" }),
+      subscription("shared", () => { throw new Error("right belongs to b"); }, { dispatch: "async", name: "right" }),
+      workflow({ name: "versioned", version: 1, initialState: () => ({}),
+        run(ctx) { calls.push("workflow"); return ctx.complete(); },
+      }),
+      action("launch", async (ctx) => {
+        ctx.pubsub.publish("shared", {});
+        await ctx.workflow.start("versioned", {}, { workflowId: "one" });
+      }),
+    ],
+  });
+  const b = await createChimpbase({
+    projectDir, storage,
+    registrations: [
+      cron("cron-b", "* * * * *", () => { throw new Error("cron b is not due"); }),
+      subscription("shared", () => { calls.push("right"); }, { dispatch: "async", name: "right" }),
+      workflow({ name: "versioned", version: 2, initialState: () => ({}), run(ctx) { return ctx.complete(); } }),
+    ],
+  });
+  try {
+    await a.syncCronSchedules();
+    await b.syncCronSchedules();
+    const adapter = a.engine.getBlobsAdapter();
+    const schedules = await adapter.query(
+      "SELECT schedule_name FROM _chimpbase_cron_schedules WHERE schedule_name IN ('cron-a', 'cron-b') ORDER BY schedule_name",
+      [], v.object({ schedule_name: v.string() }),
+    );
+    expect(schedules).toEqual([{ schedule_name: "cron-a" }, { schedule_name: "cron-b" }]);
+    await adapter.query("UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = 'cron-a'", [Date.now() - 120_000], v.object({}));
+    expect(await b.processNextCronSchedule()).toBeNull();
+    await a.executeAction("launch");
+    a.registry.subscriptions.set("shared", (a.registry.subscriptions.get("shared") ?? []).filter((entry) => entry.name === "left"));
+    expect((await a.processNextCronSchedule())?.scheduleName).toBe("cron-a");
+    expect(await b.processNextQueueJob()).not.toBeNull();
+    expect(calls).toEqual(["right"]);
+    expect(await b.processNextQueueJob()).toBeNull();
+    const pending = await adapter.query(
+      "SELECT attempt_count FROM _chimpbase_queue_jobs WHERE status = 'pending' ORDER BY id",
+      [], v.object({ attempt_count: v.number() }),
+    );
+    expect(pending).toEqual([{ attempt_count: 0 }, { attempt_count: 0 }, { attempt_count: 0 }]);
+    await a.drain();
+    expect([...calls].sort()).toEqual(["cron", "left", "right", "workflow"]);
+    const completed = await adapter.query(
+      "SELECT status, attempt_count FROM _chimpbase_queue_jobs ORDER BY id",
+      [], v.object({ status: v.string(), attempt_count: v.number() }),
+    );
+    expect(completed).toEqual(Array.from({ length: 4 }, () => ({ status: "completed", attempt_count: 1 })));
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+for (const name of [undefined, "shared-name"]) {
+  test(`async publishing delivers shared ${name === undefined ? "unnamed" : "named"} subscription identities once`, async () => {
+    const calls: string[] = [];
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      registrations: [
+        action("emit", (ctx) => { ctx.pubsub.publish("shared", {}); }),
+        subscription("shared", () => { calls.push("left"); }, { dispatch: "async", name }),
+        subscription("shared", () => { calls.push("right"); }, { dispatch: "async", name }),
+      ],
+    });
+    try {
+      await host.executeAction("emit");
+      expect(await host.processNextQueueJob()).not.toBeNull();
+      expect(calls).toEqual(["left", "right"]);
+      expect(await host.processNextQueueJob()).toBeNull();
+    } finally { await host.close(); }
+  });
+}
+
 for (const engine of ["memory", "sqlite"] as const) {
   test(`shared SQLite Kysely preserves query results, streaming and transaction restrictions (${engine})`, async () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-kysely-"));

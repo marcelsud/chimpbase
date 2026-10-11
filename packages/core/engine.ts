@@ -131,6 +131,12 @@ export interface ChimpbaseQueueJobRecord {
   queue_name: string;
 }
 
+export interface ChimpbaseQueueClaimTargets {
+  cronScheduleNames: readonly string[];
+  subscriptions: readonly { eventName: string; subscriptionName: string }[];
+  workflows: readonly { workflowName: string; workflowVersion: number }[];
+}
+
 export type ChimpbaseTelemetryRecord =
   | {
       attributes: ChimpbaseTelemetryAttributes;
@@ -317,12 +323,17 @@ export interface ChimpbaseEngineAdapter {
     leaseToken: string,
   ): Promise<void>;
   beginTransaction(): Promise<void>;
-  claimNextCronSchedule(leaseMs: number): Promise<ClaimedCronScheduleRow | null>;
-  claimNextQueueJob(leaseMs: number, queueNames: readonly string[]): Promise<ChimpbaseQueueJobRecord | null>;
+  claimNextCronSchedule(leaseMs: number, scheduleNames: readonly string[]): Promise<ClaimedCronScheduleRow | null>;
+  claimNextQueueJob(
+    leaseMs: number,
+    queueNames: readonly string[],
+    targets: ChimpbaseQueueClaimTargets,
+  ): Promise<ChimpbaseQueueJobRecord | null>;
   claimNextQueueJobs?(
     leaseMs: number,
     limit: number,
     queueNames: readonly string[],
+    targets: ChimpbaseQueueClaimTargets,
   ): Promise<ChimpbaseQueueJobRecord[]>;
   collectionDelete(name: string, filter?: ChimpbaseCollectionFilter): Promise<number>;
   collectionFind<TDocument>(
@@ -824,7 +835,7 @@ export class ChimpbaseEngine {
   }
 
   async processNextCronSchedule(): Promise<ChimpbaseCronScheduleExecutionResult | null> {
-    const claimed = await this.adapter.claimNextCronSchedule(this.worker.leaseMs);
+    const claimed = await this.adapter.claimNextCronSchedule(this.worker.leaseMs, [...this.registry.crons.keys()]);
     if (!(claimed !== null)) {
       return null;
     }
@@ -832,7 +843,6 @@ export class ChimpbaseEngine {
     const registration = this.registry.crons.get(claimed.schedule_name);
     if (!(registration !== undefined)) {
       await this.adapter.releaseCronScheduleLease(claimed.schedule_name, claimed.lease_token);
-      await this.adapter.deleteCronSchedule(claimed.schedule_name);
       return null;
     }
 
@@ -898,17 +908,11 @@ export class ChimpbaseEngine {
     for (const [name, registration] of this.registry.crons) {
       const existing = persistedByName.get(name);
       if ((existing !== undefined) && existing.cron_expression === registration.schedule) {
-        persistedByName.delete(name);
         continue;
       }
 
       const nextFireAtMs = computeNextCronFireTime(registration.schedule, now);
       await this.adapter.upsertCronSchedule(name, registration.schedule, nextFireAtMs);
-      persistedByName.delete(name);
-    }
-
-    for (const staleName of persistedByName.keys()) {
-      await this.adapter.deleteCronSchedule(staleName);
     }
   }
 
@@ -920,12 +924,17 @@ export class ChimpbaseEngine {
   async processNextQueueJobs(limit: number): Promise<ChimpbaseQueueExecutionResult[]> {
     const batchSize = Math.max(1, Math.floor(limit));
     const queueNames = this.getClaimableQueueNames();
-    const jobs = (this.adapter.claimNextQueueJobs !== undefined)
-      ? await this.adapter.claimNextQueueJobs(this.worker.leaseMs, batchSize, queueNames)
-      : [];
-    const claimedJobs = jobs.length > 0
-      ? jobs
-      : await this.claimSingleQueueJob(queueNames);
+    const targets: ChimpbaseQueueClaimTargets = {
+      cronScheduleNames: [...this.registry.crons.keys()],
+      subscriptions: [...this.registry.subscriptions].flatMap(([eventName, entries]) => entries
+        .filter((entry) => this.isAsyncSubscription(entry))
+        .map((entry) => ({ eventName, subscriptionName: entry.name }))),
+      workflows: [...this.registry.workflows].flatMap(([workflowName, versions]) =>
+        [...versions.keys()].map((workflowVersion) => ({ workflowName, workflowVersion }))),
+    };
+    const claimedJobs = (this.adapter.claimNextQueueJobs !== undefined)
+      ? await this.adapter.claimNextQueueJobs(this.worker.leaseMs, batchSize, queueNames, targets)
+      : await this.claimSingleQueueJob(queueNames, targets);
 
     const results: ChimpbaseQueueExecutionResult[] = [];
     for (const job of claimedJobs) {
@@ -936,8 +945,11 @@ export class ChimpbaseEngine {
     return results;
   }
 
-  private async claimSingleQueueJob(queueNames: readonly string[]): Promise<ChimpbaseQueueJobRecord[]> {
-    const job = await this.adapter.claimNextQueueJob(this.worker.leaseMs, queueNames);
+  private async claimSingleQueueJob(
+    queueNames: readonly string[],
+    targets: ChimpbaseQueueClaimTargets,
+  ): Promise<ChimpbaseQueueJobRecord[]> {
+    const job = await this.adapter.claimNextQueueJob(this.worker.leaseMs, queueNames, targets);
     return (job !== null) ? [job] : [];
   }
 
@@ -1257,16 +1269,19 @@ export class ChimpbaseEngine {
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
     moduleName: string | null = null,
     name = "__lifecycle",
+    transactional = true,
   ): Promise<void> {
     const detachedAdapter = this.createDetachedAdapter?.();
     let active = true;
     try {
       this.telemetryExecutionDepth += 1;
-      await this.runInTransaction(async () => await this.runWithActionInvoker(async () => {
+      const invoke = async () => await this.runWithActionInvoker(async () => {
         const ctx = this.createContext({ kind: "lifecycle", module: moduleName, name },
           () => active ? this.adapter : detachedAdapter ?? this.adapter);
         await handler(ctx);
-      }, moduleName));
+      }, moduleName);
+      if (transactional) await this.runInTransaction(invoke);
+      else await invoke();
     } finally {
       active = false;
       this.finishTelemetryExecution();
@@ -2750,9 +2765,9 @@ export class ChimpbaseEngine {
       throw new Error(`module event ${name} must be published inside a runtime transaction`);
     }
     const subscriptions = this.registry.subscriptions.get(name) ?? [];
-    const deliverySubscriptions = moduleEvent
-      ? subscriptions.filter((entry) => entry.module != null).map((entry) => entry.name)
-      : [];
+    const deliverySubscriptions = [...new Set(subscriptions
+      .filter((entry) => moduleEvent ? entry.module != null : this.isAsyncSubscription(entry))
+      .map((entry) => entry.name))];
     const event: ChimpbaseEventRecord = {
       deliverySubscriptions,
       dispatch: !moduleEvent
@@ -2811,13 +2826,17 @@ export class ChimpbaseEngine {
 
   private async enqueueSubscriptionDispatchJobs(events: readonly ChimpbaseEventRecord[]): Promise<void> {
     for (const event of events) {
-      if (!(this.registry.subscriptions.get(event.name) ?? []).some((entry) => this.isAsyncSubscription(entry))) continue;
-      await this.adapter.queueEnqueue(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
-        eventId: event.id,
-        eventName: event.name,
-        payload: event.payload,
-        payloadJson: event.payloadJson,
-      } satisfies SubscriptionQueuePayload);
+      const subscriptionNames = new Set((this.registry.subscriptions.get(event.name) ?? [])
+        .filter((entry) => this.isAsyncSubscription(entry)).map((entry) => entry.name));
+      for (const subscriptionName of subscriptionNames) {
+        await this.adapter.queueEnqueue(INTERNAL_SUBSCRIPTION_QUEUE_NAME, {
+          eventId: event.id,
+          eventName: event.name,
+          payload: event.payload,
+          payloadJson: event.payloadJson,
+          subscriptionName,
+        } satisfies SubscriptionQueuePayload);
+      }
     }
   }
 
@@ -2859,7 +2878,7 @@ export class ChimpbaseEngine {
           persistedCount = this.pendingEvents.length;
           await this.adapter.persistEvents(events);
           await this.dispatchSubscriptions(events.filter((event) =>
-            (event.deliverySubscriptions?.length ?? 0) === 0
+            !this.registry.eventContracts.has(event.name)
           ), undefined, "sync");
         }
       }

@@ -2,6 +2,8 @@
 
 Cron jobs run on a recurring schedule. Schedules are durable — they survive process restarts and skip missed intervals instead of replaying backlog.
 
+Nodes sharing PostgreSQL synchronize and claim only the schedules they register. Starting a node with a different set of crons does not remove another node's schedules. A schedule with no remaining registered worker stays dormant; intentionally retiring it requires explicitly deleting its row from `_chimpbase_cron_schedules` after removing its registrations from every node.
+
 ## Defining Cron Jobs
 
 ```ts

@@ -7,6 +7,7 @@ import {
   type ChimpbaseContext,
   type ChimpbaseContextExtensionRegistration,
   type ChimpbaseObjectActionHandler,
+  type ChimpbaseOnStopRegistration,
   type ChimpbaseCronHandler,
   type ChimpbaseRegistrationTarget,
   type ChimpbaseRouteHandler,
@@ -160,10 +161,14 @@ function createOwnedRegistrationTarget(
       entry.module = moduleName;
       registry.registrationOwnership.set(`onStart:${name}`, moduleName);
     },
-    registerOnStop(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void {
+    registerOnStop(
+      name: string,
+      handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+      options?: Pick<ChimpbaseOnStopRegistration, "transactional">,
+    ): void {
       if (target.registerOnStop === undefined) throw new Error(`registration target does not support onStop entries: ${name}`);
       ensureRegistrationAvailable(registry, "onStop", name, moduleName);
-      target.registerOnStop(name, handler);
+      target.registerOnStop(name, handler, options);
       const entry = registry.onStopHooks.at(-1);
       if (entry === undefined || entry.name !== name) throw new Error(`onStop registration failed: ${name}`);
       entry.module = moduleName;

@@ -8,6 +8,7 @@ import type {
   ChimpbaseBlobUploadRow,
   ChimpbaseEngineAdapter,
   ChimpbaseEventRecord,
+  ChimpbaseQueueClaimTargets,
   ChimpbaseQueueJobRecord,
 } from "./engine.ts";
 import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "./engine.ts";
@@ -128,20 +129,6 @@ function parseKyselyRows<TResult>(rows: unknown): TResult[] {
 }
 
 
-function buildSqliteQueueNameFilter(
-  queueNames: readonly string[],
-  startingParamIndex: number,
-): { params: unknown[]; sql: string } {
-  if (queueNames.length === 0) {
-    return { params: [], sql: "1 = 0" };
-  }
-
-  return {
-    params: [...queueNames],
-    sql: `queue_name IN (${queueNames.map((_, index) => `?${startingParamIndex + index}`).join(", ")})`,
-  };
-}
-
 export function createSqliteEngineAdapter(
   db: ChimpbaseSqliteDatabase,
   platform: ChimpbasePlatformShim,
@@ -175,7 +162,11 @@ export function createSqliteEngineAdapter(
     async beginTransaction() {
       db.exec("BEGIN IMMEDIATE");
     },
-    async claimNextCronSchedule(leaseMs: number): Promise<(PersistedCronScheduleRow & { lease_token: string }) | null> {
+    async claimNextCronSchedule(
+      leaseMs: number,
+      scheduleNames: readonly string[],
+    ): Promise<(PersistedCronScheduleRow & { lease_token: string }) | null> {
+      if (scheduleNames.length === 0) return null;
       const now = platform.now();
       const leaseToken = platform.randomUUID();
       const leaseExpiresAtMs = now + leaseMs;
@@ -190,6 +181,7 @@ export function createSqliteEngineAdapter(
               next_fire_at_ms
             FROM _chimpbase_cron_schedules
             WHERE next_fire_at_ms <= ?1
+              AND schedule_name IN (SELECT value FROM json_each(?2))
               AND (
                 lease_token IS NULL
                 OR lease_expires_at_ms IS NULL
@@ -198,7 +190,7 @@ export function createSqliteEngineAdapter(
             ORDER BY next_fire_at_ms ASC, schedule_name ASC
             LIMIT 1
           `,
-        ).all(now), cronScheduleRowValidator, "claimed cron schedule rows");
+        ).all(now, JSON.stringify(scheduleNames)), cronScheduleRowValidator, "claimed cron schedule rows");
 
         if (!(schedule !== null && schedule !== undefined)) {
           db.exec("COMMIT");
@@ -244,10 +236,11 @@ export function createSqliteEngineAdapter(
     async claimNextQueueJob(
       leaseMs: number,
       queueNames: readonly string[],
+      targets: ChimpbaseQueueClaimTargets,
     ): Promise<ChimpbaseQueueJobRecord | null> {
+      if (queueNames.length === 0) return null;
       const now = platform.now();
       const leaseExpiresAtMs = now + leaseMs;
-      const queueFilter = buildSqliteQueueNameFilter(queueNames, 2);
 
       db.exec("BEGIN IMMEDIATE");
       try {
@@ -259,7 +252,26 @@ export function createSqliteEngineAdapter(
               payload_json,
               attempt_count
             FROM _chimpbase_queue_jobs
-            WHERE ${queueFilter.sql}
+            WHERE queue_name IN (SELECT value FROM json_each(?2))
+              AND CASE queue_name
+                WHEN '__chimpbase.cron.run' THEN EXISTS (
+                  SELECT 1 FROM json_each(?3, '$.cronScheduleNames') target
+                  WHERE target.value = json_extract(payload_json, '$.scheduleName')
+                )
+                WHEN '__chimpbase.subscription.run' THEN EXISTS (
+                  SELECT 1 FROM json_each(?3, '$.subscriptions') target
+                  WHERE json_extract(target.value, '$.eventName') = json_extract(payload_json, '$.eventName')
+                    AND (json_extract(payload_json, '$.subscriptionName') IS NULL
+                      OR json_extract(target.value, '$.subscriptionName') = json_extract(payload_json, '$.subscriptionName'))
+                )
+                WHEN '__chimpbase.workflow.run' THEN EXISTS (
+                  SELECT 1 FROM _chimpbase_workflow_instances instance,
+                    json_each(?3, '$.workflows') target
+                  WHERE instance.workflow_id = json_extract(payload_json, '$.workflowId')
+                    AND instance.workflow_name = json_extract(target.value, '$.workflowName')
+                    AND instance.workflow_version = json_extract(target.value, '$.workflowVersion')
+                )
+                ELSE 1 END
               AND (
                 (status = 'pending' AND available_at_ms <= ?1)
                 OR
@@ -268,7 +280,7 @@ export function createSqliteEngineAdapter(
             ORDER BY id ASC
             LIMIT 1
           `,
-        ).all(now, ...queueFilter.params), queueJobRowValidator, "claimed queue job rows");
+        ).all(now, JSON.stringify(queueNames), JSON.stringify(targets)), queueJobRowValidator, "claimed queue job rows");
 
         if (!(job !== null && job !== undefined)) {
           db.exec("COMMIT");

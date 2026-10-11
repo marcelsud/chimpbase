@@ -12,6 +12,7 @@ import type {
   ChimpbaseMigration,
   ChimpbasePlatformShim,
   ChimpbaseProjectConfig,
+  ChimpbaseQueueClaimTargets,
   ChimpbaseQueueJobRecord,
 } from "@chimpbase/core";
 import {
@@ -55,6 +56,29 @@ interface PersistedCronScheduleRow {
   cron_expression: string;
   next_fire_at_ms: number;
   schedule_name: string;
+}
+
+function queueTargetFilter(paramIndex: number): string {
+  const targets = `$${paramIndex}::jsonb`;
+  return `CASE queue_name
+    WHEN '__chimpbase.cron.run' THEN EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(${targets}->'cronScheduleNames') target
+      WHERE target = payload_json->>'scheduleName'
+    )
+    WHEN '__chimpbase.subscription.run' THEN EXISTS (
+      SELECT 1 FROM jsonb_array_elements(${targets}->'subscriptions') target
+      WHERE target->>'eventName' = payload_json->>'eventName'
+        AND (payload_json->>'subscriptionName' IS NULL
+          OR target->>'subscriptionName' = payload_json->>'subscriptionName')
+    )
+    WHEN '__chimpbase.workflow.run' THEN EXISTS (
+      SELECT 1 FROM _chimpbase_workflow_instances instance,
+        jsonb_array_elements(${targets}->'workflows') target
+      WHERE instance.workflow_id = payload_json->>'workflowId'
+        AND instance.workflow_name = target->>'workflowName'
+        AND instance.workflow_version::text = target->>'workflowVersion'
+    )
+    ELSE TRUE END`;
 }
 function isKyselyRows<TResult>(rows: unknown): rows is TResult[] {
   return isArrayValue(rows) && rows.every((row) => isJsonObject(row));
@@ -495,7 +519,11 @@ export function createPostgresEngineAdapter(
         throw error;
       }
     },
-    async claimNextCronSchedule(leaseMs: number): Promise<(PersistedCronScheduleRow & { lease_token: string }) | null> {
+    async claimNextCronSchedule(
+      leaseMs: number,
+      scheduleNames: readonly string[],
+    ): Promise<(PersistedCronScheduleRow & { lease_token: string }) | null> {
+      if (scheduleNames.length === 0) return null;
       const now = platform.now();
       const leaseToken = platform.randomUUID();
       const leaseExpiresAtMs = now + leaseMs;
@@ -508,6 +536,7 @@ export function createPostgresEngineAdapter(
               next_fire_at_ms::double precision AS next_fire_at_ms
             FROM _chimpbase_cron_schedules
             WHERE next_fire_at_ms <= $1
+              AND schedule_name = ANY($4::text[])
               AND (
                 lease_token IS NULL
                 OR lease_expires_at_ms IS NULL
@@ -526,12 +555,16 @@ export function createPostgresEngineAdapter(
           WHERE s.schedule_name = candidate.schedule_name
           RETURNING candidate.schedule_name, candidate.cron_expression, candidate.next_fire_at_ms, s.lease_token
         `,
-        [now, leaseToken, leaseExpiresAtMs],
+        [now, leaseToken, leaseExpiresAtMs, scheduleNames],
       );
 
       return result.rows[0] ?? null;
     },
-    async claimNextQueueJob(leaseMs: number, queueNames: readonly string[]): Promise<ChimpbaseQueueJobRecord | null> {
+    async claimNextQueueJob(
+      leaseMs: number,
+      queueNames: readonly string[],
+      targets: ChimpbaseQueueClaimTargets,
+    ): Promise<ChimpbaseQueueJobRecord | null> {
       if (queueNames.length === 0) {
         return null;
       }
@@ -544,6 +577,7 @@ export function createPostgresEngineAdapter(
             SELECT id
             FROM _chimpbase_queue_jobs
             WHERE queue_name = ANY($3::text[])
+              AND ${queueTargetFilter(4)}
               AND (
                 (status = 'pending' AND available_at_ms <= $1)
                 OR
@@ -563,7 +597,7 @@ export function createPostgresEngineAdapter(
           WHERE q.id = candidate.id
           RETURNING q.id, q.queue_name, q.payload_json::text, q.attempt_count
         `,
-        [now, leaseExpiresAtMs, queueNames],
+        [now, leaseExpiresAtMs, queueNames, JSON.stringify(targets)],
       );
       return result.rows[0] ?? null;
     },
@@ -571,6 +605,7 @@ export function createPostgresEngineAdapter(
       leaseMs: number,
       limit: number,
       queueNames: readonly string[],
+      targets: ChimpbaseQueueClaimTargets,
     ): Promise<ChimpbaseQueueJobRecord[]> {
       if (queueNames.length === 0) {
         return [];
@@ -585,6 +620,7 @@ export function createPostgresEngineAdapter(
             SELECT id
             FROM _chimpbase_queue_jobs
             WHERE queue_name = ANY($3::text[])
+              AND ${queueTargetFilter(5)}
               AND (
                 (status = 'pending' AND available_at_ms <= $1)
                 OR
@@ -609,7 +645,7 @@ export function createPostgresEngineAdapter(
           FROM updated
           ORDER BY id ASC
         `,
-        [now, leaseExpiresAtMs, queueNames, batchSize],
+        [now, leaseExpiresAtMs, queueNames, batchSize, JSON.stringify(targets)],
       );
 
       return result.rows;

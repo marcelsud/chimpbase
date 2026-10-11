@@ -82,9 +82,10 @@ export function createHttpDispatcher(
         );
       }
 
+      const responseText = await response.text();
       let body: unknown;
       try {
-        body = await response.json();
+        body = JSON.parse(responseText);
       } catch (error) {
         throw new MeshCallError(
           actionName,
