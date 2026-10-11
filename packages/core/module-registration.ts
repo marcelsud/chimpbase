@@ -3,7 +3,6 @@ import {
   register,
   subscription,
   type ChimpbaseActionHandler,
-  type ChimpbaseActionRegistrationLike,
   type ChimpbaseContext,
   type ChimpbaseContextExtensionRegistration,
   type ChimpbaseObjectActionHandler,
@@ -82,9 +81,6 @@ function createOwnedRegistrationTarget(
   moduleName: string,
 ): ChimpbaseRegistrationTarget {
   return {
-    bindActionInvoker(reference: ChimpbaseActionRegistrationLike): void {
-      target.bindActionInvoker?.(reference);
-    },
     registerAction(
       name: string,
       handler: ChimpbaseActionHandler<unknown, unknown>,

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -301,7 +302,136 @@ describe("@chimpbase/tooling", () => {
         name: "chimpbase.app.ts#health",
       }) as ChimpbaseRegistration,
     );
+    const reloaded = await loadProjectAppDefinition(projectDir);
+    expect(reloaded?.registrations[0]).toMatchObject({ name: "chimpbase.app.ts#health" });
   });
+
+  test("loads original modules from read-only sources and reloads changed app definitions", async () => {
+    const projectDir = await createTempDir("read-only-app");
+    const appPath = resolve(projectDir, "chimpbase.app.ts");
+    const source = `export default {
+      project: { name: "read-only-app" },
+      registrations: [{ kind: "action", name: "source", handler() { throw new Error("from original"); } }],
+    };`;
+    await writeFile(appPath, source);
+    await chmod(projectDir, 0o555);
+    try {
+      const app = await loadProjectAppDefinition(projectDir);
+      expect(app?.project.name).toBe("read-only-app");
+      expect((await loadProjectAppDefinition(projectDir))?.project.name).toBe("read-only-app");
+      expect(await readdir(projectDir)).toEqual(["chimpbase.app.ts"]);
+      const registration = app?.registrations[0];
+      if (registration?.kind !== "action" || typeof registration.handler !== "function") throw new Error("missing action");
+      const handler = registration.handler as () => unknown;
+      try {
+        handler();
+        throw new Error("handler must throw");
+      } catch (error) {
+        expect(error instanceof Error && error.stack?.includes(appPath)).toBe(true);
+        expect(error instanceof Error && error.stack?.includes(".__chimpbase_app_")).toBe(false);
+      }
+    } finally {
+      await chmod(projectDir, 0o755);
+    }
+    await writeFile(appPath, source.replace("read-only-app", "reloaded-app"));
+    expect((await loadProjectAppDefinition(projectDir))?.project.name).toBe("reloaded-app");
+  });
+
+  test("CLI rejects invalid options before invoking any project operation", async () => {
+    let calls = 0;
+    const unexpected = async (): Promise<never> => { calls += 1; throw new Error("project was started"); };
+    const dependencies: RunChimpbaseCliDependencies = {
+      runAction: unexpected, startProject: unexpected, syncModules: unexpected,
+      syncSchema: unexpected, syncWorkflowContracts: unexpected, writeLine() {},
+    };
+    for (const argv of [
+      ["dev", "--typo"], ["dev", "--action"], ["dev", "--action", "--serve"],
+      ["dev", "--action", ""], ["dev", "--project-dir"], ["dev", "--serve=false"],
+      ["dev", "--serve", "false"], ["dev", "unexpected"], ["dev", "--args", "{}"],
+      ["dev", "--action", "ping", "--watch"], ["dev", "--action", "ping", "--worker"],
+      ["dev", "--args", "not-json", "--action", "ping"], ["schema", "generate", "--watch"],
+      ["contracts", "--serve"], ["modules", "sync", "--modules-dir"], ["schema", "unknown"],
+    ]) {
+      await expect(runChimpbaseCli(argv, dependencies)).rejects.toThrow();
+    }
+    expect(calls).toBe(0);
+  });
+
+  test("CLI help exits without invoking any project operation", async () => {
+    const lines: string[] = [];
+    const unexpected = async (): Promise<never> => { throw new Error("project was started"); };
+    const dependencies: RunChimpbaseCliDependencies = {
+      runAction: unexpected, startProject: unexpected, syncModules: unexpected,
+      syncSchema: unexpected, syncWorkflowContracts: unexpected,
+      writeLine(line) { lines.push(line); },
+    };
+    for (const argv of [["--help"], ["dev", "--help"], ["-h"], ["schema", "--help"], ["modules", "check", "--help"]]) {
+      await runChimpbaseCli(argv, dependencies);
+    }
+    expect(lines).toHaveLength(5);
+    expect(lines.every((line) => line.includes("Usage:") && line.includes("--watch"))).toBe(true);
+  });
+
+  test("CLI native watch restarts edited actions and retains SQLite data", async () => {
+    const projectDir = await createTempDir("native-watch");
+    const appPath = resolve(projectDir, "chimpbase.app.ts");
+    const cleanupPath = resolve(projectDir, "cleanup.log");
+    const source = (message: string) => `import { appendFile } from "node:fs/promises";
+    export default {
+      project: { name: "watch-test" },
+      registrations: [
+        { kind: "onStop", name: "cleanup", async handler() {
+          await appendFile(${JSON.stringify(cleanupPath)}, "stopped\\n");
+        } },
+        { kind: "action", name: "message", async handler(ctx) {
+          const count = (await ctx.kv.get("count") ?? 0) + 1;
+          await ctx.kv.set("count", count);
+          return { message: ${JSON.stringify(message)}, count };
+        } },
+        { kind: "route", name: "http", async handler(request, env) {
+          return Response.json(await env.action("message"));
+        } },
+      ],
+    };`;
+    await writeFile(appPath, source("before"));
+    const reservation = Bun.serve({ port: 0, fetch: () => new Response() });
+    const port = reservation.port;
+    reservation.stop(true);
+    const child = spawn("bun", [resolve(import.meta.dir, "../packages/bun/src/cli.ts"), "dev", "--serve", "--watch", "--project-dir", projectDir], {
+      cwd: resolve(import.meta.dir, ".."),
+      env: { ...process.env, CHIMPBASE_SERVER_PORT: String(port), CHIMPBASE_STORAGE_ENGINE: "sqlite", DATABASE_URL: "", CHIMPBASE_DATABASE_URL: "" },
+      detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout?.on("data", (chunk: Buffer) => { output += String(chunk); });
+    child.stderr?.on("data", (chunk: Buffer) => { output += String(chunk); });
+    const waitForMessage = async (message: string): Promise<{ message: string; count: number }> => {
+      const deadline = Date.now() + 6_000;
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}`, { signal: AbortSignal.timeout(500) });
+          const body = await response.json() as { message: string; count: number };
+          if (body.message === message) return body;
+        } catch {}
+        await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+      }
+      throw new Error(`watch did not serve ${message}: ${output.slice(-2_000)}`);
+    };
+    try {
+      const before = await waitForMessage("before");
+      await writeFile(appPath, source("after"));
+      const after = await waitForMessage("after");
+      expect(after.count).toBeGreaterThan(before.count);
+    } finally {
+      if (child.pid !== undefined && child.exitCode === null) process.kill(-child.pid, "SIGTERM");
+      await new Promise<void>((resolveExit) => {
+        if (child.exitCode !== null || child.signalCode !== null) resolveExit();
+        else child.once("exit", () => resolveExit());
+      });
+    }
+    expect(await readFile(cleanupPath, "utf8")).toContain("stopped\n");
+  }, 20_000);
+
   test("CLI preserves default and trailing boolean options", async () => {
     const starts: Array<{ runWorker?: boolean; serve?: boolean }> = [];
     const dependencies: RunChimpbaseCliDependencies = {

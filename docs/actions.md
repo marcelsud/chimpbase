@@ -15,7 +15,7 @@ const greetUser = action("greetUser", async (ctx, name: string) => {
 });
 ```
 
-### With validation (object args)
+### With validation (single input)
 
 ```ts
 import { action, v } from "chimpbase";
@@ -50,6 +50,8 @@ Every action handler receives a `ChimpbaseContext` as its first argument:
 
 The context provides database access, collections, event publication and job queues. See [Context](/context) for the API reference.
 
+Each top-level action runs in a transaction. Nested action calls share that transaction: if a child fails, the entire transaction rolls back, including writes, events and queued jobs. Catching the child's error does not allow the parent to commit; the top-level call rejects with the original failure.
+
 ## Calling Actions
 
 ### From another action
@@ -75,11 +77,29 @@ const todosRoute = route("todos", async (request, env) => {
 
 ### Using action references
 
-When you store an action in a variable, you can pass the reference directly instead of using a string name:
+Pass an action reference to preserve its input and result types:
 
 ```ts
 const result = await ctx.action(createTodo, { title: "Ship it", projectSlug: "core" });
 ```
+
+Inside a runtime handler, the reference is also callable: `await createTodo(input)`. Outside handlers, select the host explicitly with `await host.executeAction(createTodo, input)`; the returned object contains `result` and `emittedEvents`. A reference can be registered in several hosts without choosing a global host.
+
+A validator always describes one input, including arrays:
+
+```ts chimpbase-check:array-action
+import { action, v } from "chimpbase";
+
+const batch = action({
+  name: "batch",
+  args: v.array(v.string()),
+  handler: (_ctx, names) => names.join(","),
+});
+```
+
+Call this action as `await ctx.action(batch, ["a", "b"])`. Tuple actions use separate arguments: `await ctx.action(greetUser, "Alice")`.
+
+String calls are checked when `ChimpbaseContext<Actions>` or `ChimpbaseRouteEnv<Actions>` supplies a typed registry, including registries inferred with `InferActionsFromRecord` or `InferActionsFromModules`. Untyped registries retain dynamic string calls.
 
 For per-action persistence and export options, see [Telemetry](/advanced/telemetry).
 
@@ -120,3 +140,5 @@ export default {
   ],
 } satisfies ChimpbaseAppDefinitionInput;
 ```
+
+Action names must be unique across app registrations and plugins. Duplicate names fail during registration instead of replacing an existing handler.

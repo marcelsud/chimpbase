@@ -1,5 +1,6 @@
-import { access, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { access } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -15,6 +16,7 @@ import {
 } from "@chimpbase/runtime";
 
 const PROJECT_APP_MODULE_FILE = "chimpbase.app.ts";
+const require = createRequire(import.meta.url);
 
 export async function loadProjectAppDefinition(projectDir: string): Promise<ChimpbaseAppDefinition | null> {
   const resolvedProjectDir = resolve(projectDir);
@@ -39,24 +41,17 @@ export async function loadChimpbaseAppDefinitionModule(
   modulePath: string,
   projectDir = dirname(modulePath),
 ): Promise<ChimpbaseAppDefinition> {
-  const moduleExtension = extname(modulePath);
-  const tempModulePath = join(
-    dirname(modulePath),
-    `.__chimpbase_app_${globalThis.crypto.randomUUID()}${moduleExtension.length > 0 ? moduleExtension : ".ts"}`,
-  );
-
-  await writeFile(tempModulePath, await readFile(modulePath, "utf8"));
-
-  try {
-    const moduleExports: unknown = await import(pathToFileURL(tempModulePath).href);
-    if (!isJsonObject(moduleExports)) {
-      throw new Error(`project app module did not resolve to a module namespace: ${modulePath}`);
-    }
-
-    return coerceChimpbaseAppDefinition(moduleExports, modulePath, projectDir);
-  } finally {
-    await rm(tempModulePath, { force: true });
+  const resolvedModulePath = resolve(modulePath);
+  // Bun shares the require/import cache and ignores query strings on file imports.
+  delete require.cache[resolvedModulePath];
+  const moduleUrl = pathToFileURL(resolvedModulePath);
+  moduleUrl.searchParams.set("chimpbase_load", globalThis.crypto.randomUUID());
+  const moduleExports: unknown = await import(moduleUrl.href);
+  if (!isJsonObject(moduleExports)) {
+    throw new Error(`project app module did not resolve to a module namespace: ${modulePath}`);
   }
+
+  return coerceChimpbaseAppDefinition(moduleExports, modulePath, projectDir);
 }
 
 function coerceChimpbaseAppDefinition(

@@ -116,6 +116,9 @@ Run these commands from the directory containing `chimpbase.app.ts`. Use `--proj
 # HTTP server and background worker
 bunx chimpbase dev
 
+# Restart on source edits
+bunx chimpbase dev --watch
+
 # HTTP server only
 bunx chimpbase dev --serve
 
@@ -124,7 +127,22 @@ bunx chimpbase dev --worker
 
 # Call an action; --args is JSON
 bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
+
+# Show commands and options without starting the app
+bunx chimpbase --help
 ```
+
+`dev` starts once by default. Add `--watch` for the edit–run loop; the CLI uses the runtime's native process watcher and imports the original app file, including from read-only source directories. Changes to `chimpbase.app.ts` or imported source files restart the process and reload actions. SQLite data survives a restart; memory storage resets. Restart manually after editing configuration or secret files. The CLI stops HTTP, the worker, storage and telemetry sinks when it receives `SIGINT` or `SIGTERM`.
+
+Bun 1.3 performs a hard restart on source edits and skips application `onStop` hooks during that restart. Stopping the CLI with `Ctrl+C` or `SIGTERM` runs cleanup. When cleanup hooks must run between changes, stop and start the CLI manually instead of using watch mode.
+
+The same option works on every host:
+
+```bash
+npx chimpbase-node dev --watch
+```
+
+Watch mode applies to long-running HTTP and worker modes. `--action` is a one-shot command and cannot be combined with `--watch`, `--serve` or `--worker`. Unknown flags, missing values and extra positional arguments fail before the app starts. Use `--args` only with `--action`.
 
 The schema commands create or check `db/schema.snapshot.json` and `db/schema.generated.ts` from application migrations. They use a temporary PostgreSQL database through Docker; they do not generate migration SQL.
 

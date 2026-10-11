@@ -262,7 +262,8 @@ describe("host lifecycle cleanup", () => {
     }
   });
 
-  test("close waits for active operations before closing storage and sinks", async () => {
+  for (const source of ["action", "route", "routeEnv"] as const) {
+  test(`close waits for active ${source} operations before closing storage and sinks`, async () => {
     const { calls, library } = createTrackedRuntime();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -273,9 +274,17 @@ describe("host lifecycle cleanup", () => {
         entered.resolve();
         await release.promise;
         await ctx.kv.set("finished", true);
+      }), action("finishRoute", async (ctx) => { await ctx.kv.set("finished", true); }),
+      route("GET", "/hold", async (_request, env) => {
+        entered.resolve();
+        await release.promise;
+        await env.action("finishRoute");
+        return new Response("finished");
       })],
     });
-    const operation = host.executeAction("hold");
+    const operation = source === "route"
+      ? host.executeRoute(new Request("http://test/hold"))
+      : source === "routeEnv" ? host.routeEnv().action("hold") : host.executeAction("hold");
     let closing: Promise<void> | undefined;
     try {
       await entered.promise;
@@ -294,6 +303,7 @@ describe("host lifecycle cleanup", () => {
       await (closing ?? host.close());
     }
   });
+  }
 
   test("failed initialization runs onStop cleanup for resources acquired by earlier hooks", async () => {
     const failure = new Error("initialization failed");

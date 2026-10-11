@@ -67,6 +67,8 @@ bunx chimpbase dev
 
 Wait for `listening on http://127.0.0.1:3000` and keep this terminal open. The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. SQLite data is stored in `data/my-app.db`. The app file exports a definition; the CLI starts it.
 
+While editing the app, use `bunx chimpbase dev --watch` to restart automatically when source files change. SQLite keeps your notes across restarts.
+
 For port, storage, and worker settings and defaults, see the [environment-variable reference](/configuration#environment-variables).
 
 In another terminal, create your first note:
