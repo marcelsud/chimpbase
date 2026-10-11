@@ -475,6 +475,220 @@ async function bootInlineApp(overrides?: {
 
 describe("bun runtime regression — inline fixtures", () => {
   for (const engine of ["memory", "sqlite"] as const) {
+    test(`caught child failures roll back parent writes, events and jobs (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-rollback-only-"));
+      cleanupDirs.push(projectDir);
+      const failure = new Error("child failed after writing");
+      let deliveries = 0;
+      const child = action("failingChild", async (ctx) => {
+        await ctx.kv.set("child", true);
+        await ctx.db.query("INSERT INTO effects VALUES ('child')");
+        await ctx.queue.enqueue("effects", {});
+        ctx.pubsub.publish("child.written", {});
+        throw failure;
+      });
+      const parent = action("catchingParent", async (ctx) => {
+        await ctx.kv.set("parent", true);
+        try { await ctx.action(child); } catch (error) { expect(error).toBe(failure); }
+        await ctx.kv.set("afterCatch", true);
+        return "caught";
+      });
+      const host = await createChimpbase({
+        storage: { engine, path: "rollback.db" }, projectDir,
+        migrationsSql: ["CREATE TABLE effects (label TEXT)"],
+        registrations: [child, parent,
+          subscription("child.written", () => { deliveries += 1; }),
+          worker("effects", () => { deliveries += 1; }),
+          action("inspectRollback", async (ctx) => ({
+            keys: await ctx.kv.list(), effects: await ctx.db.query("SELECT * FROM effects"),
+            events: await ctx.db.query("SELECT * FROM _chimpbase_events"),
+            jobs: await ctx.db.query("SELECT * FROM _chimpbase_queue_jobs"),
+          })),
+          action("healthyAfterRollback", async (ctx) => { await ctx.kv.set("healthy", true); return "committed"; }),
+        ],
+      });
+      try {
+        await expect(host.executeAction(parent)).rejects.toBe(failure);
+        expect((await host.executeAction("inspectRollback")).result).toEqual({ keys: [], effects: [], events: [], jobs: [] });
+        expect(deliveries).toBe(0);
+        expect((await host.executeAction("healthyAfterRollback")).result).toBe("committed");
+      } finally { await host.close(); }
+    });
+
+    test(`slow HTTP parsing leaves routes, actions and workers available (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-route-concurrency-"));
+      cleanupDirs.push(projectDir);
+      const entered = Promise.withResolvers<void>();
+      const parsed = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const host = await createChimpbase({
+        storage: { engine, path: "routes.db" }, projectDir,
+        registrations: [
+          action("writeRoute", async (ctx, key: string) => { await ctx.kv.set(key, true); ctx.pubsub.publish(key, {}); ctx.log.info(key); return key; }),
+          action("enqueueWhileParsing", async (ctx) => { await ctx.queue.enqueue("whileParsing", {}); }),
+          worker("whileParsing", async (ctx) => { await ctx.kv.set("worker", true); }),
+          route("context", (request, env) => { env.set("path", new URL(request.url).pathname); return null; }),
+          route("POST", "/slow", async (request, env) => {
+            entered.resolve();
+            const body: unknown = await request.json();
+            parsed.resolve();
+            await release.promise;
+            expect(body).toEqual({ ready: true });
+            expect(env.get("path")).toBe("/slow");
+            return new Response(v.string().parse(await env.action("writeRoute", "slow")));
+          }),
+          route("GET", "/fast", async (_request, env) => {
+            expect(env.get("path")).toBe("/fast");
+            return new Response(v.string().parse(await env.action("writeRoute", "fast")));
+          }),
+          action("readRoutes", async (ctx) => await ctx.kv.list()),
+        ],
+        telemetry: { persist: { log: true, metric: false, trace: false } },
+      });
+      const stream = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = stream.writable.getWriter();
+      const slow = host.executeRoute(new Request("http://test/slow", { method: "POST", body: stream.readable }));
+      try {
+        await entered.promise;
+        const fast = await Promise.race([
+          host.executeRoute(new Request("http://test/fast")),
+          Bun.sleep(1000).then(() => { throw new Error("fast request blocked by body parsing"); }),
+        ]);
+        expect(await fast.response?.text()).toBe("fast");
+        expect(fast.emittedEvents).toMatchObject([{ name: "fast" }]);
+        await host.executeAction("enqueueWhileParsing");
+        expect(await host.processNextQueueJob()).not.toBeNull();
+        expect((await host.executeAction("readRoutes")).result).toEqual(["fast", "worker"]);
+        await writer.write(new TextEncoder().encode('{"ready":true}'));
+        await writer.close();
+        await parsed.promise;
+        expect((await host.executeAction("readRoutes")).result).toEqual(["fast", "worker"]);
+        release.resolve();
+        const completed = await slow;
+        expect(await completed.response?.text()).toBe("slow");
+        expect(completed.emittedEvents).toMatchObject([{ name: "slow" }]);
+        expect(host.drainTelemetryRecords().filter((record) => record.kind === "log").map((record) => record.message).sort())
+          .toEqual(["fast", "slow"]);
+      } finally {
+        release.resolve();
+        await writer.abort().catch(() => {});
+        await slow.catch(() => {});
+        await host.close();
+      }
+    });
+
+    test(`route actions commit independently and serialize concurrent calls (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-action-boundaries-"));
+      cleanupDirs.push(projectDir);
+      const host = await createChimpbase({
+        storage: { engine, path: "actions.db" }, projectDir,
+        registrations: [
+          action("increment", async (ctx) => {
+            const value = (await ctx.kv.get("count", v.number())) ?? 0;
+            await Bun.sleep(2);
+            await ctx.kv.set("count", value + 1);
+            return value + 1;
+          }),
+          action("readCount", async (ctx) => await ctx.kv.get("count")),
+          route("GET", "/increments", async (_request, env) => {
+            expect(await Promise.all([env.action("increment"), env.action("increment")])).toEqual([1, 2]);
+            throw new Response("later route failure", { status: 409 });
+          }),
+        ],
+      });
+      try {
+        expect((await host.executeRoute(new Request("http://test/increments"))).response?.status).toBe(409);
+        expect((await host.executeAction("readCount")).result).toBe(2);
+        expect(await Promise.all([host.routeEnv().action("increment"), host.routeEnv().action("increment")])).toEqual([3, 4]);
+      } finally { await host.close(); }
+    });
+
+    test(`invalid HTTP action input is 400 while handler and result failures remain errors (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-http-validation-"));
+      cleanupDirs.push(projectDir);
+      let called = false;
+      const validInput = action({ name: "validInput", args: v.string(), handler: () => { called = true; return "ok"; } });
+      const badResult = action({ name: "badResult", args: v.string(), result: v.string(), handler: async (ctx) => {
+        await ctx.kv.set("invalidResult", true);
+        return 42 as unknown as string;
+      } });
+      let host: Awaited<ReturnType<typeof createChimpbase>>;
+      host = await createChimpbase({
+        storage: { engine, path: "validation.db" }, projectDir,
+        server: { port: 0 },
+        registrations: [validInput, badResult,
+          action("catchInputFailure", async (ctx) => {
+            await ctx.kv.set("invalidParent", true);
+            try { await ctx.action("validInput", 42); } catch { /* The root transaction must still roll back. */ }
+            return "caught";
+          }),
+          action("beforeInputFailure", async (ctx) => {
+            await ctx.kv.set("beforeInputFailure", true);
+            ctx.pubsub.publish("beforeInputFailure", {});
+          }),
+          action("badHandler", async (ctx) => { await ctx.kv.set("badHandler", true); throw new Error("handler failed"); }),
+          action("badDatabase", async (ctx) => { await ctx.db.query("INSERT INTO missing_table VALUES (1)"); }),
+          action("validationKeys", async (ctx) => await ctx.kv.list()),
+          route("POST", "/input", async (request, env) => {
+            const body: unknown = await request.json();
+            return Response.json(await env.action("validInput", body));
+          }),
+          route("GET", "/caught-input", async (_request, env) => Response.json(await env.action("catchInputFailure"))),
+          route("GET", "/reference-arity", async (_request, env) => {
+            // @ts-expect-error Runtime validation also covers untyped HTTP callers.
+            return Response.json(await env.action(validInput, "input", "extra"));
+          }),
+          route("GET", "/host-reference-arity", async () => {
+            // @ts-expect-error Runtime validation also covers untyped host callers.
+            return Response.json((await host.executeAction(validInput, "input", "extra")).result);
+          }),
+          route("GET", "/callable-reference-arity", async () => {
+            // @ts-expect-error Runtime validation also covers untyped callable references.
+            return Response.json(await validInput("input", "extra"));
+          }),
+          route("GET", "/partial-input", async (_request, env) => {
+            await env.action("beforeInputFailure");
+            return Response.json(await env.action("validInput", 42));
+          }),
+          route("GET", "/result", async (_request, env) => Response.json(await env.action(badResult, "input"))),
+          route("GET", "/handler", async (_request, env) => Response.json(await env.action("badHandler"))),
+          route("GET", "/database", async (_request, env) => Response.json(await env.action("badDatabase"))),
+        ],
+      });
+      try {
+        const started = await host.start({ serve: true, runWorker: false });
+        try {
+          const response = await fetch(`http://localhost:${started.server!.port}/input`, { method: "POST", body: "42" });
+          expect(response.status).toBe(400);
+          const payload: unknown = await response.json();
+          expect(payload).toMatchObject({ error: { code: "INVALID_ACTION_INPUT", message: "args must be a string" } });
+          expect(called).toBe(false);
+          for (const path of ["reference-arity", "host-reference-arity", "callable-reference-arity"]) {
+            const invalidReference = await fetch(`http://localhost:${started.server!.port}/${path}`);
+            expect(invalidReference.status).toBe(400);
+            const invalidPayload: unknown = await invalidReference.json();
+            expect(invalidPayload).toEqual({ error: {
+              code: "INVALID_ACTION_INPUT", message: "action validInput expects a single argument",
+            } });
+          }
+          expect(called).toBe(false);
+          expect((await host.executeRoute(new Request("http://test/caught-input"))).response?.status).toBe(400);
+          await expect(host.executeRoute(new Request("http://test/result"))).rejects.toThrow("output must be a string");
+          await expect(host.executeRoute(new Request("http://test/handler"))).rejects.toThrow("handler failed");
+          await expect(host.executeRoute(new Request("http://test/database"))).rejects.toThrow("missing_table");
+          expect((await host.executeAction("validationKeys")).result).toEqual([]);
+          const partial = await host.executeRoute(new Request("http://test/partial-input"));
+          expect(partial.response?.status).toBe(400);
+          expect(partial.emittedEvents).toMatchObject([{ name: "beforeInputFailure" }]);
+        } finally { await started.stop(); }
+        // The host remains available for explicit action calls after server stop.
+        await expect(host.executeAction(badResult, "input")).rejects.toThrow("output must be a string");
+        await expect(host.executeAction("badHandler")).rejects.toThrow("handler failed");
+        await expect(host.executeAction("badDatabase")).rejects.toThrow("missing_table");
+        expect((await host.executeAction("validationKeys")).result).toEqual(["beforeInputFailure"]);
+      } finally { await host.close(); }
+    });
+
     test(`KV expiration hides millisecond TTL and legacy timestamps and cleanup removes them (${engine})`, async () => {
       const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-kv-expiration-"));
       cleanupDirs.push(projectDir);

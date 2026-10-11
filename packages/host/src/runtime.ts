@@ -32,7 +32,6 @@ import {
 import {
   action as createActionEntry,
   CHIMPBASE_REQUEST_REJECTED_HEADER,
-  bindActionInvoker as bindActionReferenceInvoker,
   cron as createCronEntry,
   describeWorkflow,
   isChimpbaseWorkflowDefinition,
@@ -51,7 +50,7 @@ import {
   type ChimpbaseObjectActionHandler,
   type ChimpbaseOnStartRegistration,
   type ChimpbaseCronHandler,
-  type ChimpbaseInferActionArgs,
+  type ChimpbaseInferActionCallArgs,
   type ChimpbaseInferActionResult,
   type ChimpbaseRegistrationSource,
   type ChimpbaseRouteEnv,
@@ -183,7 +182,13 @@ export interface RuntimeHostInstanceOptions<TServer> {
 }
 
 const IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX = "_chimpbase.sub.seen:";
-const engineOperationContext = new AsyncLocalStorage<{ active: boolean; engine: ChimpbaseEngine; host: object }>();
+type RouteOperationRunner = <TResult>(operation: () => Promise<TResult>, serialize?: boolean) => Promise<TResult>;
+const engineOperationContext = new AsyncLocalStorage<{
+  active: boolean;
+  engine: ChimpbaseEngine;
+  host: object;
+  runRouteOperation?: RouteOperationRunner;
+}>();
 const MAX_REQUEST_TELEMETRY_RECORDS = 10_000;
 const POSTGRES_WORKER_QUEUE_BATCH_SIZE = 8;
 const RESERVED_ENGINE_QUEUE_NAMES = new Set([
@@ -194,16 +199,6 @@ const RESERVED_ENGINE_QUEUE_NAMES = new Set([
 
 class ChimpbaseCapacityError extends Error {}
 
-function isRegisteredActionResult<TResult>(
-  registry: ChimpbaseRegistry,
-  nameOrReference: string | ChimpbaseActionRegistrationLike,
-  _value: unknown,
-): _value is TResult {
-  const registration = typeof nameOrReference === "string"
-    ? registry.actions.get(nameOrReference)
-    : nameOrReference;
-  return registration !== undefined && typeof registration.handler === "function";
-}
 export class ChimpbaseHost<TServer> {
   readonly config: ChimpbaseProjectConfig;
   readonly engine: ChimpbaseEngine;
@@ -242,16 +237,9 @@ export class ChimpbaseHost<TServer> {
 
   async executeAction<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
-    ...args: ChimpbaseInferActionArgs<TAction> extends readonly unknown[]
-      ? ChimpbaseInferActionArgs<TAction>
-      : [ChimpbaseInferActionArgs<TAction>]
+    ...args: ChimpbaseInferActionCallArgs<TAction>
   ): Promise<{ emittedEvents: unknown[]; result: ChimpbaseInferActionResult<TAction> }>;
   async executeAction(name: string, args?: unknown[] | unknown): Promise<ActionExecutionResult>;
-  /** Invoke a registration whose argument types are no longer known, such as one relayed by a bound invoker. */
-  async executeAction(
-    reference: ChimpbaseActionRegistrationLike,
-    ...args: unknown[]
-  ): Promise<ActionExecutionResult>;
   async executeAction(
     nameOrReference: string | ChimpbaseActionRegistrationLike,
     ...args: unknown[]
@@ -269,7 +257,7 @@ export class ChimpbaseHost<TServer> {
         ), true)
         : await this.runEngineOperation(async (engine) => await engine.executeAction(
           actionName,
-          normalizeReferenceInvocationArgs(nameOrReference, args),
+          args,
         ), true);
 
       this.debug("action completed", { emittedEvents: outcome.emittedEvents.length, name: actionName });
@@ -301,9 +289,7 @@ export class ChimpbaseHost<TServer> {
         }) };
       }
       if (prepared.response !== null) return { emittedEvents: [], response: prepared.response };
-      const outcome = await this.runEngineOperation(
-        async (engine) => await engine.executeRoute(request, prepared), true, prepared.concurrencyGroup,
-      );
+      const outcome = await this.runRouteRequest(request, prepared);
       this.debug("route completed", {
         emittedEvents: outcome.emittedEvents.length,
         route,
@@ -452,6 +438,9 @@ export class ChimpbaseHost<TServer> {
     if (ownership !== undefined) {
       throw new Error(`action ${name} is owned by module ${ownership.module} and cannot be replaced`);
     }
+    if (this.registry.actions.has(name)) {
+      throw new Error(`duplicate action registration: ${name}`);
+    }
     const entry = (definition?.args !== undefined)
       ? createActionEntry({
           args: definition.args,
@@ -465,27 +454,6 @@ export class ChimpbaseHost<TServer> {
 
     this.registry.actions.set(name, entry);
     return handler;
-  }
-
-  bindActionInvoker(reference: ChimpbaseActionRegistrationLike): void {
-    bindActionReferenceInvoker(reference, async <TResult = unknown>(
-      nameOrReference: string | ChimpbaseActionRegistrationLike,
-      args: unknown[],
-    ): Promise<TResult> => {
-      if (typeof nameOrReference === "string") {
-        const outcome = await this.executeAction(nameOrReference, args);
-        if (!isRegisteredActionResult<TResult>(this.registry, nameOrReference, outcome.result)) {
-          throw new TypeError(`action ${nameOrReference} has an invalid registration`);
-        }
-        return outcome.result;
-      }
-
-      const outcome = await this.executeAction(nameOrReference, ...args);
-      if (!isRegisteredActionResult<TResult>(this.registry, nameOrReference, outcome.result)) {
-        throw new TypeError(`action ${nameOrReference.name} has an invalid registration`);
-      }
-      return outcome.result;
-    });
   }
 
   registerSubscription<TPayload = unknown, TResult = unknown>(
@@ -596,7 +564,12 @@ export class ChimpbaseHost<TServer> {
 
   routeEnv(): ChimpbaseRouteEnv {
     const current = engineOperationContext.getStore();
-    return (current?.host === this && current.active ? current.engine : this.engine).createRouteEnv();
+    if (current?.host === this && current.active) {
+      return current.engine.createRouteEnv(null, undefined, current.runRouteOperation);
+    }
+    return this.engine.createRouteEnv(null, undefined, async (operation, serialize = true) => serialize
+      ? await this.runEngineOperation(async () => await operation())
+      : await this.trackOperation(operation));
   }
 
   listWorkflowContracts(): ChimpbaseWorkflowContract[] {
@@ -867,15 +840,19 @@ export class ChimpbaseHost<TServer> {
     operation: (engine: ChimpbaseEngine) => Promise<TResult>,
     concurrent = false,
     group?: "rpc",
+    routeEngine?: ChimpbaseEngine,
   ): Promise<TResult> {
     const current = engineOperationContext.getStore();
-    if (current?.host === this && current.active) return await operation(current.engine);
+    if (current?.host === this && current.active && current.runRouteOperation === undefined) return await operation(current.engine);
+    if (current?.host === this && current.active && current.runRouteOperation !== undefined && routeEngine === undefined) {
+      return await current.runRouteOperation(async () => await operation(current.engine));
+    }
     const lane = group ?? "request";
     const isConcurrent = concurrent && this.supportsConcurrentWorkers;
     if (isConcurrent && this.concurrentOperations[lane] >= this.requestConcurrency) {
       throw new ChimpbaseCapacityError("runtime request capacity exceeded");
     }
-    const engine = isConcurrent ? this.createWorkerEngine(group) : this.engine;
+    const engine = routeEngine ?? (isConcurrent ? this.createWorkerEngine(group) : this.engine);
     if (isConcurrent) this.concurrentOperations[lane] += 1;
     const run = async () => {
       const context = { active: true, engine, host: this };
@@ -883,24 +860,78 @@ export class ChimpbaseHost<TServer> {
         return await engineOperationContext.run(context, async () => await operation(engine));
       } finally {
         context.active = false;
-        if (engine !== this.engine) {
+        if (engine !== this.engine && routeEngine === undefined) {
           this.requestTelemetryRecords.push(...engine.drainTelemetryRecords());
           const overflow = this.requestTelemetryRecords.length - MAX_REQUEST_TELEMETRY_RECORDS;
           if (overflow > 0) this.requestTelemetryRecords.splice(0, overflow);
         }
       }
     };
-    const queued = engine === this.engine
+    const serialized = engine === this.engine || !this.supportsConcurrentWorkers;
+    const queued = serialized
       ? this.serializedEngineOperations.catch(() => undefined).then(run)
       : run();
 
-    if (engine === this.engine) this.serializedEngineOperations = queued.then(() => undefined, () => undefined);
+    if (serialized) this.serializedEngineOperations = queued.then(() => undefined, () => undefined);
     this.activeEngineOperations.add(queued);
     try {
       return await queued;
     } finally {
       this.activeEngineOperations.delete(queued);
       if (isConcurrent) this.concurrentOperations[lane] -= 1;
+    }
+  }
+
+  private async runRouteRequest(
+    request: Request,
+    prepared: Awaited<ReturnType<ChimpbaseEngine["prepareRoute"]>>,
+  ): Promise<RouteExecutionResult> {
+    const current = engineOperationContext.getStore();
+    if (current?.host === this && current.active && current.runRouteOperation === undefined) {
+      return await current.engine.executeRoute(request, prepared);
+    }
+    const lane = prepared.concurrencyGroup ?? "request";
+    if (this.supportsConcurrentWorkers && this.concurrentOperations[lane] >= this.requestConcurrency) {
+      throw new ChimpbaseCapacityError("runtime request capacity exceeded");
+    }
+    const engine = this.createWorkerEngine(prepared.concurrencyGroup);
+    this.concurrentOperations[lane] += 1;
+    let operations: Promise<unknown> = Promise.resolve();
+    const runRouteOperation: RouteOperationRunner = async (operation, serialize = true) => {
+      const active = engineOperationContext.getStore();
+      if (active?.host === this && active.active && active.engine === engine && active.runRouteOperation === undefined) {
+        return await operation();
+      }
+      if (!serialize) return await this.trackOperation(operation);
+      const queued = operations.catch(() => undefined).then(async () => await this.runEngineOperation(
+        async () => await operation(), false, undefined, engine,
+      ));
+      operations = queued;
+      return await queued;
+    };
+    const context = { active: true, engine, host: this, runRouteOperation };
+    const running = engineOperationContext.run(context, async () => await engine.executeRoute(request, prepared, runRouteOperation));
+    this.activeEngineOperations.add(running);
+    try {
+      return await running;
+    } finally {
+      await operations.catch(() => undefined);
+      context.active = false;
+      this.activeEngineOperations.delete(running);
+      this.concurrentOperations[lane] -= 1;
+      this.requestTelemetryRecords.push(...engine.drainTelemetryRecords());
+      const overflow = this.requestTelemetryRecords.length - MAX_REQUEST_TELEMETRY_RECORDS;
+      if (overflow > 0) this.requestTelemetryRecords.splice(0, overflow);
+    }
+  }
+
+  private async trackOperation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    const running = operation();
+    this.activeEngineOperations.add(running);
+    try {
+      return await running;
+    } finally {
+      this.activeEngineOperations.delete(running);
     }
   }
 
@@ -1311,21 +1342,6 @@ function normalizeActionExecutionArgs(args: unknown[] | unknown): unknown[] {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function normalizeReferenceInvocationArgs(
-  reference: ChimpbaseActionRegistrationLike,
-  args: unknown[],
-): unknown[] {
-  if ((reference.args !== undefined)) {
-    if (args.length > 1) {
-      throw new Error(`action ${reference.name} expects a single argument`);
-    }
-
-    return args.length === 0 ? [] : [args[0]];
-  }
-
-  return args;
 }
 
 function parseDatabaseTimestampMs(value: unknown): number | null {

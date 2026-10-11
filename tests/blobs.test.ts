@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { action, v } from "../packages/runtime/index.ts";
+import { action, route, v } from "../packages/runtime/index.ts";
 import {
   chimpbaseBlobs,
   fsBlobDriver,
@@ -14,6 +14,77 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 
 const cleanupDirs: string[] = [];
+
+for (const engine of ["memory", "sqlite"] as const) {
+  for (const storage of ["memory", "filesystem"] as const) {
+    for (const source of ["route", "routeEnv"] as const) {
+      test(`slow blob reads release the database lane and drain before close (${engine}, ${storage}, ${source})`, async () => {
+        const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-blob-read-"));
+        cleanupDirs.push(projectDir);
+        const driver = storage === "memory" ? memoryBlobDriver() : fsBlobDriver({ root: join(projectDir, "blobs") });
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const get = driver.get.bind(driver);
+        let reads = 0;
+        driver.get = async (...args) => {
+          if (++reads === 1) { entered.resolve(); await release.promise; }
+          return await get(...args);
+        };
+        const host = await createChimpbase({
+          projectDir, storage: { engine, path: "reads.db" }, blobs: { driver, buckets: ["uploads"] },
+          registrations: [
+            action("readFast", async (ctx) => { await ctx.kv.set("fast", true); return "available"; }),
+            route("GET", "/download", async (_request, env) => {
+              const object = await env.blobs.get("uploads", "key");
+              return object === null ? new Response(null, { status: 404 }) : new Response(object.body, { headers: { etag: object.etag } });
+            }),
+          ],
+        });
+        const before = await host.routeEnv().blobs.put("uploads", "key", new TextEncoder().encode("before"));
+        const pending = source === "route"
+          ? host.executeRoute(new Request("http://test/download")).then((outcome) => outcome.response)
+          : host.routeEnv().blobs.get("uploads", "key").then((object) => object === null ? null : new Response(object.body, { headers: { etag: object.etag } }));
+        let closing: Promise<void> | undefined;
+        try {
+          await entered.promise;
+          expect((await Promise.race([
+            host.executeAction("readFast"),
+            Bun.sleep(1000).then(() => { throw new Error("slow driver read blocked an unrelated action"); }),
+          ])).result).toBe("available");
+          const after = await host.routeEnv().blobs.put("uploads", "key", new TextEncoder().encode("after"));
+          expect(after.etag).not.toBe(before.etag);
+          let closed = false;
+          closing = host.close().then(() => { closed = true; });
+          await Bun.sleep(10);
+          expect(closed).toBe(false);
+          release.resolve();
+          const response = await pending;
+          expect(response?.headers.get("etag")).toBe(after.etag);
+          expect(await response?.text()).toBe("after");
+          expect(reads).toBe(2);
+          await closing;
+          expect(closed).toBe(true);
+        } finally {
+          release.resolve();
+          await pending.catch(() => {});
+          await (closing ?? host.close());
+        }
+      });
+    }
+  }
+}
+
+test("filesystem blob streams retain opened payloads after replacement cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chimpbase-blob-read-handle-"));
+  cleanupDirs.push(root);
+  const driver = fsBlobDriver({ root });
+  const payload = await driver.put("uploads", "key", new Blob(["captured"]).stream());
+  const captured = await driver.get("uploads", "key", payload.driverRef);
+  expect(captured).not.toBeNull();
+  await driver.delete("uploads", "key", payload.driverRef);
+  expect(await new Response(captured!.body).text()).toBe("captured");
+  expect(await driver.get("uploads", "key", payload.driverRef)).toBeNull();
+});
 
 for (const engine of ["sqlite", "postgres"] as const) {
   for (const condition of ["ifNoneMatch", "ifMatch"] as const) {
@@ -1187,6 +1258,7 @@ describe("chimpbase blobs signed URLs", () => {
         bucket: "uploads", key: "signed.txt", op: "get", ttlSec: 60,
       });
       const signedUrl = new URL(v.string().parse(signed.result, "signed blob URL"));
+      expect(typeof boot.host.routeEnv().blobs.sign({ bucket: "uploads", key: "signed.txt", op: "get", ttlSec: 60 })).toBe("string");
       const path = `${signedUrl.pathname}?${signedUrl.searchParams.toString()}`;
       const ok = await fetch(`${boot.baseUrl}${path}`);
       expect(ok.status).toBe(200);

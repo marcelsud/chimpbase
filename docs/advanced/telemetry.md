@@ -89,9 +89,23 @@ Chimpbase can export telemetry to any OpenTelemetry-compatible backend (Jaeger, 
 
 ### Install
 
+Logging, metrics and in-memory traces need no extra packages. To use `chimpbase/otel`, install its optional OpenTelemetry peers:
+
 ```bash
-bun add chimpbase
+bun add \
+  '@opentelemetry/api@^1.9.0' \
+  '@opentelemetry/api-logs@^0.200.0' \
+  '@opentelemetry/context-async-hooks@^2.0.0' \
+  '@opentelemetry/exporter-logs-otlp-http@^0.200.0' \
+  '@opentelemetry/exporter-metrics-otlp-http@^0.200.0' \
+  '@opentelemetry/exporter-trace-otlp-http@^0.200.0' \
+  '@opentelemetry/resources@^2.0.0' \
+  '@opentelemetry/sdk-logs@^0.200.0' \
+  '@opentelemetry/sdk-metrics@^2.0.0' \
+  '@opentelemetry/sdk-trace-base@^2.0.0'
 ```
+
+For Node, use `npm install` with the same packages. The repository's advanced examples already declare these dependencies.
 
 ### Setup
 

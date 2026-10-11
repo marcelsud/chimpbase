@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { runChimpbaseCli } from "@chimpbase/tooling/cli";
+import { installCliShutdownHandler, runChimpbaseCli } from "@chimpbase/tooling/cli";
 
 import {
   runChimpbaseAction,
@@ -11,6 +11,7 @@ import {
 } from "./library.ts";
 
 await runChimpbaseCli(process.argv.slice(2), {
+  installShutdownHandler: installCliShutdownHandler,
   runAction: runChimpbaseAction,
   startProject: startChimpbaseProject,
   syncModules: syncChimpbaseModules,

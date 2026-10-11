@@ -2,7 +2,6 @@ import type { Kysely } from "kysely";
 
 import type {
   ChimpbaseActionInvoker,
-  ChimpbaseActionRegistration,
   ChimpbaseActionRegistrationLike,
   ChimpbaseBlobCopyOptions,
   ChimpbaseBlobCreateUploadOptions,
@@ -53,6 +52,7 @@ import type {
   ChimpbaseSinkSpan,
 } from "@chimpbase/runtime";
 import {
+  ChimpbaseInputValidationError,
   isChimpbaseWorkflowDefinition,
   isJsonObject,
   resolveChimpbaseActionRegistrationName,
@@ -92,6 +92,8 @@ export interface ChimpbaseEventRecord {
   payload: unknown;
   payloadJson: string;
 }
+
+type RouteOperationRunner = <TResult>(operation: () => Promise<TResult>, serialize?: boolean) => Promise<TResult>;
 
 export interface ChimpbaseEventDeliveryPayload {
   eventId: number;
@@ -594,6 +596,7 @@ export class ChimpbaseEngine {
   private readonly telemetryRecords: ChimpbaseTelemetryRecord[] = [];
   private telemetryExecutionDepth = 0;
   private transactionDepth = 0;
+  private transactionFailure: { error: unknown } | undefined;
   private readonly worker: ChimpbaseEngineOptions["worker"];
 
   constructor(options: ChimpbaseEngineOptions) {
@@ -758,7 +761,11 @@ export class ChimpbaseEngine {
     return { handlers, response: null, concurrencyGroup };
   }
 
-  async executeRoute(request: Request, prepared?: ChimpbasePreparedRoute): Promise<ChimpbaseRouteExecutionResult> {
+  async executeRoute(
+    request: Request,
+    prepared?: ChimpbasePreparedRoute,
+    runOperation?: RouteOperationRunner,
+  ): Promise<ChimpbaseRouteExecutionResult> {
     const preparation = prepared ?? await this.prepareRoute(request);
     if (preparation.response !== null) return { emittedEvents: [], response: preparation.response };
     const telemetryStart = this.telemetryRecords.length;
@@ -781,11 +788,7 @@ export class ChimpbaseEngine {
           if (handler === null || handler === undefined) continue;
           if (handler instanceof Response) return handler;
           const moduleName = this.registry.registrationOwnership.get(`route:${route.name}`) ?? null;
-          const routeEnv = this.createRouteEnv(moduleName, routeContext);
-          const matched = await this.runInTransaction(async () => await this.runWithActionInvoker(
-            async () => await handler(request, routeEnv),
-            moduleName,
-          ));
+          const matched = await this.invokeRouteHandler(handler, request, moduleName, routeContext, runOperation);
           if (matched !== null && matched !== undefined) {
             return matched;
           }
@@ -795,10 +798,7 @@ export class ChimpbaseEngine {
           return null;
         }
 
-        return await this.runInTransaction(async () => await this.runWithActionInvoker(
-          async () => await this.registry.httpHandler?.(request, this.createRouteEnv(null, routeContext)) ?? null,
-          null,
-        ));
+        return await this.invokeRouteHandler(this.registry.httpHandler, request, null, routeContext, runOperation);
       };
 
       for (const span of handlerSpans) {
@@ -811,7 +811,8 @@ export class ChimpbaseEngine {
 
       const response = await invoke();
       const emittedEvents = this.takeCommittedEvents();
-      await this.flushTelemetryToStreams(undefined, telemetryStart);
+      if (runOperation !== undefined) await runOperation(async () => await this.flushTelemetryToStreams(undefined, telemetryStart));
+      else await this.flushTelemetryToStreams(undefined, telemetryStart);
 
       for (const span of handlerSpans) span.end("ok");
 
@@ -822,16 +823,38 @@ export class ChimpbaseEngine {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       for (const span of handlerSpans) span.end("error", message);
-      // Thrown HTTP responses leave the route transaction through its rollback path.
-      if (error instanceof Response) {
+      if (error instanceof Response || error instanceof ChimpbaseInputValidationError) {
         const emittedEvents = this.takeCommittedEvents();
-        await this.flushTelemetryToStreams(undefined, telemetryStart);
-        return { emittedEvents, response: error };
+        if (runOperation !== undefined) await runOperation(async () => await this.flushTelemetryToStreams(undefined, telemetryStart));
+        else await this.flushTelemetryToStreams(undefined, telemetryStart);
+        return { emittedEvents, response: error instanceof Response ? error : Response.json({
+          error: { code: "INVALID_ACTION_INPUT", message: error.message },
+        }, { status: 400 }) };
       }
       throw error;
     } finally {
       this.finishTelemetryExecution();
     }
+  }
+
+  private async invokeRouteHandler(
+    handler: ChimpbaseRouteHandler,
+    request: Request,
+    moduleName: string | null,
+    routeContext: Map<string, unknown>,
+    runOperation?: RouteOperationRunner,
+  ): Promise<Response | null> {
+    const routeEvents = runOperation === undefined ? undefined : [] as ChimpbaseEventRecord[];
+    const env = this.createRouteEnv(moduleName, routeContext, runOperation, routeEvents);
+    const invoke = async () => await this.runWithActionInvoker(
+      async () => await handler(request, env), moduleName, runOperation,
+    );
+    if (runOperation === undefined) return await this.runInTransaction(invoke);
+    const response = await invoke();
+    if (routeEvents !== undefined && routeEvents.length > 0) {
+      await runOperation(async () => await this.runInTransaction(async () => { this.pendingEvents.push(...routeEvents); }));
+    }
+    return response;
   }
 
   async processNextCronSchedule(): Promise<ChimpbaseCronScheduleExecutionResult | null> {
@@ -1243,8 +1266,10 @@ export class ChimpbaseEngine {
   createRouteEnv(
     moduleName: string | null = null,
     contextMap = new Map<string, unknown>(),
+    runOperation: RouteOperationRunner = async (operation) => await operation(),
+    routeEvents?: ChimpbaseEventRecord[],
   ): ChimpbaseRouteEnv {
-    const blobsClient = this.createBlobsClient();
+    const blobsClient = scheduleBlobOperations(this.createBlobsClient(runOperation), runOperation);
     function get(key: string): unknown;
     function get<T>(key: string, validator: ChimpbaseValidator<T>): T | undefined;
     function get<T>(key: string, validator?: ChimpbaseValidator<T>): T | unknown {
@@ -1257,15 +1282,15 @@ export class ChimpbaseEngine {
       call: async <TInput, TOutput>(
         contract: ChimpbaseModuleCallReference<TInput, TOutput>,
         input: TInput,
-      ): Promise<TOutput> => await this.invokeModuleCall(contract, input, moduleName),
+      ): Promise<TOutput> => await runOperation(async () => await this.invokeModuleCall(contract, input, moduleName)),
       action: async <TArgs extends unknown[] = unknown[], TResult = unknown>(
         nameOrReference: string | ChimpbaseActionRegistrationLike,
         ...args: TArgs
-      ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, moduleName),
+      ): Promise<TResult> => await runOperation(async () => await this.invokeAction<TResult>(nameOrReference, args, moduleName)),
       blobs: blobsClient,
       module: moduleName === null ? null : { name: moduleName },
       publish: <TPayload>(contract: ChimpbaseModuleEventReference<TPayload>, payload: TPayload): void => {
-        this.publishModuleEvent(contract, payload, moduleName);
+        this.publishModuleEvent(contract, payload, moduleName, routeEvents);
       },
       get,
       set(key: string, value: unknown): void {
@@ -1905,13 +1930,13 @@ export class ChimpbaseEngine {
         case "workflow_action": {
           const args = (step.args !== undefined)
             ? step.args({ input, state, workflowId })
-            : [];
+            : undefined;
           const actionName = typeof step.action === "string"
             ? step.action
             : resolveChimpbaseActionRegistrationName(step.action);
           const result = await this.invokeActionByName(
             actionName,
-            normalizeActionArgs(args),
+            normalizeActionArgs(args, typeof step.action === "string" ? undefined : step.action),
             workflowModule,
             false,
           );
@@ -2668,7 +2693,7 @@ export class ChimpbaseEngine {
 
     return await this.invokeActionByName<TResult>(
       nameOrReference.name,
-      normalizeActionReferenceArgs(nameOrReference, args),
+      args,
       callerModule,
       false,
     );
@@ -2695,11 +2720,16 @@ export class ChimpbaseEngine {
         let result: unknown;
         if ((registration.args !== undefined)) {
           if (args.length > 1) {
-            throw new Error(`action ${name} expects a single argument`);
+            throw new ChimpbaseInputValidationError(`action ${name} expects a single argument`);
           }
 
           const inputLabel = ownership?.visibility === "public" ? `module call ${name} input` : "args";
-          const parsedArgs = registration.args.parse(args[0], inputLabel);
+          let parsedArgs: unknown;
+          try {
+            parsedArgs = registration.args.parse(args[0], inputLabel);
+          } catch (error) {
+            throw new ChimpbaseInputValidationError(error);
+          }
           if (!isObjectActionHandler<unknown>(registration.handler)) {
             throw new TypeError(`action ${name} has an invalid handler`);
           }
@@ -2714,6 +2744,9 @@ export class ChimpbaseEngine {
           ? result
           : registration.result.parse(result, `module call ${name} output`)) as TResult;
       }, targetModule));
+    } catch (error) {
+      if (this.transactionDepth > 0) this.transactionFailure ??= { error };
+      throw error;
     } finally {
       this.finishTelemetryExecution();
     }
@@ -2754,6 +2787,7 @@ export class ChimpbaseEngine {
     contract: ChimpbaseModuleEventReference<TPayload>,
     payload: TPayload,
     callerModule: string | null,
+    routeEvents?: ChimpbaseEventRecord[],
   ): void {
     const declared = this.registry.eventContracts.get(contract.id);
     if (declared === undefined || declared.module !== contract.module) {
@@ -2767,11 +2801,11 @@ export class ChimpbaseEngine {
       );
     }
     const parsedPayload = declared.payload.parse(payload, `module event ${declared.id} payload`);
-    this.recordEvent(declared.id, parsedPayload, true);
+    this.recordEvent(declared.id, parsedPayload, true, routeEvents);
   }
 
-  private recordEvent(name: string, payload: unknown, moduleEvent: boolean): void {
-    if (moduleEvent && this.transactionDepth === 0) {
+  private recordEvent(name: string, payload: unknown, moduleEvent: boolean, routeEvents?: ChimpbaseEventRecord[]): void {
+    if (moduleEvent && this.transactionDepth === 0 && routeEvents === undefined) {
       throw new Error(`module event ${name} must be published inside a runtime transaction`);
     }
     const subscriptions = this.registry.subscriptions.get(name) ?? [];
@@ -2786,7 +2820,9 @@ export class ChimpbaseEngine {
       payload,
       payloadJson: JSON.stringify(payload ?? null),
     };
-    if (this.transactionDepth > 0) {
+    if (routeEvents !== undefined) {
+      routeEvents.push(event);
+    } else if (this.transactionDepth > 0) {
       this.pendingEvents.push(event);
     } else {
       this.committedEvents.push(event);
@@ -2863,11 +2899,12 @@ export class ChimpbaseEngine {
   private async runWithActionInvoker<TResult>(
     callback: () => TResult | Promise<TResult>,
     callerModule: string | null = null,
+    runOperation: RouteOperationRunner = async (operation) => await operation(),
   ): Promise<TResult> {
     const invoker: ChimpbaseActionInvoker = async <TResult = unknown>(
       nameOrReference: string | ChimpbaseActionRegistrationLike,
       args: unknown[],
-    ): Promise<TResult> => await this.invokeAction<TResult>(nameOrReference, args, callerModule);
+    ): Promise<TResult> => await runOperation(async () => await this.invokeAction<TResult>(nameOrReference, args, callerModule));
 
     return await runWithActionInvoker(invoker, callback);
   }
@@ -2880,6 +2917,7 @@ export class ChimpbaseEngine {
 
     if (isRootTransaction) {
       await this.adapter.beginTransaction();
+      this.transactionFailure = undefined;
     }
 
     this.transactionDepth += 1;
@@ -2888,6 +2926,7 @@ export class ChimpbaseEngine {
       const result = await callback();
 
       if (isRootTransaction) {
+        this.assertTransactionSucceeded();
         let persistedCount = 0;
         while (persistedCount < this.pendingEvents.length) {
           const events = this.pendingEvents.slice(persistedCount);
@@ -2897,6 +2936,7 @@ export class ChimpbaseEngine {
             !this.registry.eventContracts.has(event.name)
           ), undefined, "sync");
         }
+        this.assertTransactionSucceeded();
       }
       this.transactionDepth = parentDepth;
 
@@ -2928,7 +2968,13 @@ export class ChimpbaseEngine {
       }
 
       throw error;
+    } finally {
+      if (isRootTransaction) this.transactionFailure = undefined;
     }
+  }
+
+  private assertTransactionSucceeded(): void {
+    if (this.transactionFailure !== undefined) throw this.transactionFailure.error;
   }
 
   private async runBlobCleanups(committed: boolean): Promise<void> {
@@ -3038,7 +3084,7 @@ export class ChimpbaseEngine {
     return this.committedEvents.splice(0);
   }
 
-  private createBlobsClient(): ChimpbaseBlobsClient {
+  private createBlobsClient(runOperation?: RouteOperationRunner): ChimpbaseBlobsClient {
     const config = this.blobsConfig;
     const disabled = (): never => {
       throw new Error(
@@ -3248,18 +3294,21 @@ export class ChimpbaseEngine {
       },
       get: async (bucket, key, options) => {
         assertBucket(bucket);
-        const row = await adapter.blobGetMetadata(bucket, key);
-        if (!(row !== null)) return null;
-        if ((options?.ifNoneMatch !== undefined && options?.ifNoneMatch.length > 0) && options.ifNoneMatch === row.etag) {
-          throw new ChimpbaseNotModifiedError(`blob ${bucket}/${key} not modified`);
+        const readMetadata = async () => await adapter.blobGetMetadata(bucket, key);
+        let row = runOperation === undefined ? await readMetadata() : await runOperation(readMetadata);
+        while (row !== null) {
+          if ((options?.ifNoneMatch !== undefined && options?.ifNoneMatch.length > 0) && options.ifNoneMatch === row.etag) {
+            throw new ChimpbaseNotModifiedError(`blob ${bucket}/${key} not modified`);
+          }
+          const payload = await driver.get(bucket, key, row.driverRef, options?.range);
+          if (payload !== null) return { ...toMetadata(row), size: payload.size, body: payload.body };
+          if (runOperation === undefined) return null;
+          // Replacement cleanup may retire the captured payload while the driver is reading.
+          const current = await runOperation(readMetadata);
+          if (current?.driverRef === row.driverRef) return null;
+          row = current;
         }
-        const payload = await driver.get(bucket, key, row.driverRef, options?.range);
-        if (!(payload !== null)) return null;
-        return {
-          ...toMetadata(row),
-          size: payload.size,
-          body: payload.body,
-        };
+        return null;
       },
       head: async (bucket, key) => {
         assertBucket(bucket);
@@ -3425,27 +3474,12 @@ async function hashPartEtags(etags: readonly string[]): Promise<string> {
   return out;
 }
 
-function normalizeActionArgs(args: unknown): unknown[] {
+function normalizeActionArgs(args: unknown, registration?: ChimpbaseActionRegistrationLike): unknown[] {
   if (args === undefined) {
     return [];
   }
 
-  return Array.isArray(args) ? args : [args];
-}
-
-function normalizeActionReferenceArgs(
-  reference: ChimpbaseActionRegistrationLike,
-  args: unknown[],
-): unknown[] {
-  if (!(reference.args !== undefined)) {
-    return args;
-  }
-
-  if (args.length > 1) {
-    throw new Error(`action ${reference.name} expects a single argument`);
-  }
-
-  return args.length === 0 ? [] : [args[0]];
+  return registration?.args !== undefined ? [args] : Array.isArray(args) ? args : [args];
 }
 
 function hasWorkflowRun<TInput = unknown, TState = unknown>(
@@ -3481,6 +3515,27 @@ function createLogger(
       record("error", message, attributes);
     },
   };
+}
+
+function scheduleBlobOperations<T extends ChimpbaseBlobsClient | ChimpbaseBlobUpload>(
+  client: T,
+  runOperation: RouteOperationRunner,
+): T {
+  return new Proxy(client, {
+    get(target, key, receiver: T) {
+      const value: unknown = Reflect.get(target, key, receiver);
+      if (typeof value !== "function") return value;
+      const method = value as (...args: unknown[]) => unknown;
+      if (key === "sign") return method.bind(target);
+      return async (...args: unknown[]) => {
+        const result = await runOperation(async () => await method.apply(target, args), key !== "get");
+        if (key === "createUpload" || key === "resumeUpload") {
+          return scheduleBlobOperations(result as ChimpbaseBlobUpload, runOperation);
+        }
+        return result;
+      };
+    },
+  });
 }
 
 function normalizeDrainMaxDuration(maxDurationMs?: number): number {

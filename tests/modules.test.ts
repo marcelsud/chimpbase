@@ -481,6 +481,41 @@ describe("business modules", () => {
     }
   });
 
+  test("module route calls retain ownership and publish only after handler success", async () => {
+    const provider = defineChimpbaseModuleInterface({
+      name: "route-provider", version: 1,
+      calls: { echo: { input: v.string(), output: v.string() } },
+      events: { written: { payload: v.string(), version: 1 } },
+    });
+    const privateAction = action("privateRouteAction", () => "private");
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      modules: [defineChimpbaseModuleImplementation({
+        interface: provider, calls: { echo: (_ctx, input) => input },
+        registrations: [privateAction,
+          route("GET", "/published", async (_request, env) => {
+            expect(await env.action(privateAction)).toBe("private");
+            env.publish(provider.events.written, "published");
+            return new Response(await env.call(provider.calls.echo, "owned"));
+          }),
+          route("GET", "/discarded", (_request, env) => {
+            env.publish(provider.events.written, "discarded");
+            throw new Response("failed", { status: 409 });
+          }),
+        ],
+      })],
+    });
+    try {
+      const successful = await host.executeRoute(new Request("http://test/published"));
+      expect(await successful.response?.text()).toBe("owned");
+      expect(successful.emittedEvents).toMatchObject([{ name: provider.events.written.id, payload: "published" }]);
+      const failed = await host.executeRoute(new Request("http://test/discarded"));
+      expect(failed.response?.status).toBe(409);
+      expect(failed.emittedEvents).toEqual([]);
+      await expect(host.executeAction(privateAction)).rejects.toThrow("internal operation");
+    } finally { await host.close(); }
+  });
+
   test("scopes route, worker, lifecycle, state, and raw SQL to the owning module", async () => {
     const left = defineChimpbaseModuleInterface({
       name: "left",

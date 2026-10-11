@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import type { Stats } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -129,23 +128,27 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
     },
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
       const source = childPath(root, driverRef);
-      let statResult: Stats;
-      try {
-        statResult = await stat(source);
-      } catch (error) {
+      const handle = await open(source, "r").catch((error: unknown) => {
         if (isErrnoException(error) && error.code === "ENOENT") return null;
         throw error;
+      });
+      if (handle === null) return null;
+      try {
+        const { size: total } = await handle.stat();
+        const start = (range !== undefined) ? Math.max(0, Math.floor(range.start)) : 0;
+        const endExclusive = (range !== undefined) && range.end !== undefined
+          ? Math.min(total, Math.floor(range.end) + 1)
+          : total;
+        if (endExclusive <= start) {
+          await handle.close();
+          return { body: new ReadableStream<Uint8Array>({ start(c) { c.close(); } }), size: 0 };
+        }
+        const nodeStream = handle.createReadStream({ start, end: endExclusive - 1 });
+        return { body: nodeToWeb(nodeStream), size: endExclusive - start };
+      } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
       }
-      const total = statResult.size;
-      const start = (range !== undefined) ? Math.max(0, Math.floor(range.start)) : 0;
-      const endExclusive = (range !== undefined) && range.end !== undefined
-        ? Math.min(total, Math.floor(range.end) + 1)
-        : total;
-      if (endExclusive <= start) {
-        return { body: new ReadableStream<Uint8Array>({ start(c) { c.close(); } }), size: 0 };
-      }
-      const nodeStream = createReadStream(source, { start, end: endExclusive - 1 });
-      return { body: nodeToWeb(nodeStream), size: endExclusive - start };
     },
     async delete(_bucket, _key, driverRef) {
       try {

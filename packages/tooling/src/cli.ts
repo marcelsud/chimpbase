@@ -1,4 +1,7 @@
 import { resolve } from "node:path";
+import { spawn } from "node:child_process";
+import process from "node:process";
+import { parseArgs } from "node:util";
 
 import { parseJson } from "@chimpbase/runtime";
 
@@ -53,6 +56,7 @@ export interface RunChimpbaseCliDependencies {
     contractsDir?: string | null;
     projectDir?: string;
   }): Promise<{ host: CliHost; result: WorkflowContractSyncResult }>;
+  installShutdownHandler?(stop: () => Promise<void>): void;
   writeLine?(line: string): void;
 }
 
@@ -60,18 +64,46 @@ export async function runChimpbaseCli(
   argv: readonly string[],
   dependencies: RunChimpbaseCliDependencies,
 ): Promise<void> {
-  const [command = "dev", maybeSubcommand, ...rawRest] = argv;
-  const subcommand = maybeSubcommand !== undefined
-    && maybeSubcommand.length > 0
-    && !maybeSubcommand.startsWith("--")
-    ? maybeSubcommand
-    : null;
-  const rest = (subcommand !== null && subcommand.length > 0) ? rawRest : [maybeSubcommand, ...rawRest].filter((token): token is string => Boolean(token));
+  const command = argv[0] !== undefined && !argv[0].startsWith("-") ? argv[0] : "dev";
+  let rest = command === argv[0] ? argv.slice(1) : argv;
+  const writeLine = dependencies.writeLine ?? ((line: string) => console.log(line));
+  const commonOptions = {
+    help: { type: "boolean", short: "h" },
+    "project-dir": { type: "string" },
+  } as const;
+  const options: Record<string, { type: "boolean" | "string"; short?: string }> | null = command === "dev" ? {
+    ...commonOptions,
+    action: { type: "string" }, args: { type: "string" },
+    serve: { type: "boolean" }, worker: { type: "boolean" }, watch: { type: "boolean" },
+  } as const : command === "contracts" ? {
+    ...commonOptions,
+    "allow-breaking": { type: "boolean" }, check: { type: "boolean" },
+  } as const : command === "modules" ? {
+    ...commonOptions,
+    "artifacts-dir": { type: "string" }, "composition-root": { type: "string" }, "modules-dir": { type: "string" },
+  } as const : command === "schema" ? {
+    ...commonOptions,
+    "docker-image": { type: "string" }, "output-dir": { type: "string" },
+  } as const : null;
+  if (options === null) throw new Error(`unsupported command: ${command}`);
 
-  const args = parseArgs(rest);
+  let subcommand: string | null = null;
+  if ((command === "modules" || command === "schema") && rest[0] !== undefined && !rest[0].startsWith("-")) {
+    subcommand = rest[0];
+    rest = rest.slice(1);
+  }
+  const { values: args } = parseArgs({ args: [...rest], options, strict: true, allowPositionals: false });
+  if (args.help) {
+    writeLine(CLI_HELP);
+    return;
+  }
+  for (const [name, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.trim().length === 0) {
+      throw new Error(`--${name} requires a nonempty value`);
+    }
+  }
   const projectDirArg = args["project-dir"];
   const projectDir = resolve(typeof projectDirArg === "string" ? projectDirArg : ".");
-  const writeLine = dependencies.writeLine ?? ((line: string) => console.log(line));
 
   if (command === "contracts") {
     const { host, result } = await dependencies.syncWorkflowContracts({
@@ -136,8 +168,15 @@ export async function runChimpbaseCli(
     return;
   }
 
-  if (command !== "dev") {
-    throw new Error(`unsupported command: ${command}`);
+  if (args.args !== undefined && args.action === undefined) {
+    throw new Error("--args requires --action NAME");
+  }
+  if (args.action !== undefined && (args.serve || args.worker || args.watch)) {
+    throw new Error("--action cannot be combined with --serve, --worker or --watch");
+  }
+  if (args.watch) {
+    await runNativeWatchProcess(argv);
+    return;
   }
 
   if (typeof args.action === "string") {
@@ -146,10 +185,13 @@ export async function runChimpbaseCli(
     const { host, outcome } = await dependencies.runAction(args.action, actionArgs, {
       projectDir,
     });
-    writeLine(`executed action ${args.action} for project ${host.config.project.name}`);
-    writeLine(JSON.stringify(outcome.result, null, 2));
-    writeLine(`emitted ${outcome.emittedEvents.length} event(s)`);
-    await host.close();
+    try {
+      writeLine(`executed action ${args.action} for project ${host.config.project.name}`);
+      writeLine(JSON.stringify(outcome.result, null, 2));
+      writeLine(`emitted ${outcome.emittedEvents.length} event(s)`);
+    } finally {
+      await host.close();
+    }
     return;
   }
 
@@ -160,6 +202,7 @@ export async function runChimpbaseCli(
     runWorker: workerFlag ? true : undefined,
     serve: serveFlag ? true : undefined,
   });
+  dependencies.installShutdownHandler?.(() => started.stop());
 
   if ((started.server !== null && started.server !== undefined)) {
     writeLine(`listening on http://127.0.0.1:${started.server.port}`);
@@ -178,25 +221,61 @@ export async function runChimpbaseCli(
   throw new Error("host currently supports default mode, --serve, --worker or --action");
 }
 
-function parseArgs(rawArgs: readonly string[]): Record<string, string | boolean> {
-  const parsed: Record<string, string | boolean> = {};
+const CLI_HELP = `Usage: chimpbase [command] [options]
 
-  for (let index = 0; index < rawArgs.length; index += 1) {
-    const token = rawArgs[index];
-    if (!token.startsWith("--")) {
-      continue;
+dev                    Start HTTP and the background worker (default command)
+  --serve              Start HTTP only
+  --worker             Start the worker only
+  --watch              Restart with the runtime's native watcher on source edits
+  --action NAME        Run one action and exit
+  --args JSON          Input for --action
+contracts              Sync workflow contracts (--check, --allow-breaking)
+modules sync|check     Sync or check module artifacts
+  --modules-dir PATH --artifacts-dir PATH --composition-root PATH
+schema generate|check  Generate or check database schema artifacts
+  --docker-image IMAGE --output-dir PATH
+
+--project-dir PATH     Project directory (default: current directory)
+--help, -h             Show this help without starting services`;
+
+export function installCliShutdownHandler(stop: () => Promise<void>): void {
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await stop();
+      process.exit(0);
+    } catch (error) {
+      console.error(error);
+      process.exit(1);
     }
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
 
-    const key = token.slice(2);
-    const next = rawArgs[index + 1];
-    if (next === undefined || next.length === 0 || next.startsWith("--")) {
-      parsed[key] = true;
-      continue;
-    }
-
-    parsed[key] = next;
-    index += 1;
+async function runNativeWatchProcess(argv: readonly string[]): Promise<void> {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) throw new Error("--watch requires a CLI entry point");
+  const runtimeArgs = [...process.execArgv, "--watch"];
+  const child = spawn(process.execPath, [...runtimeArgs, entrypoint, ...argv.filter((arg) => arg !== "--watch")], {
+    stdio: "inherit",
+  });
+  const interrupt = () => { child.kill("SIGINT"); };
+  const terminate = () => { child.kill("SIGTERM"); };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  try {
+    await new Promise<void>((resolveExit, rejectExit) => {
+      child.once("error", rejectExit);
+      child.once("exit", (code) => {
+        process.exitCode = code ?? 0;
+        resolveExit();
+      });
+    });
+  } finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
   }
-
-  return parsed;
 }

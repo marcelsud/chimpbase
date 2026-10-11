@@ -56,7 +56,7 @@ const expectedFiles = [
   "packages/webhooks/dist",
 ];
 
-const expectedDependencies = {
+const expectedTelemetryPeers = {
   "@opentelemetry/api": "^1.9.0",
   "@opentelemetry/api-logs": "^0.200.0",
   "@opentelemetry/context-async-hooks": "^2.0.0",
@@ -67,6 +67,8 @@ const expectedDependencies = {
   "@opentelemetry/sdk-logs": "^0.200.0",
   "@opentelemetry/sdk-metrics": "^2.0.0",
   "@opentelemetry/sdk-trace-base": "^2.0.0",
+};
+const expectedDependencies = {
   "@types/pg": "^8.15.6",
   kysely: "^0.28.11",
   pg: "^8.16.3",
@@ -118,6 +120,10 @@ function validatePackageConfig(config) {
     throw new Error("root package must set type to module");
   }
   assertExactObject(config.dependencies, expectedDependencies, "root dependencies");
+  assertExactObject(config.peerDependencies, expectedTelemetryPeers, "optional telemetry peers");
+  assertExactObject(config.peerDependenciesMeta,
+    Object.fromEntries(Object.keys(expectedTelemetryPeers).map((name) => [name, { optional: true }])),
+    "optional telemetry peer metadata");
   for (const [scriptName, command] of Object.entries(expectedScripts)) {
     if (config.scripts?.[scriptName] !== command) {
       throw new Error(`root script ${scriptName} must be exactly ${command}`);
@@ -208,6 +214,38 @@ async function validateStagedPackage(exports) {
         stageRoot,
         cliSmokeError,
       );
+    }
+
+    await rm(resolve(stageRoot, "node_modules"));
+    await mkdir(resolve(stageRoot, "node_modules"));
+    for (const dependency of Object.keys(expectedDependencies)) {
+      const target = resolve(stageRoot, "node_modules", dependency);
+      await mkdir(dirname(target), { recursive: true });
+      await symlink(resolve(repoRoot, "node_modules", dependency), target, "dir");
+    }
+    await runSubprocess("telemetry peers remain absent", process.execPath, [
+      "--input-type=module", "--eval",
+      `import assert from "node:assert/strict";
+       for (const name of ${JSON.stringify(Object.keys(expectedTelemetryPeers))}) {
+         await assert.rejects(import(name), { code: "ERR_MODULE_NOT_FOUND" });
+       }`,
+    ], stageRoot);
+    for (const [runtime, command, commandArgs] of [
+      ["node", process.execPath, ["--input-type=module", "--eval"]],
+      ["bun", "bun", ["--eval"]],
+    ]) {
+      const portable = pathToFileURL(resolve(stageRoot, exports["./runtime"].default)).href;
+      const host = pathToFileURL(resolve(stageRoot, exports[`./runtime/${runtime}`].default)).href;
+      await runSubprocess(`${runtime} action without telemetry peers`, command, [
+        ...commandArgs,
+        `import assert from "node:assert/strict";
+         const { action, v } = await import(${JSON.stringify(portable)});
+         const { createChimpbase } = await import(${JSON.stringify(host)});
+         const echo = action({ name: "echo", args: v.object({ value: v.string() }), handler: (_ctx, input) => input.value });
+         const host = await createChimpbase({ project: { name: "no-telemetry" }, storage: { engine: "memory" }, registrations: [echo] });
+         try { assert.equal((await host.executeAction(echo, { value: "works" })).result, "works"); }
+         finally { await host.close(); }`,
+      ], stageRoot);
     }
   } finally {
     await rm(stageRoot, { force: true, recursive: true });

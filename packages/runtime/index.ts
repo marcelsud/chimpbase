@@ -93,7 +93,8 @@ type ChimpbaseActionArgs<
   ChimpbaseRegisteredActions<TActions>[TName] extends ChimpbaseActionDefinition<infer TArgs, unknown>
     ? TArgs
     : never;
-type ChimpbaseActionCallArgs<TArgs> = TArgs extends readonly unknown[] ? TArgs : [TArgs];
+type ChimpbaseActionCallArgs<TArgs, TValidated extends boolean = false> =
+  TValidated extends true ? [TArgs] : TArgs extends readonly unknown[] ? TArgs : [TArgs];
 type ChimpbaseActionResult<
   TActions extends ChimpbaseActionMap,
   TName extends ChimpbaseKnownActionName<TActions>,
@@ -108,8 +109,8 @@ type ChimpbaseActionDefinitionFromMethod<TValue> =
     : never;
 
 type ChimpbaseActionDefinitionFromRegistration<TValue> =
-  TValue extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions>
-    ? ChimpbaseActionDefinition<TArgs, TResult>
+  TValue extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions, infer TValidated>
+    ? ChimpbaseActionDefinition<ChimpbaseActionCallArgs<TArgs, TValidated>, TResult>
     : never;
 
 type ChimpbaseActionDefinitionFromValue<TValue> =
@@ -241,11 +242,11 @@ export interface ChimpbaseWorkflowActionStepDefinition<
   TArgs = unknown[],
   TResult = unknown,
 > {
-  action: string | ChimpbaseActionRegistration<TArgs, TResult, ChimpbaseActionMap>;
+  action: string | ChimpbaseActionRegistrationLike;
   args?: (params: ChimpbaseWorkflowRuntimeState<TInput, TState>) => TArgs;
   id: string;
   kind: "workflow_action";
-  onResult?: (params: ChimpbaseWorkflowActionStepResult<TInput, TState, TResult>) => TState;
+  onResult?(params: ChimpbaseWorkflowActionStepResult<TInput, TState, TResult>): TState;
 }
 
 export interface ChimpbaseWorkflowSleepStepDefinition<
@@ -337,7 +338,7 @@ export interface ChimpbaseWorkflowRunContext<TInput = unknown, TState = unknown>
   readonly module: { readonly name: string } | null;
   action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
-    ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
+    ...args: ChimpbaseInferActionCallArgs<TAction>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
   action<TResult = unknown>(name: string, ...args: unknown[]): Promise<TResult>;
   complete(state?: TState, options?: { stepId?: string }): ChimpbaseWorkflowCompleteDirective<TState>;
@@ -730,14 +731,14 @@ export interface ChimpbaseContext<TActions extends ChimpbaseActionMap = Chimpbas
   ): Promise<TResult>;
   action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
-    ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
+    ...args: ChimpbaseInferActionCallArgs<TAction>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
   action<TName extends ChimpbaseKnownActionName<TActions>>(
     name: TName,
     ...args: ChimpbaseActionCallArgs<ChimpbaseActionArgs<TActions, TName>>
   ): Promise<ChimpbaseActionResult<TActions, TName>>;
   action<TArgs extends unknown[] = unknown[], TResult = unknown>(
-    name: string,
+    name: string extends ChimpbaseKnownActionName<TActions> ? string : never,
     ...args: TArgs
   ): Promise<TResult>;
 }
@@ -749,14 +750,14 @@ export interface ChimpbaseRouteEnv<TActions extends ChimpbaseActionMap = Chimpba
   ): Promise<TOutput>;
   action<TAction extends ChimpbaseActionRegistrationLike>(
     reference: TAction,
-    ...args: ChimpbaseActionCallArgs<ChimpbaseInferActionArgs<TAction>>
+    ...args: ChimpbaseInferActionCallArgs<TAction>
   ): Promise<ChimpbaseInferActionResult<TAction>>;
   action<TName extends ChimpbaseKnownActionName<TActions>>(
     name: TName,
     ...args: ChimpbaseActionCallArgs<ChimpbaseActionArgs<TActions, TName>>
   ): Promise<ChimpbaseActionResult<TActions, TName>>;
   action<TArgs extends unknown[] = unknown[], TResult = unknown>(
-    name: string,
+    name: string extends ChimpbaseKnownActionName<TActions> ? string : never,
     ...args: TArgs
   ): Promise<TResult>;
   blobs: ChimpbaseBlobsClient;
@@ -852,6 +853,13 @@ export type ChimpbaseRouteHandler<TActions extends ChimpbaseActionMap = Chimpbas
 
 export const CHIMPBASE_REQUEST_REJECTED_HEADER = "x-chimpbase-request-rejected";
 
+export class ChimpbaseInputValidationError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "ChimpbaseInputValidationError";
+  }
+}
+
 export interface ChimpbaseRoutePreparationEnv {
   secret(name: string): string | null;
 }
@@ -869,7 +877,6 @@ export type ChimpbaseMatchedRouteHandler<TActions extends ChimpbaseActionMap = C
 ) => Response | null | Promise<Response | null>;
 
 export interface ChimpbaseRegistrationTarget {
-  bindActionInvoker?(reference: ChimpbaseActionRegistrationLike): void;
   registerAction<TArgs extends unknown[] = unknown[], TResult = unknown>(
     name: string,
     handler: ChimpbaseTupleActionHandler<TArgs, TResult>,
@@ -930,12 +937,15 @@ export interface ChimpbaseActionRegistration<
   TArgs = unknown[],
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
+  TValidated extends boolean = false,
 > {
-  (...args: ChimpbaseActionCallArgs<TArgs>): Promise<TResult>;
+  (...args: ChimpbaseActionCallArgs<TArgs, TValidated>): Promise<TResult>;
   args?: ChimpbaseValidator<TArgs>;
   result?: ChimpbaseValidator<TResult>;
   kind: "action";
-  handler: ChimpbaseActionHandler<TArgs, TResult, TActions>;
+  handler: TValidated extends true
+    ? ChimpbaseObjectActionHandler<TArgs, TResult, TActions>
+    : ChimpbaseActionHandler<TArgs, TResult, TActions>;
   name: string;
   telemetry?: ChimpbaseTelemetryPersistOption;
 }
@@ -944,13 +954,17 @@ export type ChimpbaseActionReference<
   TArgs = unknown[],
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
-> = ChimpbaseActionRegistration<TArgs, TResult, TActions>;
+  TValidated extends boolean = false,
+> = ChimpbaseActionRegistration<TArgs, TResult, TActions, TValidated>;
 
 export type ChimpbaseInferActionArgs<TAction> =
-  TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions> ? TArgs : never;
+  TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions, infer TValidated> ? TArgs : never;
+
+export type ChimpbaseInferActionCallArgs<TAction> =
+  TAction extends (...args: infer TArgs) => unknown ? TArgs : unknown[];
 
 export type ChimpbaseInferActionResult<TAction> =
-  TAction extends ChimpbaseActionRegistration<infer TArgs, infer TResult, infer TActions> ? TResult : never;
+  TAction extends (...args: never[]) => infer TResult ? Awaited<TResult> : unknown;
 
 export type ChimpbaseSubscriptionOptions =
   { dispatch?: "async" | "sync"; telemetry?: ChimpbaseTelemetryPersistOption } & (
@@ -1114,7 +1128,6 @@ const decoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseAnyReg
 const legacyDecoratedEntryStore = new WeakMap<ChimpbaseDecoratedOwner, ChimpbaseLegacyDecoratedEntry[]>();
 const chimpbaseModuleMarker = new WeakSet<ChimpbaseAnyConstructor>();
 const ACTION_INVOKER_STORAGE_KEY = Symbol.for("@chimpbase/runtime.action_invoker_storage");
-const ACTION_REFERENCE_INVOKERS_KEY = Symbol.for("@chimpbase/runtime.action_reference_invokers");
 const actionInvokerStorage = getActionInvokerStorage();
 
 type RuntimeGlobals = typeof globalThis & {
@@ -1164,13 +1177,6 @@ export function runWithActionInvoker<TResult>(
   return actionInvokerStorage.run(invoker, callback);
 }
 
-export function bindActionInvoker(
-  reference: ChimpbaseActionRegistrationLike,
-  invoker: ChimpbaseActionInvoker,
-): void {
-  getBoundActionInvokers().set(reference, invoker);
-}
-
 interface ChimpbaseActionDefinitionInput<
   TArgs,
   TResult,
@@ -1204,7 +1210,7 @@ export function action<
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
 >(
   input: ChimpbaseActionDefinitionInput<TArgs, TResult, TActions>,
-): ChimpbaseActionRegistration<TArgs, TResult, TActions>;
+): ChimpbaseActionRegistration<TArgs, TResult, TActions, true>;
 export function action<
   TResult = unknown,
   TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry,
@@ -1502,7 +1508,7 @@ export function workflowActionStep<
 >;
 export function workflowActionStep<TInput = unknown, TState = unknown, TArgs = unknown[], TResult = unknown>(
   id: string,
-  actionNameOrReference: string | ChimpbaseActionRegistration<TArgs, TResult, ChimpbaseActionMap>,
+  actionNameOrReference: string | ChimpbaseActionRegistrationLike,
   options: Omit<ChimpbaseWorkflowActionStepDefinition<TInput, TState, TArgs, TResult>, "action" | "id" | "kind"> = {},
 ): ChimpbaseWorkflowActionStepDefinition<TInput, TState, TArgs, TResult> {
   return {
@@ -1731,7 +1737,6 @@ export function register(
     switch (entry.kind) {
       case "action": {
         const actionName = resolveActionRegistrationName(entry);
-        target.bindActionInvoker?.(entry);
         if ((entry.args !== undefined)) {
           if (!isObjectRegistrationHandler(entry.handler)) {
             throw new TypeError(`action ${actionName} has an invalid object handler`);
@@ -2718,18 +2723,6 @@ function getActionInvokerStorage(): AsyncLocalStorage<ChimpbaseActionInvoker> {
   return runtimeGlobals[ACTION_INVOKER_STORAGE_KEY];
 }
 
-function getBoundActionInvokers(): WeakMap<ChimpbaseActionRegistrationLike, ChimpbaseActionInvoker> {
-  const runtimeGlobals = globalThis as typeof globalThis & {
-    [ACTION_REFERENCE_INVOKERS_KEY]?: WeakMap<ChimpbaseActionRegistrationLike, ChimpbaseActionInvoker>;
-  };
-
-  if (!(runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY] !== undefined)) {
-    runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY] = new WeakMap();
-  }
-
-  return runtimeGlobals[ACTION_REFERENCE_INVOKERS_KEY];
-}
-
 function matchesActionRegistration<
   TArgs,
   TResult,
@@ -2765,11 +2758,11 @@ function createActionRegistration<
     if (actionReference === null) {
       throw new TypeError("action registration was invoked before initialization");
     }
-    const invoker = actionInvokerStorage.getStore() ?? getBoundActionInvokers().get(actionReference);
+    const invoker = actionInvokerStorage.getStore();
     if (!(invoker !== undefined)) {
       const actionName = formatActionRegistrationName(registration.name);
       throw new Error(
-        `action ${actionName} requires an active chimpbase runtime context or a registered host binding; use ctx.action(${actionName}, ...) or host.executeAction(${actionName}, ...)`,
+        `action ${actionName} requires an active chimpbase runtime context; use host.executeAction(reference, ...) outside a handler`,
       );
     }
 

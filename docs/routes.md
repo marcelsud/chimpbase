@@ -51,6 +51,10 @@ interface ChimpbaseRouteEnv {
 
 Use `env.action(name, ...args)` or pass an action reference. Routes do not have direct access to `db`, `kv`, or `collection`; those belong to the action context.
 
+HTTP parsing, middleware and external waits run outside database transactions. Each action call commits independently; a later route error does not roll back an earlier successful action. Put operations that must succeed together in one action and call other actions from its context. SQLite serializes action work while unrelated request handlers continue running.
+
+Invalid action input returns HTTP `400` with `{ error: { code: "INVALID_ACTION_INPUT", message } }`. Errors from action handlers or result validators remain server errors.
+
 ### Request Context
 
 `get` and `set` allow routes and middleware to pass data to downstream handlers within the same request. Context is per-request — each `executeRoute()` call gets a fresh map.
