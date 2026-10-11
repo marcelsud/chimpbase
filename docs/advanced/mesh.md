@@ -74,7 +74,7 @@ host.register(
 | `rpcPath` | `/__chimpbase/mesh/rpc` | Route registered on this node to receive RPC. |
 | `rpcBodyTimeoutMs` | 5000 | Maximum time to read an authenticated inbound RPC body before starting its transaction. |
 | `rpcMaxBodyBytes` | 1048576 | Maximum inbound RPC body size in bytes (1 MiB). |
-| `heartbeatMs` | 10000 | Interval between heartbeats. |
+| `heartbeatMs` | 10000 | Interval between heartbeats; `0` disables periodic heartbeats. |
 | `offlineAfterMs` | 30000 | Peers with no heartbeat within this window are treated as offline. |
 | `gcAfterMs` | 600000 | Cron sweep removes rows older than this. |
 | `defaultStrategy` | `"local-first"` | `local-first` · `round-robin` · `random` · `cpu`. |
@@ -82,6 +82,8 @@ host.register(
 | `defaultRetries` | 0 | Retry attempts on failure. |
 | `middleware` | `[]` | Functions wrapping `ctx.mesh.call` (circuit breakers, tracing). |
 | `meta` | `{}` | Published in the announce payload (e.g., `{ cpuLoad: 0.3 }`). |
+
+Invalid numeric options throw `MeshConfigurationError`. Timer values (`heartbeatMs`, `rpcBodyTimeoutMs`, `defaultTimeoutMs`, per-call `timeoutMs`, and `retry.delayMs`) must be finite and at most 2,147,483,647 ms. Timeouts must be positive; `heartbeatMs` and `retry.delayMs` allow `0`. Registry windows (`offlineAfterMs`, `gcAfterMs`) must be positive safe integers. Retry counts must be non-negative safe integers (`0` means no retries), and `rpcMaxBodyBytes` must be a positive safe integer. Per-call numeric options are checked before middleware, target selection, or fallback execution.
 
 ## `ctx.mesh`
 

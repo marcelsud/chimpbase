@@ -19,6 +19,7 @@ import {
 } from "@chimpbase/runtime";
 
 import {
+  assertMeshTimerMs,
   createCallDispatcher,
   type RemoteDispatcher,
 } from "./call.ts";
@@ -69,6 +70,7 @@ import type {
   ServiceEventDispatch,
   ServiceSelf,
 } from "./types.ts";
+import { MeshConfigurationError } from "./types.ts";
 
 export interface ChimpbaseMeshOptions {
   advertisedUrl?: string;
@@ -122,9 +124,15 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   const rpcPath = options.rpcPath ?? DEFAULT_RPC_PATH;
   const rpcBodyTimeoutMs = options.rpcBodyTimeoutMs ?? 5_000;
   const rpcMaxBodyBytes = options.rpcMaxBodyBytes ?? 1_048_576;
-  if (!Number.isSafeInteger(rpcMaxBodyBytes) || rpcMaxBodyBytes <= 0
-    || !Number.isFinite(rpcBodyTimeoutMs) || rpcBodyTimeoutMs <= 0 || rpcBodyTimeoutMs > 2_147_483_647) {
-    throw new Error("chimpbaseMesh: RPC body limits must be finite positive values");
+  assertMeshTimerMs("heartbeatMs", heartbeatMs, true);
+  assertMeshTimerMs("rpcBodyTimeoutMs", rpcBodyTimeoutMs);
+  for (const [name, value] of Object.entries({ offlineAfterMs, gcAfterMs })) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new MeshConfigurationError(`mesh ${name} must be a positive safe integer`);
+    }
+  }
+  if (!Number.isSafeInteger(rpcMaxBodyBytes) || rpcMaxBodyBytes <= 0) {
+    throw new MeshConfigurationError("mesh rpcMaxBodyBytes must be a positive safe integer");
   }
   const middleware = options.middleware ?? [];
   const metadata = { ...options.meta };

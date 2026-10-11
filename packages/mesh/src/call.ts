@@ -12,6 +12,7 @@ import type {
 } from "./types.ts";
 import {
   MeshCallError,
+  MeshConfigurationError,
   MeshNoAvailableNodeError,
   MeshTimeoutError,
 } from "./types.ts";
@@ -36,6 +37,8 @@ export type RemoteDispatcher = (params: {
 }) => Promise<unknown>;
 
 export function createCallDispatcher(options: CallResolverOptions) {
+  assertMeshTimerMs("defaultTimeoutMs", options.defaultTimeoutMs);
+  assertRetryAttempts("defaultRetries", options.defaultRetries);
   const contexts = new AsyncLocalStorage<ChimpbaseContext>();
   const roundRobinCounters = new Map<string, number>();
   const core = async <TResult>(
@@ -45,6 +48,7 @@ export function createCallDispatcher(options: CallResolverOptions) {
     resultValidator: ChimpbaseValidator<TResult>,
     callOpts: CallOptions,
   ): Promise<TResult> => {
+    validateCallOptions(callOpts, options);
     const strategy = callOpts.strategy ?? options.defaultStrategy;
     const timeoutMs = callOpts.timeoutMs ?? options.defaultTimeoutMs;
     const retryAttempts = callOpts.retry?.attempts ?? options.defaultRetries;
@@ -161,8 +165,27 @@ export function createCallDispatcher(options: CallResolverOptions) {
     result: ChimpbaseValidator<TResult>,
     callOpts: CallOptions,
   ): Promise<TResult> => {
+    validateCallOptions(callOpts, options);
     return await contexts.run(ctx, () => wrapped(actionName, args, result, callOpts));
   };
+}
+
+export function assertMeshTimerMs(name: string, value: number, allowZero = false): void {
+  if (!Number.isFinite(value) || value < 0 || (!allowZero && value === 0) || value > 2_147_483_647) {
+    throw new MeshConfigurationError(`mesh ${name} must be finite, ${allowZero ? "non-negative" : "positive"}, and at most 2147483647ms`);
+  }
+}
+
+function assertRetryAttempts(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new MeshConfigurationError(`mesh ${name} must be a non-negative safe integer`);
+  }
+}
+
+function validateCallOptions(callOpts: CallOptions, options: CallResolverOptions): void {
+  assertMeshTimerMs("timeoutMs", callOpts.timeoutMs ?? options.defaultTimeoutMs);
+  assertRetryAttempts("retry.attempts", callOpts.retry?.attempts ?? options.defaultRetries);
+  assertMeshTimerMs("retry.delayMs", callOpts.retry?.delayMs ?? 100, true);
 }
 
 interface PickTargetArgs {
@@ -263,10 +286,6 @@ async function withTimeout<T>(
   nodeId: string | null,
   waitForSettlement = false,
 ): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return await promise;
-  }
-
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<T>((_, reject) => {
     timer = setTimeout(() => {

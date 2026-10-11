@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
+import { chimpbaseMesh, MeshConfigurationError, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { onStart, v } from "../packages/runtime/index.ts";
 import { upsertNode } from "../packages/mesh/src/registry.ts";
@@ -41,6 +41,39 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
 }
 
 describe("@chimpbase/mesh registry", () => {
+  test("rejects invalid numeric mesh configuration at registration", () => {
+    for (const [name, values] of Object.entries({
+      heartbeatMs: [-1, NaN, Infinity, 2_147_483_648],
+      offlineAfterMs: [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE],
+      gcAfterMs: [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE],
+      defaultRetries: [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1],
+      defaultTimeoutMs: [0, -1, NaN, Infinity, 2_147_483_648],
+      rpcBodyTimeoutMs: [0, -1, NaN, Infinity, 2_147_483_648],
+      rpcMaxBodyBytes: [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1],
+    })) {
+      for (const value of values) {
+        const configure = () => chimpbaseMesh({
+          services: [service({ name: "numeric" })], transport: "local-only", [name]: value,
+        });
+        expect(configure).toThrow(MeshConfigurationError);
+        expect(configure).toThrow(name);
+      }
+    }
+  });
+
+  test("allows disabled heartbeats, zero retries, timer boundaries, and longer registry windows", () => {
+    const options = {
+      services: [service({ name: "numeric" })], transport: "local-only" as const,
+      heartbeatMs: 0, defaultRetries: 0, defaultTimeoutMs: 2_147_483_647,
+      rpcBodyTimeoutMs: 2_147_483_647, rpcMaxBodyBytes: Number.MAX_SAFE_INTEGER,
+      offlineAfterMs: 2_147_483_648, gcAfterMs: 2_147_483_648,
+    };
+    expect(() => chimpbaseMesh(options)).not.toThrow();
+    expect(() => chimpbaseMesh({ ...options, heartbeatMs: 2_147_483_647, defaultRetries: Number.MAX_SAFE_INTEGER })).not.toThrow();
+    expect(() => chimpbaseMesh({ ...options, offlineAfterMs: Number.MAX_SAFE_INTEGER, gcAfterMs: Number.MAX_SAFE_INTEGER })).not.toThrow();
+    expect(() => chimpbaseMesh({ ...options, heartbeatMs: 0.5, defaultTimeoutMs: 0.5, rpcBodyTimeoutMs: 0.5 })).not.toThrow();
+  });
+
   test("a later ready hook failure stops mesh heartbeats and releases service resources", async () => {
     const host = await createMeshHost();
     let running = false;

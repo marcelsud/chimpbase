@@ -47,6 +47,10 @@ The handler receives the full `ChimpbaseContext` and the event payload.
 
 Mark subscriptions as idempotent when replay safety matters. The framework atomically reserves a KV marker before invoking the handler, in the same database transaction. Concurrent deliveries wait for that transaction and skip the handler after a successful commit; a rollback removes the reservation so delivery can retry. External effects still need their own idempotency key when a handler can fail after sending them.
 
+Handlers sharing an event, a name, and a dispatch mode form one delivery group. The group reserves one marker and runs all its idempotent handlers in registration order in the same transaction. A failure in any handler rolls back the group's effects and reservation. Non-idempotent handlers still run on every delivery. Synchronous and asynchronous groups reserve separate deliveries even when their names match.
+
+Markers include the effective dispatch mode. Upgrading from event/name-only markers can repeat older deliveries; handlers and external effects must tolerate these duplicates during rollout.
+
 ```ts
 subscription("payment.captured", handlePayment, {
   idempotent: true,

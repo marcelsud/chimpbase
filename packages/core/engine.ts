@@ -1052,7 +1052,11 @@ export class ChimpbaseEngine {
           async () => await this.runWithActionInvoker(async () => await onFailure(this.createContext(scope), error), worker.module ?? null));
         if (onFailure !== undefined) {
           this.takeCommittedEvents();
-          await this.flushTelemetryToStreams(scope, telemetryStart);
+          try {
+            await this.flushTelemetryToStreams(scope, telemetryStart);
+          } catch {
+            // Failure diagnostics must not mask the worker error after retry/DLQ state is durable.
+          }
         }
       }
       for (const span of handlerSpans) span.end("error", message);
@@ -2802,21 +2806,26 @@ export class ChimpbaseEngine {
       const subscriptions = (this.registry.subscriptions.get(event.name) ?? [])
         .filter((entry) => (subscriptionName === undefined || entry.name === subscriptionName)
           && (dispatch === undefined || this.isAsyncSubscription(entry) === (dispatch === "async")));
-      for (const sub of subscriptions) {
-        const subscriptionHandler: unknown = sub.handler;
-        if (!isSubscriptionHandler(subscriptionHandler)) {
-          throw new TypeError(`subscription ${event.name} has an invalid handler`);
-        }
-        await this.runInTransaction(async () => {
+      await this.runInTransaction(async () => {
+        const reservations = new Map<string, boolean>();
+        for (const sub of subscriptions) {
+          const subscriptionHandler: unknown = sub.handler;
+          if (!isSubscriptionHandler(subscriptionHandler)) {
+            throw new TypeError(`subscription ${event.name} has an invalid handler`);
+          }
           if (sub.idempotent && event.id !== undefined) {
-            const key = `_chimpbase.sub.seen:${event.id}:${sub.name}`;
-            const reserved = await this.adapter.query(
-              `INSERT INTO _chimpbase_kv (key, value_json) VALUES (?1, ?2)
-               ON CONFLICT(key) DO NOTHING RETURNING key`,
-              [key, "true"],
-              v.object({ key: v.string() }),
-            );
-            if (reserved.length === 0) return;
+            const mode = this.isAsyncSubscription(sub) ? "async" : "sync";
+            const key = `_chimpbase.sub.seen:${event.id}:${mode}:${sub.name}`;
+            if (!reservations.has(key)) {
+              const reserved = await this.adapter.query(
+                `INSERT INTO _chimpbase_kv (key, value_json) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING RETURNING key`,
+                [key, "true"],
+                v.object({ key: v.string() }),
+              );
+              reservations.set(key, reserved.length > 0);
+            }
+            if (!reservations.get(key)) continue;
           }
           await this.runWithActionInvoker(async () => {
             await subscriptionHandler(this.createContext({
@@ -2825,8 +2834,8 @@ export class ChimpbaseEngine {
               name: `${event.name}:${sub.name}`,
             }), payload);
           }, sub.module ?? null);
-        });
-      }
+        }
+      });
     }
   }
 
@@ -2950,9 +2959,15 @@ export class ChimpbaseEngine {
     attempts: number,
     onFailure?: () => Promise<void>,
   ): Promise<void> {
+    let hookError: { error: unknown } | undefined;
     await this.runInTransaction(async () => {
       if (this.adapter.lockQueueJob !== undefined && !await this.adapter.lockQueueJob(jobId, attempts)) return;
-      await onFailure?.();
+      try {
+        await onFailure?.();
+      } catch (error) {
+        hookError = { error };
+        throw error;
+      }
       const worker = this.registry.workers.get(queueName);
       const dlqName = worker?.definition.dlq;
       const shouldDlq = typeof dlqName === "string" && attempts >= this.worker.maxAttempts;
@@ -2981,6 +2996,16 @@ export class ChimpbaseEngine {
         }
       }
       await this.adapter.markQueueJobFailure(jobId, nextStatus, nextAvailableAtMs, errorMessage);
+    }).catch(async (error: unknown) => {
+      if (hookError === undefined || !Object.is(hookError.error, error)) throw error;
+      // The failed hook transaction is rolled back; fence the claim again before recording failure.
+      await this.failQueueJob(jobId, queueName, errorMessage, attempts);
+      try {
+        this.recordLog({ kind: "queue", module: this.registry.workers.get(queueName)?.module ?? null, name: queueName },
+          "warn", "queue failure hook failed", { error: error instanceof Error ? error.message : String(error), jobId, attempts });
+      } catch {
+        // Diagnostics must not mask the original worker error or prevent durable failure handling.
+      }
     });
   }
 
