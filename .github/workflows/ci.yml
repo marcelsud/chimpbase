@@ -24,15 +24,11 @@ jobs:
         with:
           node-version: 24
 
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Build packages
-        run: node ./scripts/build-package.mjs runtime core tooling postgres host deno node rest-collections otel bun pact auth webhooks
+        run: node ./scripts/build-package.mjs runtime core tooling postgres host node rest-collections otel bun pact auth webhooks
 
       - name: Typecheck
         run: bun run typecheck
@@ -84,15 +80,11 @@ jobs:
         with:
           node-version: 24
 
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Build packages
-        run: node ./scripts/build-package.mjs runtime core tooling postgres host deno node rest-collections otel bun pact auth webhooks
+        run: node ./scripts/build-package.mjs runtime core tooling postgres host node rest-collections otel bun pact auth webhooks
 
       - name: Postgres integration tests
         run: >-
@@ -104,9 +96,6 @@ jobs:
       - name: Schema sync tests
         run: bun test tests/schema.sync.test.ts
 
-      - name: Deno runtime tests
-        run: bun test tests/deno.runtime.test.ts
-
   docker-images:
     name: Docker (${{ matrix.runtime }})
     runs-on: ubuntu-latest
@@ -115,7 +104,6 @@ jobs:
       matrix:
         runtime:
           - bun
-          - deno
           - node
 
     steps:

@@ -1,6 +1,6 @@
 # Subscriptions
 
-Subscriptions react to events published via `ctx.pubsub.publish()`. Use them for internal choreography — audit logging, notifications, data denormalization, or enqueuing background work.
+Subscriptions react to events published via `ctx.pubsub.publish()`. Use them for internal choreography — audit logging, notifications, updating read models, or enqueuing background work.
 
 ## Publishing Events
 

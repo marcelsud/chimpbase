@@ -11,7 +11,7 @@ Consolidates the public API into the single `chimpbase` package and adds busines
 
 ### Changed
 
-- consolidated the public API into one `chimpbase` package with portable root and runtime exports, direct feature subpaths, and explicit `runtime/bun`, `runtime/node`, and `runtime/deno` adapter subpaths
+- consolidated the public API into one `chimpbase` package with portable root and runtime exports, direct feature subpaths, and explicit `runtime/bun` and `runtime/node` adapter subpaths
 - made every `packages/*` workspace private; scoped workspace names remain internal development aliases and build output rewrites them to public `chimpbase` subpaths
 
 ### Fixed
@@ -26,7 +26,7 @@ Stabilizes the multi-runtime release and makes durable job dispatch consistent w
 
 - added `ctx.enqueue(name, payload, options?)` as the preferred durable job API; `ctx.queue.enqueue(...)` remains available as a deprecated compatibility alias
 - added PostgreSQL durability coverage for host replacement, retries and DLQ delivery, concurrent claims, expired lease recovery, workflow resumption, and multi-replica cron scheduling
-- added CI builds and PostgreSQL-backed `/health` smoke tests for the Bun, Node, and Deno advanced images
+- added CI builds and PostgreSQL-backed `/health` smoke tests for the Bun and Node advanced images
 - added the Chimpbase Cloud and `chimpctl` documentation pages
 
 ### Changed
@@ -34,14 +34,13 @@ Stabilizes the multi-runtime release and makes durable job dispatch consistent w
 - upgraded the repository toolchain and CI to Bun 1.3.14
 - aligned examples, plugins, tests, and documentation on `ctx.enqueue(...)`
 - made Node runtime detection safe when Node is unavailable and validated the Node 24 SQLite host path
-- made the Deno advanced image cache application and test dependencies during its build
 - extracted `tools/swarm` to a sibling repo (now `@chimpbase/deployer`); removed `"tools/*"` from chimpbase workspaces and `tools/**/*.ts` from `tsconfig.json`. Cross-repo wiring now lives in a parent workspace at the shared root.
 
 ### Fixed
 
 - fixed Bun and Node advanced Docker builds so frozen installs receive a complete workspace view
 - fixed the VitePress production build by declaring its Vue server-renderer dependency explicitly
-- fixed the PostgreSQL CI job to execute the real LISTEN/NOTIFY, mesh, schema, Deno, and durability suites
+- fixed the PostgreSQL CI job to execute the real LISTEN/NOTIFY, mesh, schema, and durability suites
 - avoided polling the event bus after transactions that committed no events
 
 ## 0.6.0 - 2026-04-18

@@ -146,21 +146,6 @@
         "kysely": "^0.28.11",
       },
     },
-    "packages/deno": {
-      "name": "@chimpbase/deno",
-      "version": "0.7.0",
-      "dependencies": {
-        "@chimpbase/core": "0.7.0",
-        "@chimpbase/host": "0.7.0",
-        "@chimpbase/postgres": "0.7.0",
-        "@chimpbase/runtime": "0.7.0",
-        "@chimpbase/tooling": "0.7.0",
-        "kysely": "^0.28.11",
-      },
-      "devDependencies": {
-        "typescript": "^5.9.3",
-      },
-    },
     "packages/host": {
       "name": "@chimpbase/host",
       "version": "0.7.0",
@@ -322,8 +307,6 @@
     "@chimpbase/bun": ["@chimpbase/bun@workspace:packages/bun"],
 
     "@chimpbase/core": ["@chimpbase/core@workspace:packages/core"],
-
-    "@chimpbase/deno": ["@chimpbase/deno@workspace:packages/deno"],
 
     "@chimpbase/example-bun-advanced": ["@chimpbase/example-bun-advanced@workspace:examples/bun/advanced"],
 

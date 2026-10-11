@@ -2,7 +2,7 @@
 
 Build a small notes API with Bun. It uses SQLite locally, so you do not need a database server or HTTP framework.
 
-This walkthrough uses Bun 1.3 and `curl`. Install [Bun](https://bun.sh/docs/installation) before starting. For Node or Deno, follow the [runtime host instructions](/configuration#runtime-hosts) with the same app below.
+This walkthrough uses Bun 1.3 and `curl`. Install [Bun](https://bun.sh/docs/installation) before starting. For Node, follow the [runtime host instructions](/configuration#runtime-hosts) with the same app below.
 
 ## Install
 
@@ -113,6 +113,6 @@ bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
 
 - [Actions](/actions), [HTTP routes](/routes) and [collections](/collections) explain the API above.
 - [Workers and queues](/workers) add background jobs; [cron](/cron) adds schedules.
-- [Configuration](/configuration) covers PostgreSQL, Node, Deno and CLI options.
+- [Configuration](/configuration) covers PostgreSQL, Node and CLI options.
 
 When you need workflows, framework integrations, plugins or deployment recipes, use the separate [advanced guides](/advanced/).

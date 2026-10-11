@@ -21,10 +21,10 @@
 
 ## Public package
 
-Install `chimpbase` with Bun, npm or Deno's npm support. All public imports are subpaths of that single package. Scoped repository workspaces are private; do not tell users to install them.
+Install `chimpbase` with Bun or npm. All public imports are subpaths of that single package. Scoped repository workspaces are private; do not tell users to install them.
 
 - `chimpbase` and `chimpbase/runtime`: portable runtime DSL and context types.
-- `chimpbase/runtime/bun`, `chimpbase/runtime/node`, `chimpbase/runtime/deno`: explicit host adapters. Portable imports do not select a host.
+- `chimpbase/runtime/bun` and `chimpbase/runtime/node`: explicit host adapters. Portable imports do not select a host.
 - `chimpbase/core`, `chimpbase/host`, `chimpbase/postgres`, `chimpbase/tooling`: low-level integration and tooling.
 - `chimpbase/auth`, `chimpbase/blobs`, `chimpbase/mesh`, `chimpbase/otel`, `chimpbase/pact`, `chimpbase/rest-collections`, `chimpbase/webhooks`: optional integrations.
 
@@ -43,7 +43,7 @@ Published consumers receive compiled JavaScript and TypeScript declarations. The
 
 ## Repository examples and source
 
-Start with [Bun basic](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic), [Node basic](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic), or [Deno basic](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/basic). Intermediate and advanced examples remain separate under each host directory.
+Start with [Bun basic](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic) or [Node basic](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic). Intermediate and advanced examples remain separate under each host directory.
 
 - [Runtime exports](https://github.com/chimpbase/chimpbase/blob/main/packages/runtime/index.ts): Authoritative application API.
 - [Shared host](https://github.com/chimpbase/chimpbase/blob/main/packages/host/src/library.ts): Host options, app loading and startup.

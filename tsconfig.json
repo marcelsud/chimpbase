@@ -24,8 +24,6 @@
       "chimpbase/runtime": ["./packages/runtime/index.ts"],
       "chimpbase/runtime/bun": ["./packages/bun/src/library.ts"],
       "chimpbase/runtime/bun/cli": ["./packages/bun/src/cli.ts"],
-      "chimpbase/runtime/deno": ["./packages/deno/src/library.ts"],
-      "chimpbase/runtime/deno/cli": ["./packages/deno/src/cli.ts"],
       "chimpbase/runtime/node": ["./packages/node/src/library.ts"],
       "chimpbase/runtime/node/cli": ["./packages/node/src/cli.ts"],
       "chimpbase/tooling": ["./packages/tooling/src/index.ts"],
@@ -44,7 +42,6 @@
       "@chimpbase/host": ["./packages/host/src/index.ts"],
       "@chimpbase/host/*": ["./packages/host/src/*"],
       "@chimpbase/bun": ["./packages/bun/src/library.ts"],
-      "@chimpbase/deno": ["./packages/deno/src/library.ts"],
       "@chimpbase/node": ["./packages/node/src/library.ts"],
       "@chimpbase/postgres": ["./packages/postgres/src/index.ts"],
       "@chimpbase/rest-collections": ["./packages/rest-collections/src/index.ts"],
@@ -60,7 +57,6 @@
   },
   "include": [
     "packages/bun/**/*.ts",
-    "packages/deno/**/*.ts",
     "packages/host/**/*.ts",
     "packages/node/**/*.ts",
     "packages/postgres/**/*.ts",
@@ -79,7 +75,6 @@
   ],
   "exclude": [
     "**/dist/**",
-    "**/node_modules/**",
-    "examples/deno/**"
+    "**/node_modules/**"
   ]
 }

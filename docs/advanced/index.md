@@ -31,8 +31,8 @@ Start with [Getting Started](/getting-started). These guides cover capabilities 
 
 The repository keeps complete examples separate from the main guide. Start with a basic app, then use the next level when you need its features:
 
-| Level | Bun | Node | Deno |
-|-------|-----|------|------|
-| Basic: actions and routes | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/basic) |
-| Intermediate: workers and cron | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/intermediate) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/intermediate) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/intermediate) |
-| Advanced: workflows and plugins | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/advanced) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/advanced) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/deno/advanced) |
+| Level | Bun | Node |
+|-------|-----|------|
+| Basic: actions and routes | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/basic) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/basic) |
+| Intermediate: workers and cron | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/intermediate) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/intermediate) |
+| Advanced: workflows and plugins | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/bun/advanced) | [Source](https://github.com/chimpbase/chimpbase/tree/main/examples/node/advanced) |
