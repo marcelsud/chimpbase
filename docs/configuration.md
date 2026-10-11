@@ -16,18 +16,54 @@ The [Getting Started](/getting-started) app only needs `project` and `registrati
 
 For telemetry, workflows, modules or a custom HTTP framework, see [advanced guides](/advanced/).
 
+## Install from source
+
+The public `chimpbase` package is not published to npm yet. Until it is available, build a package from the repository and install it in a separate project. Packaging requires Bun 1.3 and Node 24, even if you choose Deno to run your app:
+
+```bash
+git clone https://github.com/marcelsud/chimpbase.git
+cd chimpbase
+bun install --frozen-lockfile
+bun run build:publish:packages
+npm pack --ignore-scripts
+
+cd ..
+mkdir my-app
+cd my-app
+npm init -y
+npm pkg set type=module
+npm install ../chimpbase/chimpbase-0.8.0.tgz
+```
+
+Save the [Getting Started app](/getting-started#create-the-app) as `chimpbase.app.ts` in `my-app`, then use the [start command](#runtime-hosts) for your chosen runtime. This local package works with Bun, Node and Deno; its imports are the same as the public package. The tarball name follows the version in the repository's root `package.json`.
+
 ## Storage
 
 Without configuration, the CLI uses SQLite at `data/{project-name}.db`. SQLite runs in one process and is suitable for local development or a single-runtime deployment.
 
-For PostgreSQL, export a connection URL before starting the CLI:
+For PostgreSQL, first create a database. With Docker installed and running, this starts a local development database on port 5439:
 
 ```bash
-export DATABASE_URL=postgresql://localhost/mydb
+docker run -d --name chimpbase-postgres \
+  -p 127.0.0.1:5439:5432 \
+  -e POSTGRES_USER=chimpbase \
+  -e POSTGRES_PASSWORD=chimpbase \
+  -e POSTGRES_DB=my_app \
+  postgres:17-alpine
+
+docker exec chimpbase-postgres pg_isready -U chimpbase -d my_app
+```
+
+Wait until `pg_isready` reports `accepting connections`, then export the connection URL in the terminal where you start the CLI:
+
+```bash
+export DATABASE_URL=postgresql://chimpbase:chimpbase@127.0.0.1:5439/my_app
 bunx chimpbase dev
 ```
 
-A nonempty `DATABASE_URL` or `CHIMPBASE_DATABASE_URL` selects PostgreSQL automatically. Use PostgreSQL when multiple processes need to share queues or other coordination state.
+A nonempty `DATABASE_URL` or `CHIMPBASE_DATABASE_URL` selects PostgreSQL automatically. For Node or Deno, use the matching [start command](#runtime-hosts) after exporting the same URL. The Getting Started app uses collections, so it runs on PostgreSQL without application SQL migrations; Chimpbase creates its internal tables on startup. Existing SQLite notes remain in the SQLite file and are not copied to PostgreSQL.
+
+Use your own connection URL if you already have a database. These container credentials are for local development. Stop the database with `docker stop chimpbase-postgres`; restart it with `docker start chimpbase-postgres`. Use PostgreSQL when multiple processes need to share queues or other coordination state.
 
 PostgreSQL connection acquisition times out after 5 seconds. SQL queries and idle transactions have 30-second deadlines on the client and server, so a network failure cannot leave database locks held indefinitely. Set `storage.connectionTimeoutMs` and `storage.queryTimeoutMs` when creating the runtime to change these deadlines, including for long migrations, queries, or external waits inside a transaction. Both values must be positive finite integers:
 
@@ -52,7 +88,7 @@ For temporary data in tests:
 CHIMPBASE_STORAGE_ENGINE=memory bunx chimpbase dev
 ```
 
-Memory data is lost when the process stops.
+For Node or Deno, put `CHIMPBASE_STORAGE_ENGINE=memory` before the matching start command instead. Memory data is lost when the process stops. These shell commands use Bash/Zsh syntax.
 
 ## Environment variables
 
@@ -101,14 +137,54 @@ Workflow contract and module commands are documented in [advanced guides](/advan
 
 ## Runtime hosts
 
-All hosts use the same `chimpbase` package and portable `chimpbase/runtime` API:
+All hosts use the same `chimpbase` package and portable `chimpbase/runtime` API. The Getting Started app runs unchanged on each host. Use Bun 1.3, Node 24, or Deno 2; these are the runtime versions used by the repository checks.
 
-| Host | Host import | Start command |
-|------|-------------|---------------|
-| Bun | `chimpbase/runtime/bun` | `bunx chimpbase dev` |
-| Node | `chimpbase/runtime/node` | `npx chimpbase-node dev` |
-| Deno | `npm:chimpbase/runtime/deno` | `deno run -A npm:chimpbase/runtime/deno/cli dev` |
+Until the npm package is published, [install from source](#install-from-source), then skip the install commands below and use the matching start command.
 
-For Node, install with `npm install chimpbase` and use a Node release that supports loading `.ts` files and `node:sqlite`. For Deno, install with `deno add npm:chimpbase`; the CLI needs permissions to open the database, load project files and serve HTTP.
+| Host | Host import for a custom entry point |
+|------|--------------------------------------|
+| Bun | `chimpbase/runtime/bun` |
+| Node | `chimpbase/runtime/node` |
+| Deno | `npm:chimpbase/runtime/deno` |
+
+For Bun, follow [Getting Started](/getting-started). For Node or Deno, use one of the following setups in a new project directory, then save the same [app definition](/getting-started#create-the-app) as `chimpbase.app.ts`. Start the CLI from that directory and verify it with the same HTTP requests in [Run it](/getting-started#run-it).
+
+### Node
+
+Node 24 loads the app's TypeScript directly and includes `node:sqlite`. Install with npm and mark the project as an ES module:
+
+```bash
+mkdir my-app
+cd my-app
+npm init -y
+npm pkg set type=module
+npm install chimpbase
+```
+
+After saving `chimpbase.app.ts`, start the Node CLI:
+
+```sh chimpbase-run:node
+npx chimpbase-node dev
+```
+
+### Deno
+
+Install with Deno 2:
+
+```bash
+mkdir my-app
+cd my-app
+deno add npm:chimpbase
+```
+
+`deno add` creates a `deno.json` import mapping for `chimpbase`. Deno also resolves its subpaths, so keep the app's `chimpbase/core` and `chimpbase/runtime` imports unchanged.
+
+After saving `chimpbase.app.ts`, start the Deno CLI:
+
+```sh chimpbase-run:deno
+deno run -A npm:chimpbase/runtime/deno/cli dev
+```
+
+`-A` grants the CLI permissions to read project files and environment variables, open SQLite, and serve HTTP. PostgreSQL also needs network access.
 
 For a custom entry point or separate HTTP and worker processes, see [app composition](/advanced/app-composition).
