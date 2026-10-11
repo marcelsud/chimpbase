@@ -900,7 +900,11 @@ export interface ChimpbaseRegistrationTarget {
     handler: ChimpbaseRouteHandler,
     options?: Pick<ChimpbaseRouteRegistration, "prepare" | "concurrencyGroup">,
   ): ChimpbaseRouteHandler;
-  registerOnStart?(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void;
+  registerOnStart?(
+    name: string,
+    handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+    options?: Pick<ChimpbaseOnStartRegistration, "phase" | "transactional">,
+  ): void;
   registerOnStop?(
     name: string,
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
@@ -997,6 +1001,8 @@ export interface ChimpbaseOnStartRegistration<
   handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void;
   kind: "onStart";
   name: string;
+  phase?: "ready";
+  transactional?: boolean;
 }
 
 export interface ChimpbaseOnStopRegistration<
@@ -1390,8 +1396,9 @@ export function middleware<TActions extends ChimpbaseActionMap = ChimpbaseAction
 export function onStart<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
   name: string,
   handler: (ctx: ChimpbaseContext<TActions>) => Promise<void> | void,
+  options?: Pick<ChimpbaseOnStartRegistration, "phase" | "transactional">,
 ): ChimpbaseOnStartRegistration<TActions> {
-  return { handler, kind: "onStart", name };
+  return { ...options, handler, kind: "onStart", name };
 }
 
 export function onStop<TActions extends ChimpbaseActionMap = ChimpbaseActionRegistry>(
@@ -1789,7 +1796,7 @@ export function register(
         target.registerWorkflow(entry.definition);
         break;
       case "onStart":
-        target.registerOnStart?.(entry.name, entry.handler);
+        target.registerOnStart?.(entry.name, entry.handler, { phase: entry.phase, transactional: entry.transactional });
         break;
       case "onStop":
         target.registerOnStop?.(entry.name, entry.handler, { transactional: entry.transactional });

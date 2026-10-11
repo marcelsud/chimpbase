@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 
 import { normalizeProjectConfig } from "../packages/core/index.ts";
 import { createDefaultChimpbasePlatformShim } from "../packages/core/host.ts";
-import { createPostgresEngineAdapter, openPostgresPool, openPostgresStorage, PostgresPollingEventBus } from "../packages/postgres/src/index.ts";
+import { createPostgresEngineAdapter, ensurePostgresInternalTables, openPostgresPool, openPostgresStorage, PostgresPollingEventBus } from "../packages/postgres/src/index.ts";
 import { v } from "../packages/runtime/index.ts";
 
 const config = normalizeProjectConfig({ storage: { engine: "postgres", url: "postgres://unused" } });
@@ -87,12 +87,16 @@ describe("PostgreSQL storage startup", () => {
 
   test("closes ordinary, RPC, and detached pools and reuses each isolated pool", async () => {
     const pools = new Set<unknown>();
+    spyOn(poolPrototype, "connect").mockResolvedValue({
+      query: async () => ({ rows: [] }), release: mock(),
+    });
     spyOn(poolPrototype, "query").mockImplementation(async function (this: Pool) {
       pools.add(this);
       return { rows: [] };
     });
     const end = spyOn(poolPrototype, "end").mockResolvedValue(undefined);
     const resources = await openPostgresStorage(config, platform, [], []);
+    await resources.createAdapter().query("SELECT 1", [], v.object({}));
     await resources.createAdapter("rpc").query("SELECT 1", [], v.object({}));
     await resources.createAdapter("rpc").query("SELECT 1", [], v.object({}));
     await resources.createAdapter("detached").query("SELECT 1", [], v.object({}));
@@ -104,7 +108,7 @@ describe("PostgreSQL storage startup", () => {
   for (const phase of ["named migrations", "inline migrations", "internal tables"] as const) {
     test(`closes the pool when ${phase} fail`, async () => {
       const failure = new Error(phase);
-      if (phase === "named migrations") {
+      if (phase !== "inline migrations") {
         spyOn(poolPrototype, "connect").mockRejectedValue(failure);
       } else {
         spyOn(poolPrototype, "query").mockRejectedValue(failure);
@@ -167,7 +171,10 @@ describe("PostgreSQL storage startup", () => {
     expect(namedIndex).toBeGreaterThan(-1);
     expect(commitIndex).toBeGreaterThan(namedIndex);
     expect(inlineIndex).toBeGreaterThan(commitIndex);
-    expect(queries[inlineIndex + 1]).toContain("CREATE TABLE IF NOT EXISTS _chimpbase_events");
+    expect(queries[inlineIndex + 1]).toBe("BEGIN");
+    expect(queries[inlineIndex + 2]).toBe("SELECT pg_advisory_xact_lock(hashtext('_chimpbase_internal_tables'))");
+    expect(queries[inlineIndex + 3]).toContain("CREATE TABLE IF NOT EXISTS _chimpbase_events");
+    expect(queries.at(-1)).toBe("COMMIT");
     expect(released).toBe(true);
     expect(resources.eventBus).toBeInstanceOf(PostgresPollingEventBus);
     expect(resources.supportsConcurrentWorkers).toBe(true);
@@ -176,5 +183,29 @@ describe("PostgreSQL storage startup", () => {
     expect(end).not.toHaveBeenCalled();
     await resources.storage.close();
     expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  test("discards and rolls back a client when internal schema DDL fails", async () => {
+    const failure = new Error("schema DDL failed");
+    const client = {
+      query: mock(async (sql: string) => {
+        if (sql.includes("CREATE TABLE")) throw failure;
+        return { rows: [] };
+      }),
+      release: mock(),
+    };
+    spyOn(poolPrototype, "connect").mockResolvedValue(client);
+    const pool = openPostgresPool(config);
+    try {
+      await expect(ensurePostgresInternalTables(pool)).rejects.toBe(failure);
+      expect(client.query.mock.calls.map(([sql]) => sql).slice(0, 2)).toEqual([
+        "BEGIN", "SELECT pg_advisory_xact_lock(hashtext('_chimpbase_internal_tables'))",
+      ]);
+      expect(client.query.mock.calls.some(([sql]) => sql === "COMMIT")).toBe(false);
+      expect(client.release).toHaveBeenCalledTimes(1);
+      expect(client.release).toHaveBeenCalledWith(true);
+    } finally {
+      await pool.end();
+    }
   });
 });

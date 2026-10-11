@@ -5,8 +5,9 @@ import { join } from "node:path";
 
 import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { v } from "../packages/runtime/index.ts";
+import { onStart, v } from "../packages/runtime/index.ts";
 import { upsertNode } from "../packages/mesh/src/registry.ts";
+import { INFO_EVENT_ANNOUNCE } from "../packages/mesh/src/discovery.ts";
 
 const cleanupDirs: string[] = [];
 
@@ -40,6 +41,60 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
 }
 
 describe("@chimpbase/mesh registry", () => {
+  test("a later ready hook failure stops mesh heartbeats and releases service resources", async () => {
+    const host = await createMeshHost();
+    let running = false;
+    host.register(chimpbaseMesh({
+      heartbeatMs: 10, transport: "local-only",
+      services: [service({
+        name: "resource", started: () => { running = true; }, stopped: () => { running = false; },
+        actions: { nodes: async (ctx) => await ctx.db.query("SELECT node_id FROM _chimpbase_mesh_nodes") },
+      })],
+    }), onStart("ready-failure", () => { throw new Error("readiness failed"); }, { phase: "ready" }));
+    try {
+      await expect(host.start({ serve: false, runWorker: false })).rejects.toThrow("readiness failed");
+      expect(running).toBe(false);
+      await Bun.sleep(40);
+      expect((await host.executeAction("v1.resource.nodes")).result).toEqual([]);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test("delayed announcements expire from their original timestamps and cannot replace newer peers", async () => {
+    const host = await createMeshHost();
+    const offlineAfterMs = 1_000;
+    host.register(chimpbaseMesh({
+      heartbeatMs: 0, offlineAfterMs, transport: "local-only",
+      services: [service({ name: "observer", actions: {
+        announce: (ctx, payload: unknown) => { ctx.pubsub.publish(INFO_EVENT_ANNOUNCE, payload); },
+        peers: (ctx) => ctx.mesh?.peers(),
+      } })],
+    }));
+    const started = await host.start({ serve: false, runWorker: false });
+    try {
+      const now = Date.now();
+      const node = { nodeId: "announced-peer", advertisedUrl: "http://peer.test", metadata: {}, services: [], startedAtMs: now - 60_000 };
+      for (const payload of [node, { ...node, lastHeartbeatMs: now - offlineAfterMs - 1 }, { ...node, lastHeartbeatMs: null, startedAtMs: null }]) {
+        await host.executeAction("v1.observer.announce", payload);
+        expect((await host.executeAction("v1.observer.peers")).result).toEqual([]);
+      }
+      await host.executeAction("v1.observer.announce", { ...node, lastHeartbeatMs: now - 100, metadata: { revision: "new" } });
+      await host.executeAction("v1.observer.announce", { ...node, lastHeartbeatMs: now - 200, metadata: { revision: "old" } });
+      expect((await host.executeAction("v1.observer.peers")).result).toEqual([
+        { ...node, lastHeartbeatMs: now - 100, metadata: { revision: "new" } },
+      ]);
+      await host.executeAction("v1.observer.announce", { ...node, nodeId: "legacy-peer", startedAtMs: now - 100 });
+      expect((await host.executeAction("v1.observer.peers")).result).toMatchObject([
+        { nodeId: "announced-peer", lastHeartbeatMs: now - 100 },
+        { nodeId: "legacy-peer", lastHeartbeatMs: now - 100 },
+      ]);
+    } finally {
+      await started.stop();
+      await host.close();
+    }
+  });
+
   test("advertises the node row on start and removes it on stop", async () => {
     const host = await createMeshHost();
     try {

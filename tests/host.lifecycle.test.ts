@@ -85,6 +85,38 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  test("ready hooks run after ordinary hooks, HTTP and the event bus, and unwind on failure", async () => {
+    const failure = new Error("ready hook failed");
+    const { calls, library } = createTrackedRuntime();
+    const order: string[] = [];
+    const host = await library.createChimpbase({
+      storage: { engine: "memory" },
+      registrations: [
+        action("markReady", async (ctx) => { await ctx.kv.set("ready", true); }),
+        action("readReady", async (ctx) => await ctx.kv.get("ready")),
+        onStart("ready", async (ctx) => {
+          expect(calls.serverStart).toBe(1);
+          expect(calls.busStart).toBe(1);
+          order.push("ready");
+          await ctx.action("markReady");
+          throw failure;
+        }, { phase: "ready", transactional: false }),
+        onStart("initialize", () => { order.push("initialize"); }),
+        onStop("cleanup", () => { order.push("cleanup"); }),
+      ],
+    });
+    try {
+      await expect(host.start({ serve: true, runWorker: false })).rejects.toBe(failure);
+      expect(order).toEqual(["initialize", "ready", "cleanup"]);
+      expect(calls.serverStop).toBe(1);
+      expect(calls.busStop).toBe(1);
+      expect((await host.executeAction("readReady")).result).toBe(true);
+      expect((await host.executeRoute(new Request("http://test/"))).response?.status).toBe(503);
+    } finally {
+      await host.close();
+    }
+  });
+
   for (const transactional of [true, false]) {
     test(`onStop ${transactional ? "rolls back its writes by default" : "can commit an action independently of cleanup errors"}`, async () => {
       const { library } = createTrackedRuntime();

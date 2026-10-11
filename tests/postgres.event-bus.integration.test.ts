@@ -13,6 +13,7 @@ import {
   ensurePostgresInternalTables,
   PostgresPollingEventBus,
 } from "../packages/postgres/src/index.ts";
+import { action } from "../packages/runtime/index.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
 const describeIfPg = PG_URL ? describe : describe.skip;
@@ -27,6 +28,72 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describeIfPg("PostgreSQL event delivery", () => {
+  test("polling before a local COMMIT acknowledgement suppresses only the local event", async () => {
+    const pool = new Pool({ connectionString: PG_URL });
+    const reader = new Pool({ connectionString: PG_URL, max: 1 });
+    await ensurePostgresInternalTables(pool);
+    const names = ["local", "peer"].map((name) => `${name}.${crypto.randomUUID()}`);
+    const platform = createDefaultChimpbasePlatformShim();
+    const registry = createChimpbaseRegistry();
+    const adapter = createPostgresEngineAdapter(pool, platform);
+    const bus = new PostgresPollingEventBus({ pool: reader, pollIntervalMs: 5 });
+    const committed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const commit = adapter.commitTransaction.bind(adapter);
+    adapter.commitTransaction = async () => {
+      await commit();
+      adapter.commitTransaction = commit;
+      committed.resolve();
+      await release.promise;
+    };
+    const calls: string[] = [];
+    for (const name of names) registry.subscriptions.set(name, [{
+      name, dispatch: "sync", idempotent: false, handler: () => { calls.push(name); },
+    }]);
+    registry.actions.set("emit", action("emit", (ctx) => { ctx.pubsub.publish(names[0], {}); }));
+    const observed: string[] = [];
+    const start = bus.start.bind(bus);
+    bus.start = (callback) => start(async (events, ack) => {
+      observed.push(...events.map((event) => event.name));
+      await callback(events, ack);
+    });
+    const engine = new ChimpbaseEngine({
+      adapter, eventBus: bus, platform, registry, secrets: { get: () => null },
+      subscriptions: { dispatch: "sync" },
+      telemetry: { minLevel: "error", persist: { log: false, metric: false, trace: false } },
+      worker: { leaseMs: 30_000, maxAttempts: 5, retryDelayMs: 0 },
+    });
+    let publishing: Promise<unknown> = Promise.resolve();
+    const deliveries: Promise<void>[] = [];
+    engine.startEventBus(async (operation) => {
+      const delivery = publishing.then(operation);
+      deliveries.push(delivery);
+      await delivery;
+    });
+    try {
+      await reader.query("SELECT 1");
+      publishing = engine.executeAction("emit");
+      await committed.promise;
+      await pool.query("INSERT INTO _chimpbase_events (event_name, payload_json) VALUES ($1, '{}')", [names[1]]);
+      await waitFor(() => observed.length > 0);
+      expect(observed).toEqual([names[1]]);
+      release.resolve();
+      await publishing;
+      await waitFor(() => calls.includes(names[1]));
+      await Promise.all(deliveries);
+      expect(calls).toEqual(names);
+      expect(observed).toEqual([names[1]]);
+    } finally {
+      release.resolve();
+      await publishing.catch(() => {});
+      engine.stopEventBus();
+      await Promise.allSettled(deliveries);
+      await pool.query("DELETE FROM _chimpbase_events WHERE event_name = ANY($1::text[])", [names]);
+      await reader.end();
+      await pool.end();
+    }
+  });
+
   test("concurrent consumers reserve one subscription delivery before running its handler", async () => {
     const pool = new Pool({ connectionString: PG_URL });
     const name = `subscription.${crypto.randomUUID()}`;

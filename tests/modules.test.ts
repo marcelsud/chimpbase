@@ -571,7 +571,7 @@ describe("business modules", () => {
       registrations: [
         route("owner", (_request, env) => new Response(env.module?.name ?? "none")),
         worker("job", async (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
-        onStart("boot", (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
+        onStart("boot", (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }, { phase: "ready" }),
         onStop("shutdown", (ctx) => { seenModules.push(ctx.module?.name ?? "none"); }),
         privateStep,
         flow,
@@ -626,6 +626,7 @@ describe("business modules", () => {
       await host.engine.processNextCronSchedule();
       await host.processNextQueueJob();
       const started = await host.start({ runWorker: false, serve: false });
+      expect(host.registry.onStartHooks.find((hook) => hook.name === "boot")?.phase).toBe("ready");
       await started.stop();
       expect(seenModules).toEqual(["left", "left", "left", "left", "left"]);
       await expect(host.executeAction(left.calls.rawSql.id, {})).rejects.toThrow(

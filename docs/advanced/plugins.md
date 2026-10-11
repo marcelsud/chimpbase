@@ -58,11 +58,15 @@ function myPlugin() {
 }
 ```
 
-### `onStart(name, handler)`
+### `onStart(name, handler, options?)`
 
 Runs after the engine is initialized, before serving requests. The handler receives a full `ChimpbaseContext` with access to `db`, `kv`, `collection`, etc.
 
 Use cases: seed data, validate config, warm caches, run health checks.
+
+Set `{ phase: "ready" }` for availability announcements after all ordinary startup hooks finish and HTTP, workers and the event bus start. With `serve: false`, this phase also runs for externally hosted routes. Incoming routes receive 503 during ordinary startup; startup hooks can still await their own host actions and routes.
+
+Startup hooks are transactional by default. Set `{ transactional: false }` to manage resources outside a hook transaction; use `ctx.action(...)` when writes and published events need to commit together. If startup fails in either phase, shutdown hooks unwind acquired resources.
 
 ### `onStop(name, handler, options?)`
 

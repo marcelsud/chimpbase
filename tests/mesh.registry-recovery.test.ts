@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { Pool } from "pg";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
-import { chimpbaseMesh, service } from "../packages/mesh/src/index.ts";
+import { chimpbaseMesh, DEFAULT_RPC_PATH, MESH_TOKEN_HEADER, service } from "../packages/mesh/src/index.ts";
 import { gcStaleNodes, listLiveNodes } from "../packages/mesh/src/registry.ts";
-import { action, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, type ChimpbaseContext } from "../packages/runtime/index.ts";
+import { readJsonResponse } from "./support/http.ts";
 
 const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
 const testPg = pgUrl ? test : test.skip;
@@ -18,12 +19,12 @@ afterEach(async () => {
   for (const dir of cleanupDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function createHost(engine: "memory" | "sqlite" | "postgres") {
+async function createHost(engine: "memory" | "sqlite" | "postgres", queryTimeoutMs?: number) {
   const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-mesh-recovery-"));
   cleanupDirs.push(projectDir);
   return await createChimpbase({
     projectDir,
-    storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
+    storage: engine === "postgres" ? { engine, url: pgUrl, queryTimeoutMs } : { engine },
   });
 }
 
@@ -99,10 +100,10 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
   });
 }
 
-testPg("fresh PostgreSQL registry serializes concurrent mesh startup", async () => {
+testPg("fresh PostgreSQL schema coordination does not lock peers behind slow service initialization", async () => {
   const pool = new Pool({ connectionString: pgUrl });
   const first = await createHost("postgres");
-  const second = await createHost("postgres");
+  const second = await createHost("postgres", 150);
   let entered!: () => void;
   let release!: () => void;
   const firstCreatedSchema = new Promise<void>((resolve) => { entered = resolve; });
@@ -118,22 +119,119 @@ testPg("fresh PostgreSQL registry serializes concurrent mesh startup", async () 
     await pool.query("DROP TABLE IF EXISTS _chimpbase_mesh_nodes");
     const firstStart = first.start({ serve: false, runWorker: false });
     await firstCreatedSchema;
-    const secondStart = second.start({ serve: false, runWorker: false });
-    await Bun.sleep(50);
-    release();
-    const outcomes = await Promise.allSettled([firstStart, secondStart]);
+    let secondStarted: Awaited<ReturnType<typeof second.start>> | undefined;
     try {
-      expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "fulfilled"]);
+      secondStarted = await second.start({ serve: false, runWorker: false });
+      expect((await pool.query<{ node_id: string }>("SELECT node_id FROM _chimpbase_mesh_nodes")).rows).toHaveLength(1);
+      release();
+      await firstStart;
       expect((await pool.query<{ node_id: string }>("SELECT node_id FROM _chimpbase_mesh_nodes")).rows).toHaveLength(2);
     } finally {
-      for (const outcome of outcomes) {
-        if (outcome.status === "fulfilled") await outcome.value.stop();
-      }
+      release();
+      await (await firstStart).stop();
+      await secondStarted?.stop();
     }
   } finally {
     release();
     await first.close();
     await second.close();
+    await pool.end();
+  }
+});
+
+testPg("readiness discovers peers that registered during late initialization without heartbeat refreshes", async () => {
+  const first = await createHost("postgres");
+  const second = await createHost("postgres");
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let bootPeers: string[] = [];
+  const peers = action("lateStartupPeers", (ctx) => ctx.mesh?.peers().map((peer) => peer.nodeId) ?? []);
+  const nodeId = action("lateStartupNodeId", ownNodeId);
+  first.register(chimpbaseMesh({
+    heartbeatMs: 0, transport: "local-only",
+    services: [service({
+      name: "lateFirst", started: (ctx) => { bootPeers = ctx.mesh?.peers().map((peer) => peer.nodeId) ?? []; },
+    })],
+  }), peers, onStart("late-dependency", async () => { entered.resolve(); await release.promise; }));
+  second.register(chimpbaseMesh({
+    heartbeatMs: 0, transport: "local-only", services: [service({ name: "lateSecond" })],
+  }), nodeId);
+  const starting = first.start({ serve: false, runWorker: false });
+  let secondStarted: Awaited<ReturnType<typeof second.start>> | undefined;
+  try {
+    await entered.promise;
+    secondStarted = await second.start({ serve: false, runWorker: false });
+    const secondId = (await second.executeAction(nodeId)).result;
+    expect(bootPeers).not.toContain(secondId);
+    release.resolve();
+    await starting;
+    expect((await first.executeAction(peers)).result).toContain(secondId);
+  } finally {
+    release.resolve();
+    await (await starting).stop();
+    await secondStarted?.stop();
+    await first.close();
+    await second.close();
+  }
+});
+
+testPg("mesh waits for late initialization before advertising, heartbeating and accepting external RPC", async () => {
+  const pool = new Pool({ connectionString: pgUrl });
+  const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-mesh-readiness-"));
+  cleanupDirs.push(projectDir);
+  const host = await createChimpbase({
+    projectDir, storage: { engine: "postgres", url: pgUrl },
+    secrets: { get: () => "readiness-token" },
+  });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let initialized = false;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (request) =>
+    (await host.executeRoute(request)).response ?? new Response("not found", { status: 404 }) });
+  const advertisedUrl = `http://127.0.0.1:${server.port}`;
+  host.register(chimpbaseMesh({
+    advertisedUrl, heartbeatMs: 15, meshToken: "mesh.token",
+    services: [service({
+      name: "readiness", started: () => { initialized = true; },
+      actions: { ready: () => initialized },
+    })],
+  }), onStart("late-initialization", async () => { entered.resolve(); await release.promise; }));
+  const rpc = async () => await fetch(`${advertisedUrl}${DEFAULT_RPC_PATH}`, {
+    method: "POST", headers: { [MESH_TOKEN_HEADER]: "readiness-token" },
+    body: JSON.stringify({ actionName: "v1.readiness.ready", callerNodeId: "probe", deadlineMs: Date.now() + 1_000 }),
+  });
+  const row = async () => (await pool.query<{ last_heartbeat_ms: string }>(
+    "SELECT last_heartbeat_ms FROM _chimpbase_mesh_nodes WHERE advertised_url = $1", [advertisedUrl],
+  )).rows;
+  let starting: ReturnType<typeof host.start> | undefined;
+  try {
+    const beforeStart = await rpc();
+    expect(beforeStart.status).toBe(200);
+    expect(await readJsonResponse<{ ok: boolean; result: boolean }>(beforeStart)).toEqual({ ok: true, result: false });
+    starting = host.start({ serve: false, runWorker: false });
+    await entered.promise;
+    expect(await row()).toEqual([]);
+    const blocked = await rpc();
+    expect(blocked.status).toBe(503);
+    expect(blocked.headers.get(CHIMPBASE_REQUEST_REJECTED_HEADER)).toBe("1");
+    await Bun.sleep(60);
+    expect(await row()).toEqual([]);
+    release.resolve();
+    const started = await starting;
+    expect(await row()).toHaveLength(1);
+    const before = Number((await row())[0]?.last_heartbeat_ms);
+    await waitFor(async () => Number((await row())[0]?.last_heartbeat_ms) > before);
+    const ready = await rpc();
+    expect(ready.status).toBe(200);
+    expect(await readJsonResponse<{ ok: boolean; result: boolean }>(ready)).toEqual({ ok: true, result: true });
+    await started.stop();
+    await Bun.sleep(40);
+    expect(await row()).toEqual([]);
+  } finally {
+    release.resolve();
+    if (starting) await (await starting).stop();
+    server.stop(true);
+    await host.close();
     await pool.end();
   }
 });

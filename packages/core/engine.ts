@@ -937,10 +937,16 @@ export class ChimpbaseEngine {
       : await this.claimSingleQueueJob(queueNames, targets);
 
     const results: ChimpbaseQueueExecutionResult[] = [];
+    const errors: unknown[] = [];
     for (const job of claimedJobs) {
-      const result = await this.processClaimedQueueJob(job);
-      if (result !== null) results.push(result);
+      try {
+        const result = await this.processClaimedQueueJob(job);
+        if (result !== null) results.push(result);
+      } catch (error) {
+        errors.push(error);
+      }
     }
+    if (errors.length > 0) throw errors[0];
 
     return results;
   }
@@ -2861,6 +2867,7 @@ export class ChimpbaseEngine {
     const parentDepth = this.transactionDepth;
     const isRootTransaction = parentDepth === 0;
     let committed = false;
+    let cancelPublish: (() => void) | undefined;
 
     if (isRootTransaction) {
       await this.adapter.beginTransaction();
@@ -2885,6 +2892,7 @@ export class ChimpbaseEngine {
       this.transactionDepth = parentDepth;
 
       if (isRootTransaction) {
+        cancelPublish = this.eventBus.preparePublish?.(this.pendingEvents);
         await this.adapter.commitTransaction();
         committed = true;
         await this.runBlobCleanups(true);
@@ -2904,6 +2912,7 @@ export class ChimpbaseEngine {
       this.transactionDepth = parentDepth;
 
       if (isRootTransaction && !committed) {
+        cancelPublish?.();
         this.pendingEvents.splice(0);
         await this.adapter.rollbackTransaction();
         await this.runBlobCleanups(false);

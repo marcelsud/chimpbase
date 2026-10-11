@@ -198,6 +198,22 @@ export async function applyInlinePostgresMigrations(pool: Pool, migrations: stri
 }
 
 export async function ensurePostgresInternalTables(pool: Pool): Promise<void> {
+  const client = await pool.connect();
+  let failed = false;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('_chimpbase_internal_tables'))");
+    await createPostgresInternalTables(client);
+    await client.query("COMMIT");
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    client.release(failed);
+  }
+}
+
+async function createPostgresInternalTables(pool: Queryable): Promise<void> {
   await pool.query(
     `
       CREATE TABLE IF NOT EXISTS _chimpbase_events (
