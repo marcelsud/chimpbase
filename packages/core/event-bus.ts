@@ -8,6 +8,8 @@ export type ChimpbaseEventBusCallback = (
 export interface ChimpbaseEventBus {
   /** `wake` buses only signal workers; persisted outbox jobs remain the delivery source. */
   readonly mode?: "delivery" | "wake";
+  /** Reserve local event IDs before commit; return a cleanup to call on rollback. */
+  preparePublish?(events: ChimpbaseEventRecord[]): () => void;
   /** Notify the bus that new events were committed. */
   publish(events: ChimpbaseEventRecord[]): Promise<void>;
 

@@ -8,12 +8,17 @@ import { parseJson, v } from "@chimpbase/runtime";
 
 const NOTIFY_PAYLOAD_LIMIT = 7800;
 const CHANNEL_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
+const RECONNECT_DELAY_MS = 1000;
 
 interface PostgresListenClient {
   on(event: "notification", listener: (message: { channel: string; payload?: string }) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "end", listener: () => void): this;
   query(sql: string, params?: unknown[]): Promise<unknown>;
-  release(): void;
+  release(destroy?: boolean): void;
   removeListener(event: "notification", listener: (message: { channel: string; payload?: string }) => void): this;
+  removeListener(event: "error", listener: (error: Error) => void): this;
+  removeListener(event: "end", listener: () => void): this;
 }
 
 export interface PostgresListenPool {
@@ -61,9 +66,10 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
   private readonly channel: string;
   private readonly originId: string;
   private readonly pool: PostgresListenPool;
-  private client: PostgresListenClient | null = null;
   private callback: ChimpbaseEventBusCallback | null = null;
-  private notificationHandler: ((msg: { channel: string; payload?: string }) => void) | null = null;
+  private detach: (() => void) | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private generation = 0;
 
   constructor(options: PostgresListenEventBusOptions) {
     if (!CHANNEL_IDENTIFIER.test(options.channel ?? "chimpbase_events")) {
@@ -90,48 +96,75 @@ export class PostgresListenEventBus implements ChimpbaseEventBus {
   }
 
   start(callback: ChimpbaseEventBusCallback): void {
+    const started = this.callback !== null;
     this.callback = callback;
-    void this.attach();
+    if (!started) void this.attach(++this.generation);
   }
 
   stop(): void {
+    this.generation += 1;
     this.callback = null;
-
-    if (this.client !== null && this.notificationHandler !== null) {
-      this.client.removeListener("notification", this.notificationHandler);
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
-
-    this.notificationHandler = null;
-
-    if ((this.client !== null)) {
-      const client = this.client;
-      this.client = null;
-      void (async () => {
-        try {
-          await client.query(`UNLISTEN ${this.channel}`);
-        } finally {
-          client.release();
-        }
-      })();
-    }
+    this.detach?.();
   }
 
-  private async attach(): Promise<void> {
+  private async attach(generation: number): Promise<void> {
+    let detach: (() => void) | null = null;
     try {
       const client = await this.pool.connect();
-      this.client = client;
+      if (generation !== this.generation) {
+        client.release();
+        return;
+      }
 
+      let released = false;
       const handler = (msg: { channel: string; payload?: string }) => {
+        if (released || generation !== this.generation) return;
         if (msg.channel !== this.channel || !(msg.payload !== undefined && msg.payload.length > 0)) return;
         void this.dispatch(msg.payload);
       };
+      const onError = (error: Error) => {
+        console.error("[@chimpbase/postgres][listen-event-bus] connection error", error);
+        detach?.();
+        this.retry(generation);
+      };
+      const onEnd = () => {
+        detach?.();
+        this.retry(generation);
+      };
+      detach = () => {
+        if (released) return;
+        released = true;
+        if (this.detach === detach) this.detach = null;
+        client.removeListener("notification", handler);
+        client.removeListener("end", onEnd);
+        // Destroy the dedicated listener without waiting on an unavailable server.
+        client.release(true);
+        client.removeListener("error", onError);
+      };
 
-      this.notificationHandler = handler;
+      this.detach = detach;
+      client.on("error", onError);
+      client.on("end", onEnd);
       client.on("notification", handler);
       await client.query(`LISTEN ${this.channel}`);
     } catch (error) {
+      detach?.();
+      if (generation !== this.generation) return;
       console.error("[@chimpbase/postgres][listen-event-bus] attach failed", error);
+      this.retry(generation);
     }
+  }
+
+  private retry(generation: number): void {
+    if (generation !== this.generation || this.detach !== null || this.retryTimer !== null) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.attach(generation);
+    }, RECONNECT_DELAY_MS);
   }
 
   private async dispatch(payload: string): Promise<void> {

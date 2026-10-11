@@ -5,6 +5,7 @@ export const INFO_EVENT_LEAVE = "__chimpbase.mesh.info.leave";
 
 export interface AnnouncePayload {
   advertisedUrl: string | null;
+  lastHeartbeatMs?: number;
   metadata: Record<string, unknown>;
   nodeId: string;
   services: readonly NodeServiceEntry[];
@@ -28,6 +29,11 @@ export class MeshPeerCache {
   }
 
   upsert(record: NodeRecord): void {
+    if (!Number.isFinite(record.lastHeartbeatMs)
+      || record.lastHeartbeatMs < Date.now() - this.offlineAfterMs
+      || (this.peers.get(record.nodeId)?.lastHeartbeatMs ?? -Infinity) > record.lastHeartbeatMs) {
+      return;
+    }
     this.peers.set(record.nodeId, record);
   }
 

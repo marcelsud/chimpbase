@@ -49,6 +49,8 @@ email still need idempotency because they cannot roll back with the database.
 
 PostgreSQL holds the claimed job's row lock throughout execution, so an expired lease cannot reclaim a job while its handler transaction is active. After a host disconnects, the lock releases and the expired lease can be recovered. Batched claims check their attempt number before execution; a stale claim or failure callback cannot overwrite a newer attempt's state.
 
+A failed job does not abandon the remaining jobs already claimed in its batch. Each job keeps its own transaction and retry handling; the batch reports its first failure after attempting the remaining jobs.
+
 Nodes sharing a database may register different handlers. Internal subscription jobs are claimed only by nodes registering their event and subscription name, cron jobs only by nodes registering their schedule, and workflow jobs only by nodes registering the persisted workflow name and version. Unsupported work stays queued without consuming a retry attempt. Use unique subscription names for different handler sets; unnamed or duplicate-name handlers remain a shared group. See [Event bus transports](/advanced/event-bus) for existing unnamed jobs and deployment guidance.
 
 ## Dead Letter Queue (DLQ)

@@ -153,6 +153,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
   const cache = new MeshPeerCache(offlineAfterMs);
   const startedAtMs = Date.now();
+  let bootstrapContext: ChimpbaseContext | null = null;
   const heartbeatState: {
     running: Promise<void> | null;
     timer: ReturnType<typeof setInterval> | null;
@@ -215,11 +216,11 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
 
       cache.upsert({
         advertisedUrl: payload.advertisedUrl ?? null,
-        lastHeartbeatMs: Date.now(),
+        lastHeartbeatMs: payload.lastHeartbeatMs ?? payload.startedAtMs,
         metadata: payload.metadata ?? {},
         nodeId: payload.nodeId,
         services: payload.services ?? [],
-        startedAtMs: payload.startedAtMs ?? Date.now(),
+        startedAtMs: payload.startedAtMs,
       });
     }, { dispatch: "sync", idempotent: false }),
   );
@@ -268,9 +269,9 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
   }
 
   entries.push(
-    onStart("__chimpbase.mesh.bootstrap", async (ctx) => {
-      await ensureRegistrySchema(ctx);
-      await upsertNode(ctx, {
+    onStart("__chimpbase.mesh.schema", ensureRegistrySchema),
+    action("__chimpbase.mesh.register", async (ctx) => {
+      const lastHeartbeatMs = await upsertNode(ctx, {
         advertisedUrl,
         metadata,
         nodeId,
@@ -278,15 +279,21 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
         startedAtMs,
       });
 
+      const live = await listLiveNodes(ctx, Date.now() - offlineAfterMs);
+      cache.seed(live.filter((peer) => peer.nodeId !== nodeId));
+
       const announce: AnnouncePayload = {
         advertisedUrl,
+        lastHeartbeatMs,
         metadata,
         nodeId,
         services: serviceEntries,
         startedAtMs,
       };
       ctx.pubsub.publish(INFO_EVENT_ANNOUNCE, announce);
-
+    }),
+    onStart("__chimpbase.mesh.bootstrap", async (ctx) => {
+      bootstrapContext = ctx;
       const cutoff = Date.now() - offlineAfterMs;
       const live = await listLiveNodes(ctx, cutoff);
       cache.seed(live.filter((peer) => peer.nodeId !== nodeId));
@@ -299,14 +306,18 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
           await svc.started(ctx, buildServiceSelf(svc, nodeId, clientFor(ctx)));
         }
       }
-
+    }),
+    onStart("__chimpbase.mesh.ready", async (ctx) => {
+      await ctx.action("__chimpbase.mesh.register");
+      const heartbeatContext = bootstrapContext;
+      if (heartbeatContext === null) throw new Error("mesh bootstrap context is unavailable");
       if (heartbeatMs > 0) {
         heartbeatState.timer = setInterval(() => {
           if (heartbeatState.running !== null) return;
           heartbeatState.running = refreshHeartbeat({
             advertisedUrl,
             cache,
-            ctx,
+            ctx: heartbeatContext,
             metadata,
             nodeId,
             offlineAfterMs,
@@ -320,7 +331,7 @@ export function chimpbaseMesh(options: ChimpbaseMeshOptions): ChimpbasePluginReg
           heartbeatState.timer.unref();
         }
       }
-    }),
+    }, { phase: "ready", transactional: false }),
   );
 
   entries.push(

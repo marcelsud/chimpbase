@@ -18,10 +18,10 @@ function makeEvent(name: string, payload: unknown): ChimpbaseEventRecord {
   return { id: 1, name, payload, payloadJson: JSON.stringify(payload) };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("waitFor timed out");
@@ -105,5 +105,38 @@ describeIfPg("PostgresListenEventBus (integration)", () => {
       [`%LISTEN ${channel}%`],
     );
     expect(Number(result.rows[0]?.count ?? "0")).toBe(0);
+  });
+
+  test("reconnects after PostgreSQL terminates the listening backend", async () => {
+    const channel = uniqueChannel("reconnect");
+    const listenerPool = new Pool({ connectionString: PG_URL, max: 1 });
+    listenerPool.on("error", () => {});
+    const subscriber = new PostgresListenEventBus({ channel, originId: "subscriber", pool: listenerPool });
+    const publisher = new PostgresListenEventBus({ channel, originId: "publisher", pool });
+    const received: ChimpbaseEventRecord[] = [];
+    const listenerPid = async () => (await pool.query<{ pid: number }>(
+      "SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND query = $1 AND state = 'idle'",
+      [`LISTEN ${channel}`],
+    )).rows[0]?.pid;
+    subscriber.start(async (events) => { received.push(...events); });
+    try {
+      let initialPid: number | undefined;
+      await waitFor(async () => {
+        initialPid = await listenerPid();
+        return initialPid !== undefined;
+      });
+      await pool.query("SELECT pg_terminate_backend($1)", [initialPid]);
+      await waitFor(async () => {
+        const pid = await listenerPid();
+        return pid !== undefined && pid !== initialPid;
+      });
+      await publisher.publish([makeEvent("after-reconnect", { recovered: true })]);
+      await waitFor(() => received.length > 0);
+      expect(received).toEqual([makeEvent("after-reconnect", { recovered: true })]);
+      expect(listenerPool.totalCount).toBe(1);
+    } finally {
+      subscriber.stop();
+      await listenerPool.end();
+    }
   });
 });

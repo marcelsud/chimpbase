@@ -7,6 +7,7 @@ import {
   type ChimpbaseContext,
   type ChimpbaseContextExtensionRegistration,
   type ChimpbaseObjectActionHandler,
+  type ChimpbaseOnStartRegistration,
   type ChimpbaseOnStopRegistration,
   type ChimpbaseCronHandler,
   type ChimpbaseRegistrationTarget,
@@ -152,10 +153,14 @@ function createOwnedRegistrationTarget(
       registry.registrationOwnership.set(`route:${registeredName}`, moduleName);
       return registered;
     },
-    registerOnStart(name: string, handler: (ctx: ChimpbaseContext) => Promise<void> | void): void {
+    registerOnStart(
+      name: string,
+      handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+      options?: Pick<ChimpbaseOnStartRegistration, "phase" | "transactional">,
+    ): void {
       if (target.registerOnStart === undefined) throw new Error(`registration target does not support onStart entries: ${name}`);
       ensureRegistrationAvailable(registry, "onStart", name, moduleName);
-      target.registerOnStart(name, handler);
+      target.registerOnStart(name, handler, options);
       const entry = registry.onStartHooks.at(-1);
       if (entry === undefined || entry.name !== name) throw new Error(`onStart registration failed: ${name}`);
       entry.module = moduleName;

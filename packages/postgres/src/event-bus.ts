@@ -31,6 +31,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
   private windowSnapshot: string | null = null;
   private readonly seenIds = new Set<number>();
   private readonly publishedIds = new Set<number>();
+  private readonly preparingIds = new Set<number>();
   private readonly retries = new Map<number, { row: PolledEvent; attempts: number }>();
   private polling = false;
   private generation = 0;
@@ -43,10 +44,25 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
   async publish(events: ChimpbaseEventRecord[]): Promise<void> {
     if (this.interval === null) return;
     for (const event of events) {
-      if (event.id !== undefined) {
+      if (event.id !== undefined && !this.preparingIds.delete(event.id)) {
         this.publishedIds.add(event.id);
       }
     }
+  }
+
+  preparePublish(events: ChimpbaseEventRecord[]): () => void {
+    if (this.interval === null) return () => {};
+    const ids = events.flatMap((event) => event.id === undefined ? [] : [event.id]);
+    for (const id of ids) {
+      this.publishedIds.add(id);
+      this.preparingIds.add(id);
+    }
+    return () => {
+      for (const id of ids) {
+        this.publishedIds.delete(id);
+        this.preparingIds.delete(id);
+      }
+    };
   }
 
   start(callback: ChimpbaseEventBusCallback): void {
@@ -70,6 +86,7 @@ export class PostgresPollingEventBus implements ChimpbaseEventBus {
       this.interval = null;
     }
     this.publishedIds.clear();
+    this.preparingIds.clear();
     this.seenIds.clear();
     this.retries.clear();
   }

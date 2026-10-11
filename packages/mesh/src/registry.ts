@@ -8,7 +8,7 @@ const INDEX_NAME = "idx_chimpbase_mesh_nodes_heartbeat";
 
 export async function ensureRegistrySchema(ctx: ChimpbaseContext): Promise<void> {
   const db = ctx.db.kysely();
-  // Startup's transaction holds the native dialect lock until the DDL commits.
+  // The dedicated schema hook commits before service initialization starts.
   await db.getExecutor().adapter.acquireMigrationLock(db, {
     lockRowId: TABLE_NAME,
     lockTable: TABLE_NAME,

@@ -109,6 +109,7 @@ Scale the worker service with `docker compose up --build --scale worker=3`. Each
 
 ## Coordination and retries
 
+- PostgreSQL hosts initialize internal tables in a transaction protected by a shared database lock, allowing multiple replicas to boot against an empty database.
 - Queue claims use row locks; failed handlers can retry. External effects such as email and payments need idempotency. See [Workers & Queues](/workers).
 - Cron slots are claimed through PostgreSQL.
 - Subscriptions with `idempotent: true` deduplicate committed handling across processes.

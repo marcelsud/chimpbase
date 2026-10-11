@@ -211,7 +211,7 @@ export interface ChimpbaseRegistry {
   eventContracts: Map<string, ChimpbaseModuleEventContract>;
   httpHandler: ChimpbaseRouteHandler | null;
   moduleInterfaces: Map<string, ChimpbaseModuleInterface>;
-  onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string }>;
+  onStartHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string; phase?: "ready"; transactional?: boolean }>;
   onStopHooks: Array<{ handler: (ctx: ChimpbaseContext) => Promise<void> | void; module: string | null; name: string; transactional?: boolean }>;
   registrationOwnership: Map<string, string>;
   routes: ChimpbaseRouteRegistration[];

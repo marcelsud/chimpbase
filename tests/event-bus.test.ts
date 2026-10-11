@@ -46,6 +46,48 @@ async function createTestEngine(
 }
 
 describe("event bus", () => {
+  test("local delivery reservations precede commit and are cancelled when commit fails", async () => {
+    const reserved = new Set<number>();
+    const published: number[][] = [];
+    let cancellations = 0;
+    const { adapter, db, engine, registry } = await createTestEngine({
+      preparePublish(events) {
+        expect(db.inTransaction).toBe(true);
+        const ids = events.map((event) => v.integer().parse(event.id));
+        for (const id of ids) reserved.add(id);
+        return () => {
+          cancellations += 1;
+          for (const id of ids) reserved.delete(id);
+        };
+      },
+      async publish(events) {
+        expect(db.inTransaction).toBe(false);
+        const ids = events.map((event) => v.integer().parse(event.id));
+        expect(ids.every((id) => reserved.has(id))).toBe(true);
+        published.push(ids);
+        for (const id of ids) reserved.delete(id);
+      },
+      start() {}, stop() {},
+    });
+    registry.actions.set("emit", action("emit", (ctx) => { ctx.pubsub.publish("local", {}); }));
+    const commit = adapter.commitTransaction.bind(adapter);
+    adapter.commitTransaction = async () => {
+      adapter.commitTransaction = commit;
+      throw new Error("commit failed");
+    };
+    try {
+      await expect(engine.executeAction("emit")).rejects.toThrow("commit failed");
+      expect(cancellations).toBe(1);
+      expect([...reserved]).toEqual([]);
+      expect(published).toEqual([]);
+      expect(db.query("SELECT * FROM _chimpbase_events").all()).toEqual([]);
+      const result = await engine.executeAction("emit");
+      expect(published).toEqual([result.emittedEvents.map((event) => v.integer().parse(event.id))]);
+      expect([...reserved]).toEqual([]);
+      expect(cancellations).toBe(1);
+    } finally { db.close(); }
+  });
+
   for (const name of ["", "shared-name"]) {
     test(`external async events deliver shared ${name === "" ? "unnamed" : "named"} subscription identities once`, async () => {
       let deliver: ChimpbaseEventBusCallback | undefined;

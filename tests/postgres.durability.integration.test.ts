@@ -46,6 +46,69 @@ describeIfPg("PostgreSQL queue durability", () => {
     await pool.end();
   });
 
+  test("a failing job does not abandon later jobs in its claimed batch", async () => {
+    const queueName = uniqueName("batch-failure");
+    queueNames.add(queueName);
+    const calls: number[] = [];
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: postgresUrl() },
+      worker: { retryDelayMs: 0 },
+      workerRuntime: { leaseMs: 30_000 },
+      registrations: [
+        worker(queueName, async (ctx, payload: { id: number }, execution) => {
+          calls.push(payload.id);
+          await ctx.kv.set(`${queueName}:${payload.id}`, execution?.attempt);
+          if (payload.id === 0 || payload.id === 3) throw new Error(`job ${payload.id} failed`);
+        }),
+        action("enqueue", async (ctx) => {
+          for (let id = 0; id < 8; id++) await ctx.enqueue(queueName, { id });
+        }),
+      ],
+    });
+    try {
+      await host.executeAction("enqueue");
+      await expect(host.engine.processNextQueueJobs(8)).rejects.toThrow("job 0 failed");
+      expect(calls).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+      const rows = await pool.query<{ attempt_count: number; lease_expires_at_ms: number | null; status: string }>(
+        "SELECT attempt_count, lease_expires_at_ms, status FROM _chimpbase_queue_jobs WHERE queue_name = $1 ORDER BY id",
+        [queueName],
+      );
+      expect(rows.rows).toEqual(Array.from({ length: 8 }, (_, id) => ({
+        attempt_count: 1, lease_expires_at_ms: null, status: id === 0 || id === 3 ? "pending" : "completed",
+      })));
+      expect((await pool.query<{ key: string }>(
+        "SELECT key FROM _chimpbase_kv WHERE key = ANY($1::text[]) ORDER BY key",
+        [Array.from({ length: 8 }, (_, id) => `${queueName}:${id}`)],
+      )).rows.map((row) => row.key)).toEqual([1, 2, 4, 5, 6, 7].map((id) => `${queueName}:${id}`));
+    } finally {
+      await host.close();
+      await pool.query("DELETE FROM _chimpbase_kv WHERE key = ANY($1::text[])", [
+        Array.from({ length: 8 }, (_, id) => `${queueName}:${id}`),
+      ]);
+    }
+  });
+
+  test("concurrent first boot initializes an empty internal schema on every node", async () => {
+    const schema = `boot_test_${crypto.randomUUID().replaceAll("-", "")}`;
+    const scopedUrl = new URL(postgresUrl());
+    scopedUrl.searchParams.set("options", `-c search_path=${schema}`);
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    let outcomes: PromiseSettledResult<Awaited<ReturnType<typeof createChimpbase>>>[] = [];
+    try {
+      outcomes = await Promise.allSettled(Array.from({ length: 5 }, () =>
+        createChimpbase({ storage: { engine: "postgres", url: scopedUrl.href } })));
+      expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
+      expect((await pool.query<{ table_name: string }>(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", [schema],
+      )).rows.map((row) => row.table_name)).toContain("_chimpbase_queue_jobs");
+    } finally {
+      for (const outcome of outcomes) {
+        if (outcome.status === "fulfilled") await outcome.value.close();
+      }
+      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
   test("named migrations serialize concurrent startup and roll back failed batches", async () => {
     const id = crypto.randomUUID().replaceAll("-", "");
     const table = `migration_test_${id}`;

@@ -49,6 +49,7 @@ import {
   type ChimpbaseContext,
   type ChimpbaseContextExtensionRegistration,
   type ChimpbaseObjectActionHandler,
+  type ChimpbaseOnStartRegistration,
   type ChimpbaseCronHandler,
   type ChimpbaseInferActionArgs,
   type ChimpbaseInferActionResult,
@@ -218,6 +219,7 @@ export class ChimpbaseHost<TServer> {
   private readonly activeEngineOperations = new Set<Promise<unknown>>();
   private readonly requestTelemetryRecords: TelemetryRecord[] = [];
   private acceptingRoutes = true;
+  private starting = false;
   private readonly storage: StorageHandle;
   private readonly supportsConcurrentWorkers: boolean;
   private readonly requestConcurrency: number;
@@ -279,8 +281,12 @@ export class ChimpbaseHost<TServer> {
   }
 
   async executeRoute(request: Request): Promise<RouteExecutionResult> {
-    if (!this.acceptingRoutes) {
-      return { emittedEvents: [], response: new Response("runtime is stopping", {
+    const canExecute = () => {
+      const current = engineOperationContext.getStore();
+      return this.acceptingRoutes || (this.starting && current?.active === true && current.host === this);
+    };
+    if (!canExecute()) {
+      return { emittedEvents: [], response: new Response(this.starting ? "runtime is starting" : "runtime is stopping", {
         status: 503, headers: { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" },
       }) };
     }
@@ -289,8 +295,8 @@ export class ChimpbaseHost<TServer> {
 
     try {
       const prepared = await this.engine.prepareRoute(request);
-      if (!this.acceptingRoutes) {
-        return { emittedEvents: [], response: new Response("runtime is stopping", {
+      if (!canExecute()) {
+        return { emittedEvents: [], response: new Response(this.starting ? "runtime is starting" : "runtime is stopping", {
           status: 503, headers: { [CHIMPBASE_REQUEST_REJECTED_HEADER]: "1" },
         }) };
       }
@@ -549,8 +555,9 @@ export class ChimpbaseHost<TServer> {
   registerOnStart(
     name: string,
     handler: (ctx: ChimpbaseContext) => Promise<void> | void,
+    options?: Pick<ChimpbaseOnStartRegistration, "phase" | "transactional">,
   ): void {
-    this.registry.onStartHooks.push({ handler, module: null, name });
+    this.registry.onStartHooks.push({ ...options, handler, module: null, name });
   }
 
   registerOnStop(
@@ -649,13 +656,15 @@ export class ChimpbaseHost<TServer> {
   }
 
   async start(options: { runWorker?: boolean; serve?: boolean } = {}): Promise<StartedHost<this, TServer>> {
-    this.acceptingRoutes = true;
+    this.acceptingRoutes = false;
+    this.starting = true;
     const runServe = options.serve ?? !(options.runWorker === true);
     const runWorker = options.runWorker ?? !(options.serve === true);
     let worker: WorkerHandle | null = null;
     let server: TServer | null = null;
     const stop = async () => {
       this.acceptingRoutes = false;
+      this.starting = false;
       try {
         try {
           this.engine.stopEventBus();
@@ -680,8 +689,9 @@ export class ChimpbaseHost<TServer> {
 
     try {
       for (const hook of this.registry.onStartHooks) {
+        if (hook.phase === "ready") continue;
         await this.runEngineOperation(async () => {
-          await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name);
+          await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name, hook.transactional);
         });
       }
       server = runServe ? this.serve() : null;
@@ -696,6 +706,14 @@ export class ChimpbaseHost<TServer> {
       this.engine.startEventBus(async (operation) => {
         if (this.acceptingRoutes) await this.runEngineOperation(operation);
       });
+      this.starting = false;
+      this.acceptingRoutes = true;
+      for (const hook of this.registry.onStartHooks) {
+        if (hook.phase !== "ready") continue;
+        await this.runEngineOperation(async () => {
+          await this.engine.executeLifecycleHook(hook.handler, hook.module, hook.name, hook.transactional);
+        });
+      }
     } catch (error) {
       try {
         await stop();

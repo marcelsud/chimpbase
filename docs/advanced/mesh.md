@@ -134,8 +134,9 @@ CREATE TABLE IF NOT EXISTS _chimpbase_mesh_nodes (
 );
 ```
 
-- **Heartbeat** — `setInterval` updates `last_heartbeat_ms` and reloads live peers from the registry. PostgreSQL heartbeat queries use a separate adapter after startup, so active request transactions cannot hide or roll back them. Slow heartbeats do not overlap, and shutdown waits for the active heartbeat.
-- **Announce / leave** — emitted via `ctx.pubsub.publish` on plugin start/stop. Shutdown rejects new HTTP routes with 503, stops event listeners and worker ticks, and waits for active operations before deleting this node's registry row.
+- **Startup** — registry schema creation commits under its migration lock before service initialization. Nodes register and announce after all ordinary startup hooks finish and the host starts HTTP, workers and the event bus. Externally served nodes use `start({ serve: false })` once their HTTP server is available. Incoming routes receive 503 during startup.
+- **Heartbeat** — after registration commits, `setInterval` updates `last_heartbeat_ms` and reloads live peers from the registry. PostgreSQL heartbeat queries use a separate adapter after startup, so active request transactions cannot hide or roll back them. Slow heartbeats do not overlap, and shutdown waits for the active heartbeat.
+- **Announce / leave** — emitted via `ctx.pubsub.publish` on readiness/stop. Announcements carry the registry heartbeat timestamp; delayed events expire from that timestamp and cannot replace newer cached peer data. Older announcements without that field use their original startup timestamp. Shutdown rejects new HTTP routes with 503, stops event listeners and worker ticks, and waits for active operations before deleting this node's registry row.
 - **Cache** — every node replaces its in-memory peer snapshot from the registry on startup and each heartbeat. Announce/leave events can update it between refreshes; peers past `offlineAfterMs` expire locally.
 - **Routing** — remote calls, including calls pinned to a node, require a valid HTTP or HTTPS advertised URL. Nodes using `local-only` can participate in shared queues and events, but their actions are excluded from remote RPC selection.
 - **GC** — cron `* * * * *` sweeps rows older than `gcAfterMs`.

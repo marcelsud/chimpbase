@@ -29,9 +29,13 @@ Individual subscriptions can set `dispatch: "sync"` or `dispatch: "async"` in th
 
 The polling transport skips events committed by its own process and committed history from before the listener starts. It tracks PostgreSQL transaction snapshots rather than event ID order: an earlier event whose transaction commits later is still delivered, including transactions already in flight when the listener starts. Snapshot windows are frozen while reading pages of 100 events, so continuous arrivals cannot prevent cursor advancement. The event table's indexed `transaction_id` column records the publishing transaction; upgrading an existing table preserves old rows without backfilling this column.
 
+The engine reserves local event IDs before COMMIT, preventing polling from repeating local handlers while the database acknowledgement is delayed. Rollback cancels those reservations.
+
 Each polled event is delivered in its own callback and transaction. A failing event retries on subsequent polls for up to three attempts while healthy events continue. The final failure emits a structured error with `eventId`, `eventName`, `attempts`, and `exhausted: true`; it is then skipped on that listener. Successful events in other callbacks are not replayed. Several subscriptions to the same event still share its transaction and can repeat external effects when another subscription fails, so make those effects idempotent.
 
 Polling broadcast state is held in memory: processed IDs are retained only while draining the current frozen window, and failed envelopes only until their retry limit. Broadcasts remain non-durable across listener restarts; stopping the listener clears retry state, and a new listener skips already committed history. The persisted event table has no automatic retention policy; remove old events only after active listeners have consumed them. Use shared queues or module outboxes for deliveries that must survive a node restart. LISTEN/NOTIFY filters its own origin and provides low-latency peer delivery.
+
+LISTEN/NOTIFY retries attachment once per second after connection or LISTEN failures and reconnects after a disconnect. Notifications missed during disconnection are not replayed. Stopping cancels retries and destroys the dedicated listener connection without waiting for a database response; connections acquired after stopping are released without subscribing.
 
 An oversized LISTEN/NOTIFY envelope throws `PayloadTooLargeError` after the event has committed. The event remains stored, but the notification is not sent. Use polling for larger payloads.
 
