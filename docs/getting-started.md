@@ -2,17 +2,23 @@
 
 Build a small notes API with Bun. It uses SQLite locally, so you do not need a database server or HTTP framework.
 
+This walkthrough uses Bun 1.3 and `curl`. Install [Bun](https://bun.sh/docs/installation) before starting. For Node or Deno, follow the [runtime host instructions](/configuration#runtime-hosts) with the same app below.
+
 ## Install
 
-In a new project directory, install the single public package:
+Create a project directory and install the single public package:
 
-```bash
+```bash chimpbase-install:bun
+mkdir my-app
+cd my-app
 bun add chimpbase
 ```
 
+If the package is not available in your registry yet, [install from source](/configuration#install-from-source), then continue with the app below.
+
 ## Create the app
 
-Save this as `chimpbase.app.ts`:
+Save this as `chimpbase.app.ts` in `my-app`:
 
 ```ts chimpbase-check:getting-started
 import type { ChimpbaseAppDefinitionInput } from "chimpbase/core";
@@ -53,30 +59,53 @@ Actions validate input and run inside a transaction. Routes call those actions o
 
 ## Run it
 
-```bash
+From the directory containing `chimpbase.app.ts`, run:
+
+```bash chimpbase-run:bun
 bunx chimpbase dev
 ```
 
-The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. SQLite data is stored in `data/my-app.db`. The app file exports a definition; the CLI starts it.
+Wait for `listening on http://127.0.0.1:3000` and keep this terminal open. The CLI loads `chimpbase.app.ts`, starts HTTP on port 3000 and runs the background worker. SQLite data is stored in `data/my-app.db`. The app file exports a definition; the CLI starts it.
 
 For port, storage, and worker settings and defaults, see the [environment-variable reference](/configuration#environment-variables).
 
-In another terminal:
+In another terminal, create your first note:
 
-```bash
-curl http://localhost:3000/notes \
+```bash chimpbase-request:create
+curl --include http://localhost:3000/notes \
   -H 'Content-Type: application/json' \
   -d '{"body":"First note"}'
+```
 
+Expect `HTTP/1.1 201 Created` and a JSON body like this; your generated `id` will differ:
+
+```json
+{"id":"<generated id>","body":"First note"}
+```
+
+List the saved notes:
+
+```bash chimpbase-request:list
 curl http://localhost:3000/notes
+```
+
+The response is an array containing your note:
+
+```json
+[{"body":"First note","id":"<generated id>"}]
+```
+
+Check that the server is healthy:
+
+```bash chimpbase-request:health
 curl http://localhost:3000/health
 ```
 
-The POST returns a note with a generated `id`; GET returns the stored notes. `/health` returns `{"ok":true}`.
+Expect `{"ok":true}`. Press `Ctrl+C` in the server terminal when finished; SQLite keeps your notes for the next run.
 
 You can also call an action from the CLI:
 
-```bash
+```bash chimpbase-action:bun
 bunx chimpbase dev --action createNote --args '{"body":"From the CLI"}'
 ```
 
