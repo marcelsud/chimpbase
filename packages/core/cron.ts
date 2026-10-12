@@ -106,25 +106,16 @@ function parseCronField(
 ): ParsedCronField {
   const tokens = expression.split(",");
   const values = new Set<number>();
-  let sawWildcardToken = false;
 
   for (const rawToken of tokens) {
     const token = rawToken.trim();
-    if (token.length === 0) {
-      throw new Error(`invalid cron field: ${expression}`);
-    }
-
-    const segments = token.split("/");
-    if (segments.length > 2) {
+    if (!/^(?:\*|\d+(?:-\d+)?)(?:\/\d+)?$/.test(token)) {
       throw new Error(`invalid cron token: ${token}`);
     }
 
+    const segments = token.split("/");
     const base = segments[0] ?? "";
     const step = segments[1] === undefined ? 1 : parsePositiveInteger(segments[1], token);
-
-    if (base.includes("*")) {
-      sawWildcardToken = true;
-    }
 
     const [start, end] = parseCronRange(base, min, options.maxInputValue ?? max, token);
     for (let value = start; value <= end; value += step) {
@@ -139,7 +130,7 @@ function parseCronField(
   return {
     valueSet: values,
     values: [...values].sort((left, right) => left - right),
-    wildcard: sawWildcardToken && values.size === (max - min + 1),
+    wildcard: expression.startsWith("*"),
   };
 }
 
@@ -175,7 +166,7 @@ function parseRawCronValue(
   token: string,
 ): number {
   const parsed = Number(rawValue);
-  if (!Number.isInteger(parsed)) {
+  if (!Number.isSafeInteger(parsed)) {
     throw new Error(`cron token is not an integer: ${token}`);
   }
 
@@ -208,7 +199,7 @@ function normalizeCronValue(
 
 function parsePositiveInteger(rawValue: string, token: string): number {
   const parsed = Number(rawValue);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`cron step must be a positive integer: ${token}`);
   }
 
@@ -219,17 +210,7 @@ function matchesDay(parsed: ParsedCronExpression, date: Date): boolean {
   const dayOfMonthMatches = parsed.dayOfMonth.valueSet.has(date.getUTCDate());
   const dayOfWeekMatches = parsed.dayOfWeek.valueSet.has(date.getUTCDay());
 
-  if (parsed.dayOfMonth.wildcard && parsed.dayOfWeek.wildcard) {
-    return true;
-  }
-
-  if (parsed.dayOfMonth.wildcard) {
-    return dayOfWeekMatches;
-  }
-
-  if (parsed.dayOfWeek.wildcard) {
-    return dayOfMonthMatches;
-  }
-
-  return dayOfMonthMatches || dayOfWeekMatches;
+  return parsed.dayOfMonth.wildcard || parsed.dayOfWeek.wildcard
+    ? dayOfMonthMatches && dayOfWeekMatches
+    : dayOfMonthMatches || dayOfWeekMatches;
 }

@@ -18,8 +18,42 @@ import {
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
 import { applySqliteMigrations, createDefaultChimpbasePlatformShim, defineChimpbaseMigrations, ensureSqliteInternalTables, normalizeProjectConfig } from "../packages/core/index.ts";
+import { computeNextCronFireTime } from "../packages/core/cron.ts";
 
 const cleanupDirs: string[] = [];
+
+test("cron uses leading-star day restrictions and strict decimal tokens", async () => {
+  for (const [expression, after, expected] of [
+    ["0 0 */2 * 1", "2026-10-12", "2026-10-19"],
+    ["0 0 */2,2 * 1", "2026-10-12", "2026-10-19"],
+    ["0 0 1,*/2 * 1", "2026-10-12", "2026-10-13"],
+    ["0 0 1-31 * 1", "2026-10-12", "2026-10-13"],
+    ["0 0 */2 * */2", "2026-10-08", "2026-10-11"],
+    ["0 0 13 * */2", "2026-10-13", "2026-12-13"],
+    ["0 0 * * 7", "2026-10-12", "2026-10-18"],
+    ["0 0 13 * 1", "2026-10-12", "2026-10-13"],
+  ]) {
+    expect(new Date(computeNextCronFireTime(expression, Date.parse(after + "T00:00:00Z"))).toISOString())
+      .toBe(expected + "T00:00:00.000Z");
+  }
+  const now = Date.parse("2026-10-12T00:00:00Z");
+  expect(new Date(computeNextCronFireTime("05-09/2 * * * *", now)).toISOString()).toBe("2026-10-12T00:05:00.000Z");
+  for (const field of ["1-2-3", "0-", "1e1", "0x10", "+1", "1.0", "-0", "*//2", "*/1e1", "*/0", "*/-1", "*/9007199254740992", "1,,2", "1/", "*-2", "1-2/2/3"]) {
+    expect(() => computeNextCronFireTime(`${field} * * * *`, now)).toThrow();
+  }
+  const host = await ChimpbaseBunHost.create({
+    config: normalizeProjectConfig({ storage: { engine: "memory" } }),
+    platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+  });
+  try {
+    host.register(cron("odd-mondays", "0 0 */2 * 1", () => {}));
+    await host.syncCronSchedules();
+    expect(await host.engine.getBlobsAdapter().query(
+      "SELECT next_fire_at_ms FROM _chimpbase_cron_schedules WHERE schedule_name = 'odd-mondays'", [],
+      v.object({ next_fire_at_ms: v.number() }),
+    )).toEqual([{ next_fire_at_ms: Date.parse("2026-10-19T00:00:00Z") }]);
+  } finally { await host.close(); }
+});
 
 test("invalid queue delays fail before SQLite insertion", async () => {
   const host = await createChimpbase({ storage: { engine: "memory" } });
