@@ -25,7 +25,7 @@ export interface ChimpbaseBlobsPlugin {
 
 export function chimpbaseBlobs(options: ChimpbaseBlobsPluginOptions): ChimpbaseBlobsPlugin {
   const signer = createBlobSigner(options);
-  const basePath = (options.routeBasePath ?? signer.routeBasePath).replace(/\/$/, "");
+  const basePath = signer.routeBasePath;
 
   const downloadRoute = route("chimpbase.blobs.download", async (request, env) => {
     const url = new URL(request.url);

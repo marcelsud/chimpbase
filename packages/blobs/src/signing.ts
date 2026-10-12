@@ -45,7 +45,7 @@ export function createBlobSigner(options: CreateBlobSignerOptions): ChimpbaseBlo
   routeBasePath: string;
 } {
   const { secret, baseUrl } = options;
-  const routeBasePath = options.routeBasePath ?? "/_blobs";
+  const routeBasePath = (options.routeBasePath ?? "/_blobs").replace(/\/+$/, "");
   const clock = options.clock ?? (() => Date.now());
   if (!(secret.length > 0)) throw new Error("createBlobSigner requires secret");
 
@@ -64,7 +64,7 @@ export function createBlobSigner(options: CreateBlobSignerOptions): ChimpbaseBlo
     const sig = createHmac("sha256", secret).update(encoded).digest();
     const token = `${encoded}.${base64UrlEncode(sig)}`;
     const segment = input.op === "get" ? "get" : "put";
-    const base = baseUrl.replace(/\/$/, "");
+    const base = baseUrl.replace(/\/+$/, "");
     return `${base}${routeBasePath}/${segment}?token=${encodeURIComponent(token)}`;
   };
 
