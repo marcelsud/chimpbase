@@ -242,6 +242,12 @@ for (let boot = 0; boot < 2; boot++) {
 let cancelled;
 const sourceCancelled = new Promise((resolve) => { cancelled = resolve; });
 const server = nodeRuntimeShim.server.create({ port: 0 }, (request) => {
+  if (request.url.endsWith("/cookies")) {
+    const headers = new Headers({ "x-cookies": "yes" });
+    headers.append("set-cookie", "first=one; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT");
+    headers.append("set-cookie", "second=two; Path=/; HttpOnly");
+    return new Response("cookies", { headers });
+  }
   if (request.url.endsWith("/fail")) {
     return new Response(new ReadableStream({
       start(control) {
@@ -263,6 +269,16 @@ const address = server.server.address();
 assert(address && typeof address === "object");
 const streamUrl = "http://127.0.0.1:" + address.port;
 try {
+  await new Promise((resolveCookies, rejectCookies) => {
+    get(streamUrl + "/cookies", (response) => {
+      assert.deepEqual(response.headers["set-cookie"], [
+        "first=one; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT",
+        "second=two; Path=/; HttpOnly",
+      ]);
+      assert.equal(response.headers["x-cookies"], "yes");
+      response.resume(); response.once("end", resolveCookies);
+    }).once("error", rejectCookies);
+  });
   const streamed = await fetch(streamUrl, { signal: AbortSignal.timeout(5000) });
   assert.equal(streamed.status, 201);
   assert.equal(streamed.headers.get("x-stream"), "yes");

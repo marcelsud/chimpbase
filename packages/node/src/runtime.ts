@@ -198,8 +198,11 @@ async function writeNodeResponse(response: ServerResponse, webResponse: Response
   response.statusCode = webResponse.status;
   response.statusMessage = webResponse.statusText;
   webResponse.headers.forEach((value, name) => {
+    if (name === "set-cookie") return;
     response.setHeader(name, value);
   });
+  const cookies = webResponse.headers.getSetCookie();
+  if (cookies.length > 0) response.setHeader("set-cookie", cookies);
 
   if (!(webResponse.body !== null)) {
     response.end();
