@@ -62,6 +62,32 @@ function authHeaders(key: string = BOOTSTRAP_KEY) {
 }
 
 describe("@chimpbase/auth", () => {
+  test("management routes reject malformed encoded IDs with 400", async () => {
+    const host = await createAuthHost();
+    try {
+      for (const id of ["%", "%E0%A4%A", "%FF"]) {
+        for (const [method, path] of [
+          ["DELETE", `/_auth/users/${id}`],
+          ["POST", `/_auth/users/${id}/keys`],
+          ["GET", `/_auth/users/${id}/keys`],
+          ["DELETE", `/_auth/keys/${id}`],
+        ]) {
+          const outcome = await host.executeRoute(new Request(`http://test.local${path}`, {
+            method, headers: authHeaders(),
+          }));
+          expect(outcome.response?.status).toBe(400);
+          expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "invalid URL encoding in ID" });
+        }
+      }
+      const escaped = await host.executeRoute(new Request("http://test.local/_auth/users/%25", {
+        method: "DELETE", headers: authHeaders(),
+      }));
+      expect(escaped.response?.status).toBe(404);
+    } finally {
+      await host.close();
+    }
+  });
+
   // ── Guard ───────────────────────────────────────────────────────────────
 
   test("root protected prefix covers every route and preserves exclusions", async () => {

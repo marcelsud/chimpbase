@@ -599,7 +599,7 @@ export function chimpbaseAuth(
             matchPrefixWithId(segments, [...baseSegments, "users"]) &&
             request.method === "DELETE"
           ) {
-            const userId = decodeURIComponent(segments[segments.length - 1]!);
+            const userId = decodeIdentifier(segments[segments.length - 1]!);
             const deleted = await env.action("__chimpbase.auth.deleteUser", userId);
             return deleted === 0
               ? jsonError(404, "user not found")
@@ -611,7 +611,7 @@ export function chimpbaseAuth(
             matchPrefixWithIdAndSuffix(segments, [...baseSegments, "users"], "keys") &&
             request.method === "POST"
           ) {
-            const userId = decodeURIComponent(segments[baseSegments.length + 1]!);
+            const userId = decodeIdentifier(segments[baseSegments.length + 1]!);
             const body = await parseJsonBody(request);
             const result = await env.action("__chimpbase.auth.createApiKey", {
               userId,
@@ -627,7 +627,7 @@ export function chimpbaseAuth(
             matchPrefixWithIdAndSuffix(segments, [...baseSegments, "users"], "keys") &&
             request.method === "GET"
           ) {
-            const userId = decodeURIComponent(segments[baseSegments.length + 1]!);
+            const userId = decodeIdentifier(segments[baseSegments.length + 1]!);
             const keys = await env.action("__chimpbase.auth.listApiKeys", userId);
             return Response.json(keys);
           }
@@ -637,7 +637,7 @@ export function chimpbaseAuth(
             matchPrefixWithId(segments, [...baseSegments, "keys"]) &&
             request.method === "DELETE"
           ) {
-            const keyId = decodeURIComponent(segments[segments.length - 1]!);
+            const keyId = decodeIdentifier(segments[segments.length - 1]!);
             const revoked = await env.action("__chimpbase.auth.revokeApiKey", keyId);
             return revoked === 0
               ? jsonError(404, "API key not found")
@@ -702,6 +702,14 @@ function requireString(body: Record<string, unknown>, field: string): string {
     throw new AuthRequestError(400, `"${field}" is required and must be a non-empty string`);
   }
   return value;
+}
+
+function decodeIdentifier(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new AuthRequestError(400, "invalid URL encoding in ID");
+  }
 }
 
 function optionalString(body: Record<string, unknown>, field: string): string | undefined {
