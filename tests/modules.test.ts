@@ -271,6 +271,132 @@ describe("business modules", () => {
     await database.destroy();
   });
 
+  test("module SQL checks comma joins and query-scoped CTEs without mistaking expressions for tables", () => {
+    const check = (sql: string) => assertChimpbaseModuleRuntimeSql("left", "chimpbase_left", sql);
+    for (const sql of [
+      "WITH owned AS (SELECT 1) SELECT secret.* FROM owned, _chimpbase_kv secret",
+      "WITH owned AS (SELECT 1) SELECT secret.* FROM (owned, _chimpbase_kv secret)",
+      "SELECT * FROM (WITH _chimpbase_kv AS (SELECT 1) SELECT * FROM _chimpbase_kv) nested, _chimpbase_kv secret",
+      "WITH owned AS (SELECT 1) SELECT * FROM owned JOIN _chimpbase_kv secret ON true",
+      "SELECT * FROM chimpbase_left.items WHERE EXISTS (SELECT 1 FROM _chimpbase_kv)",
+      'SELECT * FROM chimpbase_left.items, "public"."secret"',
+      "WITH owned AS (TABLE _chimpbase_kv) SELECT * FROM owned",
+      "SELECT 1 UNION TABLE _chimpbase_kv",
+      "SELECT 1 WHERE EXISTS (TABLE _chimpbase_kv)",
+      "SELECT key -- hidden relation\rFROM _chimpbase_kv",
+      "SELECT * FROM if",
+      "WITH owned AS (SELECT 1) SELECT * FROM owned, if",
+      "WITH owned AS (SELECT * FROM if) SELECT * FROM owned",
+    ]) expect(() => check(sql)).toThrow();
+    for (const sql of [
+      "SELECT EXTRACT(year FROM created_at) FROM chimpbase_left.items",
+      "SELECT trim(both ' ' FROM label) FROM chimpbase_left.items",
+      "WITH owned(id) AS MATERIALIZED (SELECT id FROM chimpbase_left.items) SELECT * FROM owned, chimpbase_left.items",
+      'WITH "FROM" AS (SELECT 1) SELECT * FROM "FROM"',
+      'SELECT "comma,FROM;public.secret" FROM chimpbase_left.items',
+      "WITH owned AS (SELECT 1) SELECT * FROM (owned JOIN chimpbase_left.items ON true), chimpbase_left.items other",
+      "SELECT $$FROM _chimpbase_kv;$$, $value$public.secret$value$ FROM chimpbase_left.items /* outer /* nested */ comment */",
+      "SELECT E'escaped\\' FROM _chimpbase_kv;' FROM chimpbase_left.items",
+      "INSERT INTO chimpbase_left.items(id) VALUES (1) ON CONFLICT(id) DO UPDATE SET id = 1",
+      "WITH owned AS (TABLE chimpbase_left.items) SELECT * FROM owned",
+      "SELECT 1 WHERE EXISTS (TABLE chimpbase_left.items)",
+      "WITH if AS (SELECT 1) SELECT * FROM if",
+    ]) expect(() => check(sql)).not.toThrow();
+    expect(() => assertChimpbaseModuleMigrationSql("left", "chimpbase_left",
+      "CREATE TABLE IF NOT EXISTS chimpbase_left.items (id integer)",
+    )).not.toThrow();
+    expect(() => assertChimpbaseModuleMigrationSql("left", "chimpbase_left",
+      "DROP TABLE IF EXISTS chimpbase_left.items",
+    )).not.toThrow();
+    for (const sql of [
+      "CREATE TABLE IF NOT EXISTS public.secret (id integer)",
+      "DROP TABLE IF EXISTS public.secret",
+      "CREATE TABLE IF NOT EXISTS if (id integer)",
+      "DROP TABLE IF EXISTS if",
+    ]) expect(() => assertChimpbaseModuleMigrationSql("left", "chimpbase_left", sql)).toThrow();
+  });
+
+  test("a module cannot read framework KV through a comma join in its public call", async () => {
+    const guarded = defineChimpbaseModuleInterface({
+      name: "sqlguard", version: 1, events: {},
+      calls: { read: { input: v.object({}), output: v.unknown() } },
+    });
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      modules: [defineChimpbaseModuleImplementation({
+        interface: guarded,
+        calls: { read: async (ctx) => await ctx.db.query(
+          "WITH owned AS (SELECT 1) SELECT secret.key, secret.value_json FROM owned, _chimpbase_kv secret",
+        ) },
+      })],
+      registrations: [action("seedSqlGuard", async (ctx) => await ctx.kv.set("global-secret", "private-data"))],
+    });
+    try {
+      await host.executeAction("seedSqlGuard");
+      await expect(host.executeAction(guarded.calls.read.id, {})).rejects.toThrow("must qualify owned relations");
+    } finally { await host.close(); }
+  });
+
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("PostgreSQL module calls allow owned joins, CTEs and EXTRACT while rejecting framework tables", async () => {
+    const table = `sqlguard_${crypto.randomUUID().replaceAll("-", "")}`;
+    const guarded = defineChimpbaseModuleInterface({
+      name: "sqlguard", version: 1, events: {},
+      calls: {
+        read: { input: v.object({}), output: v.unknown() },
+        leak: { input: v.object({}), output: v.unknown() },
+        tableRead: { input: v.object({}), output: v.unknown() },
+        leakTable: { input: v.string(), output: v.unknown() },
+      },
+    });
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL },
+      modules: [defineChimpbaseModuleImplementation({
+        interface: guarded,
+        calls: {
+          read: async (ctx) => await ctx.db.query(
+            `WITH owned(id) AS (SELECT id FROM chimpbase_sqlguard.${table})
+             SELECT EXTRACT(year FROM actual.created_at)::int AS year
+             FROM owned, chimpbase_sqlguard.${table} actual WHERE owned.id = actual.id`,
+          ),
+          leak: async (ctx) => await ctx.db.query(
+            "WITH owned AS (SELECT 1) SELECT secret.key FROM owned, _chimpbase_kv secret",
+          ),
+          tableRead: async (ctx) => await ctx.db.query(
+            `WITH owned AS (TABLE chimpbase_sqlguard.${table}) SELECT id FROM owned`,
+          ),
+          leakTable: async (ctx, sql) => await ctx.db.query(sql),
+        },
+      })],
+      registrations: [
+        action("setupSqlGuard", async (ctx) => {
+          await ctx.db.query(`CREATE TABLE chimpbase_sqlguard.${table}(id integer, created_at timestamptz)`);
+          await ctx.db.query(`INSERT INTO chimpbase_sqlguard.${table} VALUES (1, '2026-01-01')`);
+          await ctx.db.query("CREATE TEMP TABLE if(value text)");
+          await ctx.db.query("INSERT INTO if VALUES ('private-temp-data')");
+          expect(await ctx.db.query("SELECT value FROM if")).toEqual([{ value: "private-temp-data" }]);
+        }),
+        action("cleanupSqlGuard", async (ctx) => await ctx.db.query(`DROP TABLE IF EXISTS chimpbase_sqlguard.${table}`)),
+      ],
+    });
+    try {
+      await host.executeAction("setupSqlGuard");
+      expect((await host.executeAction(guarded.calls.read.id, {})).result).toEqual([{ year: 2026 }]);
+      await expect(host.executeAction(guarded.calls.leak.id, {})).rejects.toThrow("must qualify owned relations");
+      expect((await host.executeAction(guarded.calls.tableRead.id, {})).result).toEqual([{ id: 1 }]);
+      for (const sql of [
+        "WITH owned AS (TABLE _chimpbase_kv) SELECT key, value_json FROM owned",
+        "SELECT key, value_json FROM chimpbase_sqlguard.sqlguard_missing UNION TABLE _chimpbase_kv",
+        "SELECT 1 WHERE EXISTS (TABLE _chimpbase_kv)",
+        "SELECT key,value_json -- hidden relation\rFROM _chimpbase_kv",
+        "SELECT value FROM if",
+        "WITH owned AS (SELECT value FROM if) SELECT value FROM owned",
+      ]) await expect(host.executeAction(guarded.calls.leakTable.id, sql)).rejects.toThrow("must qualify owned relations");
+    } finally {
+      try { await host.executeAction("cleanupSqlGuard"); }
+      finally { await host.close(); }
+    }
+  });
+
   test("validates calls and events and enforces public, internal, and dependency guards", async () => {
     const provider = defineChimpbaseModuleInterface({
       name: "provider",
