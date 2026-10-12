@@ -411,7 +411,7 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-literal-prefix-"));
     cleanupDirs.push(projectDir);
     const bucket = `prefix-${crypto.randomUUID()}`;
-    const keys = ["user_one", "user_two", "userXtwo", "literal%one", "literal%two", "literalXtwo", "bang!one", "bangXone", "bang!_one", "bang!%one", "slash\\one", "slashXone", "ordinary/one"];
+    const keys = ["user_one", "user_two", "userXtwo", "literal%one", "literal%two", "literalXtwo", "bang!one", "bangXone", "bang!_one", "bang!%one", "slash\\one", "slashXone", "ordinary/one", "Case/one", "case/two", "😀A/one", "😀a/two", "éA/one", "éa/two"];
     const uploadIds: string[] = [];
     const host = await createChimpbase({
       projectDir, storage: engine === "postgres" ? { engine, url: pgUrl } : { engine },
@@ -454,7 +454,7 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
     });
     try {
       await host.executeAction("seedPrefixes");
-      for (const prefix of ["user_", "literal%", "bang!", "bang!_", "bang!%", "slash\\", "ordinary/", "", "missing"]) {
+      for (const prefix of ["user_", "literal%", "bang!", "bang!_", "bang!%", "slash\\", "ordinary/", "Case/", "case/", "😀A/", "😀a/", "éA/", "éa/", "", "missing"]) {
         const expected = keys.filter((key) => key.startsWith(prefix)).sort();
         expect((await host.executeAction("inspectPrefixes", prefix)).result).toEqual({ kv: expected, blobs: expected, uploads: expected });
       }
