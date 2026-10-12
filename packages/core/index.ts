@@ -284,7 +284,7 @@ export function normalizeProjectConfig(
       idempotency: {
         retention: {
           enabled: input.subscriptions?.idempotency?.retention?.enabled ?? false,
-          maxAgeDays: input.subscriptions?.idempotency?.retention?.maxAgeDays ?? 30,
+          maxAgeDays: assertWorkerInteger("subscriptions.idempotency.retention.maxAgeDays", input.subscriptions?.idempotency?.retention?.maxAgeDays ?? 30, 1, 100_000_000),
           schedule: input.subscriptions?.idempotency?.retention?.schedule ?? "0 2 * * *",
         },
       },
@@ -314,7 +314,7 @@ export function normalizeProjectConfig(
       },
       retention: {
         enabled: input.telemetry?.retention?.enabled ?? false,
-        maxAgeDays: input.telemetry?.retention?.maxAgeDays ?? 30,
+        maxAgeDays: assertWorkerInteger("telemetry.retention.maxAgeDays", input.telemetry?.retention?.maxAgeDays ?? 30, 1, 100_000_000),
         schedule: input.telemetry?.retention?.schedule ?? "0 2 * * *",
       },
     },
