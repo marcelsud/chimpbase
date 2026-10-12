@@ -5,7 +5,8 @@ import { EventEmitter } from "node:events";
 import { normalizeProjectConfig } from "../packages/core/index.ts";
 import { createDefaultChimpbasePlatformShim } from "../packages/core/host.ts";
 import { createPostgresEngineAdapter, ensurePostgresInternalTables, openPostgresPool, openPostgresStorage, PostgresPollingEventBus } from "../packages/postgres/src/index.ts";
-import { v } from "../packages/runtime/index.ts";
+import { action, v } from "../packages/runtime/index.ts";
+import { createChimpbase } from "../packages/bun/src/library.ts";
 
 const config = normalizeProjectConfig({ storage: { engine: "postgres", url: "postgres://unused" } });
 const platform = createDefaultChimpbasePlatformShim();
@@ -19,6 +20,36 @@ const poolPrototype = Pool.prototype as unknown as {
 afterEach(() => mock.restore());
 
 describe("PostgreSQL storage startup", () => {
+  test("normalizes bound placeholders without changing literals, quoted identifiers or comments", async () => {
+    const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
+    const pool = openPostgresPool(config);
+    const sql = `SELECT '?1', 'it''s ?2', E'escaped\\' ?3', "quoted?4", "quote""?5",
+      $$?6$$, $tag$?7$tag$, $é$?12$é$, $标签$?13$标签$, ?1, $1 /* ?8 /* ?9 */ ?10 */ -- ?11\r\n`;
+    try {
+      await createPostgresEngineAdapter(pool, platform).query(sql, ["actual"], v.object({}));
+      expect(query.mock.calls[0]?.[0]).toBe(sql.replace(", ?1, $1", ", $1, $1"));
+    } finally { await pool.end(); }
+  });
+
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("public PostgreSQL queries preserve literal placeholders and bind actual parameters", async () => {
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL },
+      registrations: [action("literalQuery", async (ctx) => await ctx.db.query(
+        `SELECT '?1' AS literal, 'it''s ?2' AS apostrophe, E'escaped\\' ?3' AS escaped,
+          $$?4$$ AS dollar, $tag$?5$tag$ AS tagged, $é$?11$é$ AS unicode,
+          $标签$?12$标签$ AS unicodeLong, ?1 AS "bound?6", $2::int AS native
+          /* ?7 /* ?8 */ ?9 */ -- ?10\n`,
+        ["actual", 42],
+      ))],
+    });
+    try {
+      expect((await host.executeAction("literalQuery")).result).toEqual([{
+        literal: "?1", apostrophe: "it's ?2", escaped: "escaped' ?3",
+        dollar: "?4", tagged: "?5", unicode: "?11", unicodelong: "?12", "bound?6": "actual", native: 42,
+      }]);
+    } finally { await host.close(); }
+  });
+
   test("invalid queue delays fail before a PostgreSQL query", async () => {
     const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
     const pool = openPostgresPool(config);
