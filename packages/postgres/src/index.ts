@@ -1439,7 +1439,48 @@ export function createPostgresEngineAdapter(
 
 
 function normalizePostgresSql(sql: string): string {
-  return sql.replace(/\?(\d+)/g, (_match: string, index: string) => `$${index}`);
+  let result = "";
+  for (let index = 0; index < sql.length;) {
+    let end = index + 1;
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (current === "-" && next === "-") {
+      const newline = sql.slice(index).search(/[\r\n]/);
+      end = newline < 0 ? sql.length : index + newline;
+    } else if (current === "/" && next === "*") {
+      end = index + 2;
+      let depth = 1;
+      while (end < sql.length && depth > 0) {
+        if (sql.slice(end, end + 2) === "/*") { depth++; end += 2; }
+        else if (sql.slice(end, end + 2) === "*/") { depth--; end += 2; }
+        else end++;
+      }
+    } else if (current === "'" || current === '"') {
+      const escaped = current === "'" && /[eE]/.test(sql[index - 1] ?? "")
+        && !/[a-z0-9_$\u0080-\uffff]/i.test(sql[index - 2] ?? "");
+      while (end < sql.length) {
+        if (escaped && sql[end] === "\\") { end += 2; continue; }
+        if (sql[end] === current && sql[end + 1] === current) { end += 2; continue; }
+        if (sql[end++] === current) break;
+      }
+    } else if (current === "$" && !/[a-z0-9_$\u0080-\uffff]/i.test(sql[index - 1] ?? "")) {
+      const dollar = sql.slice(index).match(/^\$(?:[a-z_\u0080-\uffff][a-z0-9_\u0080-\uffff]*)?\$/i)?.[0];
+      if (dollar !== undefined) {
+        const closing = sql.indexOf(dollar, index + dollar.length);
+        end = closing < 0 ? sql.length : closing + dollar.length;
+      }
+    } else if (current === "?") {
+      const placeholder = sql.slice(index).match(/^\?(\d+)/);
+      if (placeholder !== null) {
+        result += `$${placeholder[1]}`;
+        index += placeholder[0].length;
+        continue;
+      }
+    }
+    result += sql.slice(index, end);
+    index = end;
+  }
+  return result;
 }
 
 async function persistEvents(queryable: Queryable, events: ChimpbaseEventRecord[]): Promise<void> {
