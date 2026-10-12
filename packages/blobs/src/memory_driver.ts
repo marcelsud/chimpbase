@@ -78,7 +78,7 @@ export function memoryBlobDriver(): ChimpbaseBlobDriver {
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
       const record = blobs.get(driverRef);
       if (!(record !== undefined)) return null;
-      const slice = sliceRange(record.bytes, range);
+      const slice = sliceRange(record.bytes, range).slice();
       return { body: streamFrom(slice), size: slice.byteLength };
     },
     async delete(_bucket, _key, driverRef) {
