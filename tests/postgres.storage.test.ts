@@ -50,6 +50,30 @@ describe("PostgreSQL storage startup", () => {
     } finally { await host.close(); }
   });
 
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("KV expiry advances during a public PostgreSQL action transaction", async () => {
+    const key = `expiry-${crypto.randomUUID()}`;
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL },
+      registrations: [
+        action("checkExpiry", async (ctx) => {
+          await ctx.kv.set(key, "original", { ttlMs: 20 });
+          await ctx.db.query("SELECT pg_sleep(0.08)");
+          expect(await ctx.kv.get(key)).toBeNull();
+          expect(await ctx.kv.list({ prefix: key })).toEqual([]);
+          expect(await ctx.kv.setIfAbsent(key, "replacement")).toBe(true);
+          expect(await ctx.kv.get(key)).toBe("replacement");
+          expect(await ctx.kv.setIfAbsent(key, "unexpected")).toBe(false);
+        }),
+        action("cleanupExpiry", async (ctx) => await ctx.kv.delete(key)),
+      ],
+    });
+    try { await host.executeAction("checkExpiry"); }
+    finally {
+      try { await host.executeAction("cleanupExpiry"); }
+      finally { await host.close(); }
+    }
+  });
+
   test("invalid queue delays fail before a PostgreSQL query", async () => {
     const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
     const pool = openPostgresPool(config);
