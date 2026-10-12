@@ -782,16 +782,18 @@ export function createSqliteEngineAdapter(
       options: ChimpbaseBlobListOptions,
     ): Promise<ChimpbaseBlobListMetaResult> {
       const prefix = options.prefix ?? "";
+      let firstPage = options.cursor === undefined;
       return await paginateChimpbaseBlobMetadata(options, async (cursor, limit) => {
         const rows = parseRows(db.query(
           `
             SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
             FROM _chimpbase_blobs
-            WHERE bucket = ?1 AND instr(key, ?2) = 1 AND key > ?3
+            WHERE bucket = ?1 AND instr(key, ?2) = 1 AND (?5 = 1 OR key > ?3)
             ORDER BY key ASC
             LIMIT ?4
           `,
-        ).all(bucket, prefix, cursor, limit), blobMetadataRowValidator, "blob metadata rows");
+        ).all(bucket, prefix, cursor, limit, firstPage ? 1 : 0), blobMetadataRowValidator, "blob metadata rows");
+        firstPage = false;
         return rows.map((row) => ({
           bucket: row.bucket,
           key: row.key,
