@@ -58,7 +58,7 @@ subscription("payment.captured", handlePayment, {
 });
 ```
 
-Idempotency markers are cleaned up automatically when retention is enabled in the app configuration.
+Enable marker cleanup with `subscriptions.idempotency.retention` when creating the runtime. Its `maxAgeDays` must be an integer from `1` to `100000000` and defaults to `30`; invalid values reject startup, even when cleanup is disabled. Cleanup removes markers older than that age, allowing those events to be handled again if replayed.
 
 ## Dispatch Mode
 

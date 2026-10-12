@@ -69,6 +69,8 @@ export default {
 } satisfies ChimpbaseAppDefinitionInput;
 ```
 
+To remove old persisted telemetry, pass `telemetryRetention: { enabled: true, maxAgeDays: 30 }` to `createChimpbase()`. `maxAgeDays` must be an integer from `1` to `100000000`; invalid values reject startup, even when cleanup is disabled.
+
 ## Per-Handler Control
 
 Override telemetry persistence at the handler level. These settings do not suppress in-memory records or export to configured sinks:

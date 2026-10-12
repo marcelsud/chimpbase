@@ -14,6 +14,7 @@ import {
 import { loadProjectConfig } from "../packages/tooling/src/config.ts";
 import { defineChimpbaseApp, normalizeProjectConfig } from "../packages/core/index.ts";
 import { inferNumberEnv } from "../packages/host/src/runtime.ts";
+import { createChimpbase } from "../packages/bun/src/library.ts";
 import {
   loadProjectMigrations,
   loadProjectPostgresMigrations,
@@ -35,6 +36,33 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/tooling", () => {
+  test("telemetry and subscription retention reject unsafe ages before creating a host", async () => {
+    for (const enabled of [true, false]) {
+      for (const maxAgeDays of [0, -1, NaN, Infinity, -Infinity, 0.5, 100_000_001, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => normalizeProjectConfig({ telemetry: { retention: { enabled, maxAgeDays } } }))
+          .toThrow("telemetry.retention.maxAgeDays");
+        expect(() => normalizeProjectConfig({ subscriptions: { idempotency: { retention: { enabled, maxAgeDays } } } }))
+          .toThrow("subscriptions.idempotency.retention.maxAgeDays");
+      }
+    }
+    for (const maxAgeDays of [1, 30, 100_000_000]) {
+      const config = normalizeProjectConfig({
+        telemetry: { retention: { maxAgeDays } }, subscriptions: { idempotency: { retention: { maxAgeDays } } },
+      });
+      expect(config.telemetry.retention.maxAgeDays).toBe(maxAgeDays);
+      expect(config.subscriptions.idempotency.retention.maxAgeDays).toBe(maxAgeDays);
+    }
+    await expect(createChimpbase({ storage: { engine: "memory" }, telemetryRetention: { enabled: true, maxAgeDays: -1 } }))
+      .rejects.toThrow("telemetry.retention.maxAgeDays");
+    await expect(createChimpbase({ storage: { engine: "memory" }, subscriptions: { idempotency: { retention: { enabled: true, maxAgeDays: -1 } } } }))
+      .rejects.toThrow("subscriptions.idempotency.retention.maxAgeDays");
+    const projectDir = await createTempDir("invalid-retention-config");
+    for (const section of ["telemetry.retention", "subscriptions.idempotency.retention"]) {
+      await writeFile(resolve(projectDir, "chimpbase.toml"), `[${section}]\nmax_age_days = -1\n`);
+      await expect(loadProjectConfig(projectDir)).rejects.toThrow(`${section}.maxAgeDays`);
+    }
+  });
+
   test("worker settings reject malformed, unsafe and out-of-range numbers at configuration boundaries", async () => {
     for (const key of ["concurrency", "leaseMs", "maxAttempts", "pollIntervalMs"] as const) {
       for (const value of [0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
