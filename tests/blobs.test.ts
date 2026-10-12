@@ -15,6 +15,46 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 const cleanupDirs: string[] = [];
 
+test("mutating full or ranged memory blob reads preserves stored and copied bytes", async () => {
+  const host = await createChimpbase({
+    storage: { engine: "memory" }, blobs: { driver: memoryBlobDriver(), buckets: ["uploads"] },
+  });
+  try {
+    const blobs = host.routeEnv().blobs;
+    await blobs.put("uploads", "original", new TextEncoder().encode("hello world"));
+    await blobs.copy({ bucket: "uploads", key: "original" }, { bucket: "uploads", key: "copy" });
+    const upload = await blobs.createUpload("uploads", "multipart");
+    await upload.writePart(1, new TextEncoder().encode("hello"));
+    await upload.writePart(2, new TextEncoder().encode(" world"));
+    await upload.complete();
+    for (const key of ["original", "copy", "multipart"]) {
+      const metadata = await blobs.head("uploads", key);
+      if (metadata === null) throw new Error("blob metadata missing");
+      for (const range of [undefined, { start: 6, end: 10 }]) {
+        const object = await blobs.get("uploads", key, { range });
+        const independent = await blobs.get("uploads", key);
+        if (object === null || independent === null) throw new Error("blob missing");
+        expect(object.size).toBe(range === undefined ? 11 : 5);
+        const reader = object.body.getReader();
+        try {
+          const chunk = await reader.read();
+          if (chunk.value === undefined) throw new Error("blob chunk missing");
+          chunk.value.fill(88);
+        } finally {
+          reader.releaseLock();
+        }
+        expect(await new Response(independent.body).text()).toBe("hello world");
+        const reread = await blobs.get("uploads", key);
+        if (reread === null) throw new Error("blob missing after read");
+        expect(await new Response(reread.body).text()).toBe("hello world");
+        expect(reread.etag).toBe(metadata.etag);
+      }
+    }
+  } finally {
+    await host.close();
+  }
+});
+
 for (const engine of ["memory", "sqlite"] as const) {
   for (const storage of ["memory", "filesystem"] as const) {
     for (const source of ["route", "routeEnv"] as const) {
