@@ -75,6 +75,134 @@ await host.close();
 `,
   },
   {
+    file: "docs/advanced/workflows.md",
+    name: "workflow-run",
+    check: `
+import { orderFollowUp } from "./workflow-run.ts";
+import { action, v } from "chimpbase";
+import { createChimpbase } from "chimpbase/runtime/bun";
+const host = await createChimpbase({
+  storage: { engine: "memory" },
+  registrations: [
+    orderFollowUp,
+    action("sendFollowUpEmail", async (ctx, input) => {
+      assert.equal(input.orderId, "order-42");
+      await ctx.kv.set("follow-up:sent", true);
+    }),
+    action("launch", async (ctx) => await ctx.workflow.start(orderFollowUp, {
+      orderId: "order-42",
+    }, { workflowId: "follow-up-42" })),
+    action("inspect", async (ctx) => ({
+      instance: await ctx.workflow.get("follow-up-42"),
+      sent: await ctx.kv.get("follow-up:sent", v.boolean()),
+    })),
+  ],
+});
+let now = Date.now();
+host.platform.now = () => now;
+try {
+  await host.executeAction("launch");
+  await host.processNextQueueJob();
+  const suspended = (await host.executeAction("inspect")).result;
+  assert.equal(suspended.instance.status, "sleeping");
+  assert.equal(suspended.instance.state.phase, "ready");
+  assert.equal(suspended.instance.currentStepId, "wait-2-days");
+  assert.equal(suspended.sent, null);
+  now += 2 * 24 * 60 * 60 * 1000;
+  await host.processNextQueueJob();
+  const completed = (await host.executeAction("inspect")).result;
+  assert.equal(completed.instance.status, "completed");
+  assert.equal(completed.instance.state.phase, "ready");
+  assert.equal(completed.sent, true);
+  assert.equal(await host.processNextQueueJob(), null);
+} finally {
+  await host.close();
+}
+`,
+  },
+  {
+    file: "docs/advanced/workflows.md",
+    name: "workflow-receipt",
+    check: `
+import { sendReceipt } from "./workflow-receipt.ts";
+import { action, v, workflow, workflowActionStep } from "chimpbase";
+import { createChimpbase } from "chimpbase/runtime/bun";
+const deliveries = new Map();
+const requests = [];
+const delivery = Bun.serve({
+  hostname: "127.0.0.1", port: 0,
+  async fetch(request) {
+    const key = request.headers.get("Idempotency-Key");
+    assert.equal(request.method, "POST");
+    assert.equal(key, "order:order-42:receipt:v1");
+    const body = await request.text();
+    requests.push(key);
+    if (deliveries.has(key)) assert.equal(deliveries.get(key), body);
+    else deliveries.set(key, body);
+    return new Response(null, { status: 204 });
+  },
+});
+let finishes = 0;
+const receiptFlow = workflow({
+  name: "order.receipt", version: 1,
+  initialState: () => ({ requested: false }),
+  steps: [
+    workflowActionStep("send-receipt", sendReceipt, {
+      args: ({ input }) => [input],
+      onResult: () => ({ requested: true }),
+    }),
+    workflowActionStep("finish-order", "finishOrder"),
+  ],
+});
+const host = await createChimpbase({
+  storage: { engine: "memory" },
+  worker: { maxAttempts: 2, retryDelayMs: 0 },
+  secrets: { get: (name) => name === "RECEIPT_DELIVERY_URL" ? delivery.url.href : null },
+  registrations: [
+    sendReceipt, receiptFlow,
+    action("finishOrder", () => {
+      if (++finishes === 1) throw new Error("later action failed");
+    }),
+    action("launch", async (ctx, workflowId) => await ctx.workflow.start(receiptFlow, {
+      orderId: "order-42", to: "user@example.com",
+    }, { workflowId })),
+    action("inspect", async (ctx) => ({
+      instance: await ctx.workflow.get("receipt-42"),
+      requested: await ctx.kv.get("order:order-42:receipt-requested", v.boolean()),
+    })),
+  ],
+});
+try {
+  await host.executeAction("launch", "receipt-42");
+  await assert.rejects(host.processNextQueueJob(), /later action failed/);
+  const rolledBack = (await host.executeAction("inspect")).result;
+  assert.equal(rolledBack.instance.status, "running");
+  assert.deepEqual(rolledBack.instance.state, { requested: false });
+  assert.equal(rolledBack.requested, null);
+  assert.equal(requests.length, 1);
+  assert.equal(deliveries.size, 1);
+  await host.processNextQueueJob();
+  const completed = (await host.executeAction("inspect")).result;
+  assert.equal(completed.instance.status, "completed");
+  assert.equal(completed.requested, true);
+  assert.equal(requests.length, 2);
+  assert.equal(deliveries.size, 1);
+  // A replacement workflow for the same business operation uses the same key.
+  await host.executeAction("launch", "replacement-receipt-42");
+  await host.processNextQueueJob();
+  assert.equal(requests.length, 3);
+  assert.equal(deliveries.size, 1);
+  assert.deepEqual(JSON.parse(deliveries.values().next().value), {
+    orderId: "order-42", to: "user@example.com",
+  });
+  assert.equal(await host.processNextQueueJob(), null);
+} finally {
+  await host.close();
+  delivery.stop(true);
+}
+`,
+  },
+  {
     file: "docs/advanced/webhooks.md",
     name: "webhook-token",
     check: `

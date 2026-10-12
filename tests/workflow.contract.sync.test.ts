@@ -163,13 +163,40 @@ describe("workflow contract sync", () => {
 
     await expect(runContractSync(projectDir)).rejects.toThrow("requires_migration");
   });
+
+  test("rejects same-version timing changes and preserves snapshots after an explicit breaking bump", async () => {
+    const index = (delayMs: number, version: number) => createWorkflowIndex({
+      stateSchema: '{ type: "object", properties: { customerId: { type: "string" } }, required: ["customerId"] }',
+      steps: `workflowSleepStep("wait", ${delayMs}),`,
+      version,
+    });
+    const projectDir = await createWorkflowFixture("timing", index(1_000, 1));
+    await runContractSync(projectDir);
+    const previousPath = resolve(projectDir, "workflow-contracts", "customer.onboarding.v1.contract.json");
+    const previous = await Bun.file(previousPath).text();
+
+    await writeProjectFile(projectDir, "chimpbase.app.ts", index(86_400_000, 1));
+    await expect(runContractSync(projectDir, { allowBreaking: true }))
+      .rejects.toThrow("changed without a version bump");
+    expect(await Bun.file(previousPath).text()).toBe(previous);
+
+    await writeProjectFile(projectDir, "chimpbase.app.ts", index(86_400_000, 2));
+    await expect(runContractSync(projectDir)).rejects.toThrow("breaking relative to v1");
+    const synced = await runContractSync(projectDir, { allowBreaking: true });
+    expect(synced.result.entries).toEqual([
+      expect.objectContaining({ compatibility: "breaking", status: "written" }),
+    ]);
+    expect(synced.result.entries[0]?.contract.steps[0]?.delayMs).toBe(86_400_000);
+    expect(await Bun.file(previousPath).text()).toBe(previous);
+  });
 });
 
 async function runContractSync(
   projectDir: string,
-  options: { check?: boolean } = {},
+  options: { allowBreaking?: boolean; check?: boolean } = {},
 ) {
   const synced = await syncChimpbaseWorkflowContracts({
+    allowBreaking: options.allowBreaking,
     check: options.check,
     projectDir,
   });

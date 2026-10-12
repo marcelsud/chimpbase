@@ -861,6 +861,12 @@ export function createPostgresEngineAdapter(
         updated_at = NOW() WHERE id = $1 AND status IN ('failed', 'dlq')`, [jobId, platform.now()]);
       return result.rowCount === 1;
     },
+    async retireWorkflowJobs(workflowId: string): Promise<void> {
+      await queryable().query(`UPDATE _chimpbase_queue_jobs SET status = 'completed', completed_at = NOW(),
+        lease_expires_at_ms = NULL, updated_at = NOW(), last_error = 'superseded by workflow retry'
+        WHERE queue_name = '__chimpbase.workflow.run' AND payload_json->>'workflowId' = $1
+          AND status IN ('pending', 'processing')`, [workflowId]);
+    },
     async insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean> {
       const result = await queryable().query(
         `

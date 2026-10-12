@@ -62,7 +62,13 @@ describe("workflow contracts", () => {
     expect(first.definition.version).toBe(1);
     expect(first.compatibility).toBe("additive");
     expect(first.changed).toBe(true);
-    expect(first.contract.hash).toBe("f576e7d63f39541b");
+    expect(first.contract.hash).toBe("7690bd81f283d424");
+    expect(first.contract.steps).toEqual([
+      { action: "createCustomerRecord", id: "create-account", kind: "workflow_action" },
+      { delayMs: 604_800_000, id: "wait-7-days", kind: "workflow_sleep" },
+      { id: "wait-kickoff", kind: "workflow_wait_for_signal", onTimeout: "continue", signal: "kickoff.completed", timeoutMs: 1_209_600_000 },
+      { action: "activateCustomer", id: "activate-account", kind: "workflow_action" },
+    ]);
 
     const second = versionWorkflow(createWorkflowDraft(), first.contract);
     expect(second.definition.version).toBe(1);
@@ -102,6 +108,71 @@ describe("workflow contracts", () => {
     });
 
     expect(reordered.contract.hash).toBe(first.contract.hash);
+  });
+
+  test("versions literal timing, dynamic timing and timeout policy changes", () => {
+    const first = versionWorkflow(createWorkflowDraft());
+    const steps = createWorkflowDraft().steps;
+    const changes = [
+      [steps[0]!, workflowSleepStep("wait-7-days", 86_400_000), ...steps.slice(2)],
+      [steps[0]!, workflowSleepStep("wait-7-days", () => 604_800_000), ...steps.slice(2)],
+      [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed", { timeoutMs: 86_400_000 }), steps[3]!],
+      [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed"), steps[3]!],
+      [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed", { timeoutMs: () => 1_209_600_000 }), steps[3]!],
+      [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed", { timeoutMs: 1_209_600_000, onTimeout: "fail" }), steps[3]!],
+      [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed", {
+        timeoutMs: 1_209_600_000, onTimeout: ({ state }) => state,
+      }), steps[3]!],
+    ];
+
+    for (const changedSteps of changes) {
+      const next = versionWorkflow({ ...createWorkflowDraft(), steps: changedSteps }, first.contract);
+      expect(next.changed).toBe(true);
+      expect(next.definition.version).toBe(2);
+      expect(next.compatibility).toBe("breaking");
+      expect(next.contract.hash).not.toBe(first.contract.hash);
+    }
+  });
+
+  test("normalizes default timeout policy and leaves function bodies outside the contract", () => {
+    const steps = createWorkflowDraft().steps;
+    const first = versionWorkflow(createWorkflowDraft());
+    const explicitDefault = versionWorkflow({
+      ...createWorkflowDraft(),
+      steps: [...steps.slice(0, 2), workflowWaitForSignalStep("wait-kickoff", "kickoff.completed", {
+        timeoutMs: 1_209_600_000, onTimeout: "continue",
+      }), steps[3]!],
+    }, first.contract);
+    expect(explicitDefault.changed).toBe(false);
+
+    const dynamic = versionWorkflow({
+      ...createWorkflowDraft(),
+      steps: [workflowSleepStep("wait", () => 1_000)],
+    });
+    const changedFunction = versionWorkflow({
+      ...createWorkflowDraft(),
+      steps: [workflowSleepStep("wait", () => 86_400_000)],
+    }, dynamic.contract);
+    expect(dynamic.contract.steps[0]?.delayMs).toBe("dynamic");
+    expect(changedFunction.changed).toBe(false);
+
+    const imperative = versionWorkflow({
+      initialState: () => ({}), name: "imperative", run: (wf) => wf.complete(),
+    });
+    const changedRun = versionWorkflow({
+      initialState: () => ({}), name: "imperative", run: (wf) => wf.fail("changed behavior"),
+    }, imperative.contract);
+    expect(changedRun.changed).toBe(false);
+  });
+
+  test("does not silently reuse a legacy snapshot lacking timing metadata", () => {
+    const legacy = versionWorkflow(createWorkflowDraft()).contract;
+    legacy.hash = "f576e7d63f39541b";
+    legacy.steps = legacy.steps.map(({ delayMs, timeoutMs, onTimeout, ...step }) => step);
+    const enriched = versionWorkflow(createWorkflowDraft(), legacy);
+    expect(enriched.changed).toBe(true);
+    expect(enriched.definition.version).toBe(2);
+    expect(enriched.compatibility).toBe("breaking");
   });
 
   test("bumps version for additive changes", () => {
