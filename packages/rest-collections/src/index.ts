@@ -697,7 +697,7 @@ function normalizePath(path: string): string {
   }
 
   const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  const normalized = withLeadingSlash.replace(/\/+$/g, "");
+  const normalized = withLeadingSlash.replace(/\/+/g, "/").replace(/\/$/, "");
   return normalized.length > 0 ? normalized : "/";
 }
 
