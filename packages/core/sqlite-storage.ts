@@ -11,7 +11,7 @@ import type {
   ChimpbaseQueueClaimTargets,
   ChimpbaseQueueJobRecord,
 } from "./engine.ts";
-import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, escapeSqlLikePrefix, paginateChimpbaseBlobMetadata } from "./engine.ts";
+import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, paginateChimpbaseBlobMetadata } from "./engine.ts";
 import { createSqliteKysely } from "./sqlite-kysely.ts";
 import { assertWorkerInteger, type ChimpbasePlatformShim } from "./host.ts";
 import type {
@@ -530,10 +530,10 @@ export function createSqliteEngineAdapter(
         `
           SELECT key
           FROM _chimpbase_kv
-          WHERE key LIKE ?1 ESCAPE '!' AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
+          WHERE instr(key, ?1) = 1 AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))
           ORDER BY key ASC
         `,
-      ).all(escapeSqlLikePrefix(prefix)), keyRowValidator, "key list rows");
+      ).all(prefix), keyRowValidator, "key list rows");
       return rows.map((row) => row.key);
     },
     async kvSet<TValue = unknown>(key: string, value: TValue, ttlMs?: number) {
@@ -787,11 +787,11 @@ export function createSqliteEngineAdapter(
           `
             SELECT bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
             FROM _chimpbase_blobs
-            WHERE bucket = ?1 AND key LIKE ?2 ESCAPE '!' AND key > ?3
+            WHERE bucket = ?1 AND instr(key, ?2) = 1 AND key > ?3
             ORDER BY key ASC
             LIMIT ?4
           `,
-        ).all(bucket, escapeSqlLikePrefix(prefix), cursor, limit), blobMetadataRowValidator, "blob metadata rows");
+        ).all(bucket, prefix, cursor, limit), blobMetadataRowValidator, "blob metadata rows");
         return rows.map((row) => ({
           bucket: row.bucket,
           key: row.key,
@@ -918,11 +918,11 @@ export function createSqliteEngineAdapter(
         `
           SELECT upload_id, bucket, key, content_type, metadata_json, driver_ref, created_at_ms, expires_at_ms
           FROM _chimpbase_blob_uploads
-          WHERE bucket = ?1 AND key LIKE ?2 ESCAPE '!' AND upload_id > ?3
+          WHERE bucket = ?1 AND instr(key, ?2) = 1 AND upload_id > ?3
           ORDER BY upload_id ASC
           LIMIT ?4
         `,
-      ).all(bucket, escapeSqlLikePrefix(prefix), cursor, limit + 1), blobUploadRowValidator, "blob upload rows");
+      ).all(bucket, prefix, cursor, limit + 1), blobUploadRowValidator, "blob upload rows");
       const mapped: ChimpbaseBlobUploadRow[] = rows.map((row) => ({
         uploadId: row.upload_id,
         bucket: row.bucket,
