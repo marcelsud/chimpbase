@@ -2498,14 +2498,14 @@ export class ChimpbaseEngine {
 
     if (row.status === "waiting_signal") {
       if (row.wake_at_ms !== null && row.wake_at_ms <= now) {
-        return await this.handleWorkflowRunSignalTimeout(workflowId, directive, input, state);
+        return await this.handleWorkflowRunSignalTimeout(workflowId, row, directive, input, state);
       }
 
       return false;
     }
 
     if (wakeAtMs !== null && wakeAtMs <= now) {
-      return await this.handleWorkflowRunSignalTimeout(workflowId, directive, input, state);
+      return await this.handleWorkflowRunSignalTimeout(workflowId, row, directive, input, state);
     }
 
     await this.adapter.query(
@@ -2542,14 +2542,18 @@ export class ChimpbaseEngine {
 
   private async handleWorkflowRunSignalTimeout(
     workflowId: string,
+    row: PersistedWorkflowInstanceRow,
     directive: Extract<WorkflowRunDirective, { kind: "workflow_wait_for_signal_directive" }>,
     input: unknown,
     state: unknown,
   ): Promise<boolean> {
     if (directive.onTimeout === "fail") {
-      await this.failWorkflowInstance(workflowId,
-        `workflow signal timed out: ${workflowId}/${directive.signal}`, directive.stepId ?? directive.signal);
-      return false;
+      return await this.applyWorkflowRunDirective(workflowId, row, {
+        error: `workflow signal timed out: ${workflowId}/${directive.signal}`,
+        kind: "workflow_fail",
+        state,
+        stepId: directive.stepId ?? directive.signal,
+      }, input);
     }
 
     const nextState = typeof directive.onTimeout === "function"

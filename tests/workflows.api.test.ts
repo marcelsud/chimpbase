@@ -31,6 +31,28 @@ async function createHost(engine: "memory" | "sqlite", now: () => number = Date.
 }
 
 for (const engine of ["memory", "sqlite"] as const) {
+  test(`immediate signal timeout saves the run directive state (${engine})`, async () => {
+    const host = await createHost(engine);
+    const definition = workflow<{}, { saved: number }>({ name: "timeout-state", version: 1,
+      initialState: () => ({ saved: 0 }), run(wf) {
+        return wf.waitForSignal("approve", { timeoutMs: 0, onTimeout: "fail", state: { saved: 5 }, stepId: "approval" });
+      },
+    });
+    host.register(definition,
+      action("launch", async (ctx) => await ctx.workflow.start(definition, {}, { workflowId: "timeout-state" })),
+      action("inspect", async (ctx) => await ctx.workflow.get("timeout-state")),
+    );
+    try {
+      await host.executeAction("launch");
+      await host.processNextQueueJob();
+      expect((await host.executeAction("inspect")).result).toMatchObject({
+        status: "failed", state: { saved: 5 }, currentStepId: "approval", wakeAtMs: null,
+        lastError: "workflow signal timed out: timeout-state/approve",
+      });
+      expect((await host.listJobs())[0]).toMatchObject({ status: "completed", attempt: 1 });
+    } finally { await host.close(); }
+  });
+
   for (const style of ["steps", "run"] as const) {
     for (const timeoutMs of [0, 10]) {
       test(`signal failure is terminal and commits preceding writes (${engine}, ${style}, ${timeoutMs})`, async () => {
