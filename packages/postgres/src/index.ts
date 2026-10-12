@@ -1194,6 +1194,7 @@ export function createPostgresEngineAdapter(
       options: ChimpbaseBlobListOptions,
     ): Promise<ChimpbaseBlobListMetaResult> {
       const prefix = options.prefix ?? "";
+      let firstPage = options.cursor === undefined;
       return await paginateChimpbaseBlobMetadata(options, async (cursor, limit) => {
         const result = await queryable().query<{
           bucket: string;
@@ -1213,12 +1214,13 @@ export function createPostgresEngineAdapter(
             FROM _chimpbase_blobs
             WHERE bucket = $1
               AND key LIKE $2 ESCAPE '!'
-              AND key > $3
+              AND ($5::boolean OR key > $3)
             ORDER BY key ASC
             LIMIT $4
           `,
-          [bucket, escapeSqlLikePrefix(prefix), cursor, limit],
+          [bucket, escapeSqlLikePrefix(prefix), cursor, limit, firstPage],
         );
+        firstPage = false;
         return result.rows.map((row) => ({
           bucket: row.bucket,
           key: row.key,

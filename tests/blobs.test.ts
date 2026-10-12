@@ -466,6 +466,8 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
 }
 
 const paginationFixtures = [
+  { name: "empty key", keys: ["", "a.txt", "b/one"], delimiter: "/", expected: ["", "a.txt", "b/"] },
+  { name: "empty key without delimiter", keys: ["", "a.txt"], delimiter: "", expected: ["", "a.txt"] },
   { name: "folders", keys: ["a/one", "b/one", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
   { name: "large folder", keys: [...Array.from({ length: 1002 }, (_, i) => `a/${String(i).padStart(4, "0")}`), "b/one", "b/two", "c/one"], delimiter: "/", expected: ["a/", "b/", "c/"] },
   { name: "one full batch", keys: Array.from({ length: 1000 }, (_, i) => `a/${String(i).padStart(4, "0")}`), delimiter: "/", expected: ["a/"] },
@@ -494,6 +496,13 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
         });
         try {
           await host.executeAction("seedPagination");
+          if (fixture.keys.includes("")) {
+            const empty = await host.routeEnv().blobs.get(bucket, "");
+            expect(empty).not.toBeNull();
+            expect(await new Response(empty!.body).arrayBuffer()).toEqual(new Uint8Array([1]).buffer);
+            expect((await host.routeEnv().blobs.head(bucket, ""))?.key).toBe("");
+            expect((await host.routeEnv().blobs.list(bucket, { cursor: "" })).entries.some((entry) => entry.key === "")).toBe(false);
+          }
           const returned: string[] = [];
           let cursor: string | undefined;
           const blobs = host.routeEnv().blobs;
@@ -504,7 +513,7 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
             returned.push(...results);
             if (page.nextCursor === null) break;
             expect(results.length).toBe(limit);
-            expect(page.nextCursor > (cursor ?? "")).toBe(true);
+            if (cursor !== undefined) expect(page.nextCursor > cursor).toBe(true);
             cursor = page.nextCursor;
             if (pageNumber === fixture.expected.length) throw new Error("pagination did not terminate");
           }
