@@ -74,6 +74,41 @@ describe("PostgreSQL storage startup", () => {
     }
   });
 
+  test("stream IDs reject bigint values outside the public numeric range", async () => {
+    spyOn(poolPrototype, "query").mockResolvedValue({ rows: [{ id: "9007199254740993" }] });
+    const pool = openPostgresPool(config);
+    try {
+      const adapter = createPostgresEngineAdapter(pool, platform);
+      await expect(adapter.streamAppend("stream", "event", {})).rejects.toThrow("stream event id exceeds");
+      await expect(adapter.streamRead("stream", {}, v.unknown())).rejects.toThrow("stream event id exceeds");
+    } finally { await pool.end(); }
+  });
+
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("public PostgreSQL stream IDs are numeric and work as pagination cursors", async () => {
+    const stream = `numeric-stream-${crypto.randomUUID()}`;
+    const host = await createChimpbase({
+      storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL },
+      registrations: [
+        action("checkStreamIds", async (ctx) => {
+          const first = await ctx.stream.append(stream, "first", { position: 1 });
+          const second = await ctx.stream.append(stream, "second", { position: 2 });
+          expect(Number.isSafeInteger(first)).toBe(true);
+          expect(second).toBeGreaterThan(first);
+          expect((await ctx.stream.read(stream)).map((event) => event.id)).toEqual([first, second]);
+          expect((await ctx.stream.read(stream, { sinceId: first })).map((event) => event.id)).toEqual([second]);
+        }),
+        action("cleanupStreamIds", async (ctx) => await ctx.db.query(
+          "DELETE FROM _chimpbase_stream_events WHERE stream_name = ?1", [stream],
+        )),
+      ],
+    });
+    try { await host.executeAction("checkStreamIds"); }
+    finally {
+      try { await host.executeAction("cleanupStreamIds"); }
+      finally { await host.close(); }
+    }
+  });
+
   test("invalid queue delays fail before a PostgreSQL query", async () => {
     const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
     const pool = openPostgresPool(config);

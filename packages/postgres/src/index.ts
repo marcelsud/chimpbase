@@ -61,9 +61,9 @@ interface PersistedCronScheduleRow {
   schedule_name: string;
 }
 
-function queueJobId(value: number | string): number {
+function safeRecordId(value: number | string, kind = "queue job"): number {
   const id = Number(value);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new Error("queue job id exceeds the supported safe integer range");
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`${kind} id exceeds the supported safe integer range`);
   return id;
 }
 
@@ -79,7 +79,7 @@ interface InspectedJobRow extends QueryResultRow {
 }
 
 function inspectedJob(row: InspectedJobRow): Omit<ChimpbaseJob, "registered"> {
-  return { id: queueJobId(row.id), queue: row.queue_name, payload: parseJson(row.payload_json), status: row.status,
+  return { id: safeRecordId(row.id), queue: row.queue_name, payload: parseJson(row.payload_json), status: row.status,
     attempt: row.attempt_count, availableAtMs: Number(row.available_at_ms),
     leaseExpiresAtMs: row.lease_expires_at_ms === null ? null : Number(row.lease_expires_at_ms), lastError: row.last_error };
 }
@@ -642,7 +642,7 @@ export function createPostgresEngineAdapter(
         [now, leaseExpiresAtMs, queueNames, JSON.stringify(targets)],
       );
       const row = result.rows[0];
-      return row === undefined ? null : { ...row, id: queueJobId(row.id) };
+      return row === undefined ? null : { ...row, id: safeRecordId(row.id) };
     },
     async claimNextQueueJobs(
       leaseMs: number,
@@ -691,7 +691,7 @@ export function createPostgresEngineAdapter(
         [now, leaseExpiresAtMs, queueNames, batchSize, JSON.stringify(targets)],
       );
 
-      return result.rows.map((row) => ({ ...row, id: queueJobId(row.id) }));
+      return result.rows.map((row) => ({ ...row, id: safeRecordId(row.id) }));
     },
     async lockQueueJob(jobId: number, attempt: number): Promise<boolean> {
       const result = await queryable().query<{ id: number }>(
@@ -1015,7 +1015,7 @@ export function createPostgresEngineAdapter(
         `,
         [name, JSON.stringify(payload ?? null), availableAtMs],
       );
-      return queueJobId(result.rows[0]!.id);
+      return safeRecordId(result.rows[0]!.id);
     },
     async releaseCronScheduleLease(scheduleName: string, leaseToken: string): Promise<void> {
       await queryable().query(
@@ -1045,7 +1045,7 @@ export function createPostgresEngineAdapter(
       }
     },
     async streamAppend<TPayload = unknown>(stream: string, event: string, payload: TPayload): Promise<number> {
-      const result = await queryable().query<{ id: number }>(
+      const result = await queryable().query<{ id: number | string }>(
         `
           INSERT INTO _chimpbase_stream_events (
             stream_name,
@@ -1056,7 +1056,8 @@ export function createPostgresEngineAdapter(
         `,
         [stream, event, JSON.stringify(payload ?? null)],
       );
-      return result.rows[0]?.id ?? 0;
+      const row = result.rows[0];
+      return row === undefined ? 0 : safeRecordId(row.id, "stream event");
     },
     async streamRead<TPayload>(
       stream: string,
@@ -1068,7 +1069,7 @@ export function createPostgresEngineAdapter(
       const result = await queryable().query<{
         created_at: string;
         event_name: string;
-        id: number;
+        id: number | string;
         payload_json: string;
         stream_name: string;
       }>(
@@ -1090,7 +1091,7 @@ export function createPostgresEngineAdapter(
       return result.rows.map((row) => ({
         createdAt: row.created_at,
         event: row.event_name,
-        id: row.id,
+        id: safeRecordId(row.id, "stream event"),
         payload: validator.parse(parseJson(row.payload_json, `stream ${stream} event ${row.id}`), `stream ${stream} event ${row.id}`),
         stream: row.stream_name,
       }));
