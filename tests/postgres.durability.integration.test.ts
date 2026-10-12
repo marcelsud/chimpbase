@@ -48,6 +48,97 @@ describeIfPg("PostgreSQL queue durability", () => {
     await pool.end();
   });
 
+  test("concurrent workflow retries resume once and fence stale claimed jobs", async () => {
+    const workflowName = uniqueName("retry");
+    const workflowId = uniqueName("retry-instance");
+    let recovering = false;
+    let fixed = false;
+    let recoveryCalls = 0;
+    const definition = workflow<{}, { saved: number }>({
+      name: workflowName, version: 1, initialState: () => ({ saved: 7 }),
+      run(wf) {
+        if (!recovering) return wf.fail("original failure", { stepId: "resume" });
+        recoveryCalls++;
+        if (!fixed) throw new Error("still broken");
+        return wf.complete();
+      },
+    });
+    const registrations = [definition,
+      action("launch", async (ctx) => await ctx.workflow.start(definition, {}, { workflowId })),
+      action("retry", async (ctx) => await ctx.workflow.retry(workflowId)),
+      action("inspect", async (ctx) => await ctx.workflow.get(workflowId)),
+    ];
+    const options = { storage: { engine: "postgres" as const, url: postgresUrl() },
+      worker: { maxAttempts: 2, retryDelayMs: 0 }, registrations };
+    const a = await createChimpbase(options);
+    const b = await createChimpbase(options);
+    const staleWorker = await createChimpbase(options);
+    let releaseClaim!: () => void;
+    const claimPaused = new Promise<void>((resolve) => { releaseClaim = resolve; });
+    let claimReached!: () => void;
+    const claimed = new Promise<void>((resolve) => { claimReached = resolve; });
+    let staleExecution: Promise<unknown> | undefined;
+    try {
+      await a.executeAction("launch");
+      await a.processNextQueueJob();
+      const stale = await pool.query<{ id: string }>(`INSERT INTO _chimpbase_queue_jobs
+        (queue_name, payload_json, status, available_at_ms, attempt_count)
+        VALUES ('__chimpbase.workflow.run', $1::jsonb, 'pending', 0, 2) RETURNING id`, [JSON.stringify({ workflowId })]);
+      await pool.query(`INSERT INTO _chimpbase_queue_jobs
+        (queue_name, payload_json, status, available_at_ms, attempt_count)
+        VALUES ('__chimpbase.workflow.run', $1::jsonb, 'pending', 0, 2)`, [JSON.stringify({ workflowId })]);
+      const staleAdapter = staleWorker.engine.getBlobsAdapter();
+      const lock = staleAdapter.lockQueueJob!.bind(staleAdapter);
+      staleAdapter.lockQueueJob = async (jobId, attempt) => {
+        claimReached();
+        await claimPaused;
+        return await lock(jobId, attempt);
+      };
+      staleExecution = staleWorker.processNextQueueJob();
+      await claimed;
+      let bothReached!: () => void;
+      const retryBarrier = new Promise<void>((resolve) => { bothReached = resolve; });
+      let retryCount = 0;
+      for (const host of [a, b]) {
+        const adapter = host.engine.getBlobsAdapter();
+        const retire = adapter.retireWorkflowJobs!.bind(adapter);
+        adapter.retireWorkflowJobs = async (id) => {
+          if (++retryCount === 2) bothReached();
+          await retryBarrier;
+          await retire(id);
+        };
+      }
+      const retries = await Promise.allSettled([a.executeAction("retry"), b.executeAction("retry")]);
+      expect(retries.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(retries.filter((result) => result.status === "rejected")).toHaveLength(1);
+      releaseClaim();
+      expect(await staleExecution).toBeNull();
+      expect(await staleAdapter.lockQueueJob!(Number(stale.rows[0]!.id), 3)).toBe(false);
+      expect(recoveryCalls).toBe(0);
+      const jobs = await pool.query<{ status: string; attempt_count: number }>(`SELECT status, attempt_count
+        FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1 ORDER BY id`, [workflowId]);
+      expect(jobs.rows).toEqual([
+        { status: "completed", attempt_count: 1 }, { status: "completed", attempt_count: 3 },
+        { status: "completed", attempt_count: 2 }, { status: "pending", attempt_count: 0 },
+      ]);
+      recovering = true;
+      await expect(a.processNextQueueJob()).rejects.toThrow("still broken");
+      expect((await a.executeAction("inspect")).result).toMatchObject({
+        status: "running", state: { saved: 7 }, currentStepId: "resume", lastError: null,
+      });
+      fixed = true;
+      await a.processNextQueueJob();
+      expect((await b.executeAction("inspect")).result).toMatchObject({ status: "completed", state: { saved: 7 } });
+      expect(recoveryCalls).toBe(2);
+    } finally {
+      releaseClaim();
+      await staleExecution?.catch(() => undefined);
+      await a.close(); await b.close(); await staleWorker.close();
+      await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1", [workflowId]);
+      await pool.query("DELETE FROM _chimpbase_workflow_instances WHERE workflow_id = $1", [workflowId]);
+    }
+  });
+
   test("worker retention deletes only old completions in PostgreSQL", async () => {
     const schema = `retention_test_${crypto.randomUUID().replaceAll("-", "")}`;
     const scopedUrl = new URL(postgresUrl());

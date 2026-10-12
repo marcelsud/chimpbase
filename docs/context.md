@@ -13,7 +13,7 @@ Every handler in Chimpbase — actions, subscriptions, workers, cron jobs, and w
 | **Key-Value** | `ctx.kv.get/set/delete/list` | Key-value storage |
 | **Collections** | `ctx.collection.find/insert/update/delete` | Schemaless JSON documents |
 | **Streams** | `ctx.stream.append/read` | Append-only event streams |
-| **Workflows** | `ctx.workflow.start/get/signal` | Workflow management |
+| **Workflows** | `ctx.workflow.start/get/signal/retry` | Start, inspect, signal, or retry failed workflows |
 | **Actions** | `ctx.action(name, args)` | Call other registered actions |
 | **Secrets** | `ctx.secret(name)` | Access preloaded secrets |
 | **Logging** | `ctx.log.debug/info/warn/error` | Structured logging |

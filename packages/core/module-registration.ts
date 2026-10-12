@@ -192,8 +192,18 @@ function createOwnedRegistrationTarget(
       definition: ChimpbaseWorkflowDefinition<TInput, TState>,
     ): ChimpbaseWorkflowDefinition<TInput, TState> {
       const registeredName = chimpbaseModuleResourceName(moduleName, "workflow", definition.name);
-      ensureRegistrationAvailable(registry, "workflow", registeredName, moduleName);
-      const registered = target.registerWorkflow({ ...definition, name: registeredName });
+      const owner = registry.workflowOwnership.get(registeredName);
+      const versions = registry.workflows.get(registeredName);
+      if ((owner !== undefined && owner !== moduleName) || (owner === undefined && versions !== undefined)) {
+        throw new Error(`module ${moduleName} cannot register workflow ${registeredName}; already owned by ${owner ?? "app-global infrastructure"}`);
+      }
+      if (versions?.has(definition.version)) {
+        throw new Error(`duplicate workflow registration: ${registeredName} v${definition.version}`);
+      }
+      const ownedDefinition = { ...definition, name: registeredName };
+      // Additional versions belong to the same owner; the public target rejects owned names.
+      const registered = versions === undefined ? target.registerWorkflow(ownedDefinition) : ownedDefinition;
+      versions?.set(definition.version, registered);
       registry.workflowOwnership.set(registeredName, moduleName);
       registry.registrationOwnership.set(`workflow:${registeredName}`, moduleName);
       return registered;

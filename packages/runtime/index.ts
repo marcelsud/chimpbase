@@ -304,7 +304,7 @@ export interface ChimpbaseWorkflowWaitForSignalStepDefinition<
 > {
   id: string;
   kind: "workflow_wait_for_signal";
-  onSignal?: (params: ChimpbaseWorkflowSignalStepResult<TInput, TState, TPayload>) => TState;
+  onSignal?(params: ChimpbaseWorkflowSignalStepResult<TInput, TState, TPayload>): TState;
   onTimeout?:
     | "continue"
     | "fail"
@@ -350,7 +350,7 @@ export interface ChimpbaseWorkflowWaitForSignalDirective<
   TPayload = unknown,
 > {
   kind: "workflow_wait_for_signal_directive";
-  onSignal?: (params: ChimpbaseWorkflowSignalStepResult<TInput, TState, TPayload>) => TState;
+  onSignal?(params: ChimpbaseWorkflowSignalStepResult<TInput, TState, TPayload>): TState;
   onTimeout?:
     | "continue"
     | "fail"
@@ -449,6 +449,8 @@ export interface ChimpbaseWorkflowRegistrationLike {
 }
 
 export interface ChimpbaseWorkflowStartOptions {
+  /** Allow an imported definition to be executed by another host sharing storage. */
+  allowUnregistered?: boolean;
   workflowId?: string;
 }
 
@@ -474,6 +476,7 @@ export interface ChimpbaseWorkflowClient {
   get<TInput = unknown, TState = unknown>(
     workflowId: string,
   ): Promise<ChimpbaseWorkflowInstance<TInput, TState> | null>;
+  retry(workflowId: string): Promise<ChimpbaseWorkflowStartResult>;
   signal<TPayload = unknown>(
     workflowId: string,
     signalName: string,
@@ -1075,9 +1078,12 @@ export interface ChimpbasePluginRegistration {
 
 export interface ChimpbaseWorkflowRegisteredStep {
   action?: string;
+  delayMs?: number | "dynamic";
   id: string;
   kind: ChimpbaseWorkflowStepDefinition["kind"];
+  onTimeout?: "continue" | "fail" | "handler";
   signal?: string;
+  timeoutMs?: number | "dynamic";
 }
 
 export type ChimpbaseWorkflowMode = "run" | "steps";
@@ -2977,10 +2983,13 @@ function describeWorkflowSteps<TInput = unknown, TState = unknown>(
         return {
           id: step.id,
           kind: step.kind,
+          onTimeout: typeof step.onTimeout === "function" ? "handler" : step.onTimeout ?? "continue",
           signal: step.signal,
+          timeoutMs: typeof step.timeoutMs === "function" ? "dynamic" : step.timeoutMs,
         };
-      default:
+      case "workflow_sleep":
         return {
+          delayMs: typeof step.delayMs === "function" ? "dynamic" : step.delayMs,
           id: step.id,
           kind: step.kind,
         };
@@ -3006,7 +3015,13 @@ function compareWorkflowSteps(
     }
 
     const nextStep = next.find((candidate) => candidate.id === step.id);
-    if (!(nextStep !== undefined) || nextStep.kind !== step.kind || nextStep.action !== step.action || nextStep.signal !== step.signal) {
+    if (!(nextStep !== undefined)
+      || nextStep.kind !== step.kind
+      || nextStep.action !== step.action
+      || nextStep.signal !== step.signal
+      || nextStep.delayMs !== step.delayMs
+      || nextStep.timeoutMs !== step.timeoutMs
+      || nextStep.onTimeout !== step.onTimeout) {
       return "breaking";
     }
   }

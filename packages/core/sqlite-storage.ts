@@ -487,6 +487,12 @@ export function createSqliteEngineAdapter(
         available_at_ms = ?2, lease_expires_at_ms = NULL, last_error = NULL, completed_at = NULL,
         updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status IN ('failed', 'dlq')`).run(jobId, platform.now()).changes === 1;
     },
+    async retireWorkflowJobs(workflowId: string): Promise<void> {
+      db.query(`UPDATE _chimpbase_queue_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
+        lease_expires_at_ms = NULL, updated_at = CURRENT_TIMESTAMP, last_error = 'superseded by workflow retry'
+        WHERE queue_name = '__chimpbase.workflow.run' AND json_extract(payload_json, '$.workflowId') = ?1
+          AND status IN ('pending', 'processing')`).run(workflowId);
+    },
     async insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean> {
       const result = db.query(
         `

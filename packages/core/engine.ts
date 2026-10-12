@@ -376,6 +376,8 @@ export interface ChimpbaseEngineAdapter {
   getQueueJob?(jobId: number): Promise<Omit<ChimpbaseJob, "registered"> | null>;
   /** Called inside a transaction; resets terminal user jobs and retires their unclaimed DLQ envelopes. */
   retryQueueJob?(jobId: number, dlqName?: string): Promise<boolean>;
+  /** Called inside a transaction, before locking the workflow, to fence old wake jobs. */
+  retireWorkflowJobs?(workflowId: string): Promise<void>;
   insertCronRun(scheduleName: string, fireAtMs: number): Promise<boolean>;
   kvDelete(key: string): Promise<void>;
   kvGet<TValue>(key: string, validator: ChimpbaseValidator<TValue>): Promise<TValue | null>;
@@ -981,7 +983,7 @@ export class ChimpbaseEngine {
     return await this.runInTransaction(async () => {
       const job = await this.inspectJob(jobId);
       if (job === null) throw new Error(`job not found: ${jobId}`);
-      if (job.queue.startsWith("__chimpbase.")) throw new Error("internal coordination jobs cannot be retried; use the workflow or subscription API");
+      if (job.queue.startsWith("__chimpbase.")) throw new Error("internal coordination jobs cannot be retried directly; use ctx.workflow.retry(workflowId) for failed workflows");
       const dlqName = this.registry.workers.get(job.queue)?.definition.dlq;
       if (job.status === "dlq" && typeof dlqName !== "string") throw new Error("register the original worker with its original DLQ configuration before retrying a dlq job");
       if (!await this.adapter.retryQueueJob!(jobId, typeof dlqName === "string" ? dlqName : undefined)) {
@@ -1655,6 +1657,8 @@ export class ChimpbaseEngine {
           workflowId: string,
         ): Promise<ChimpbaseWorkflowInstance<TInput, TState> | null> =>
           await this.getWorkflowInstance<TInput, TState>(qualifyWorkflowId(workflowId)),
+        retry: async (workflowId: string): Promise<ChimpbaseWorkflowStartResult> =>
+          await this.retryWorkflow(qualifyWorkflowId(workflowId)),
         signal: async <TPayload = unknown>(
           workflowId: string,
           signalName: string,
@@ -1823,7 +1827,14 @@ export class ChimpbaseEngine {
     input: TInput,
     options?: ChimpbaseWorkflowStartOptions,
   ): Promise<ChimpbaseWorkflowStartResult> {
-    const definition = this.resolveWorkflowDefinition(definitionReference);
+    const reference = this.resolveWorkflowDefinition(definitionReference);
+    const registered = this.registry.workflows.get(reference.name)?.has(reference.version);
+    if (!options?.allowUnregistered && !registered) {
+      throw new Error(`workflow definition not registered locally: ${reference.name}@${reference.version}; register it or set allowUnregistered: true for a remote worker sharing storage`);
+    }
+    const definition = registered
+      ? this.resolveWorkflowDefinitionByNameAndVersion(reference.name, reference.version)
+      : reference;
     const workflowId = options?.workflowId ?? this.platform.randomUUID();
 
     await this.adapter.query(
@@ -1862,6 +1873,37 @@ export class ChimpbaseEngine {
       workflowName: definition.name,
       workflowVersion: definition.version,
     };
+  }
+
+  private async retryWorkflow(workflowId: string): Promise<ChimpbaseWorkflowStartResult> {
+    return await this.runInTransaction<ChimpbaseWorkflowStartResult>(async () => {
+      const instance = await this.loadWorkflowInstanceRow(workflowId);
+      if (instance === null) throw new Error(`workflow not found: ${workflowId}`);
+      if (instance.status !== "failed") throw new Error(`workflow cannot be retried; only failed instances are eligible: ${workflowId}`);
+      this.resolveWorkflowDefinitionByNameAndVersion(instance.workflow_name, instance.workflow_version);
+      if (this.adapter.retireWorkflowJobs === undefined) throw new Error("storage adapter does not support workflow retry");
+      // Workers lock their queue job before the workflow; retry must use the same order.
+      await this.adapter.retireWorkflowJobs(workflowId);
+      const [retried] = await this.adapter.query(
+        `UPDATE _chimpbase_workflow_instances
+         SET status = 'running', wake_at_ms = NULL, last_error = NULL,
+           lease_token = NULL, lease_expires_at_ms = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE workflow_id = ?1 AND status = 'failed'
+         RETURNING workflow_id`,
+        [workflowId], workflowIdRowValidator,
+      );
+      if (retried === undefined) throw new Error(`workflow cannot be retried; only failed instances are eligible: ${workflowId}`);
+      await this.adapter.queueEnqueue(INTERNAL_WORKFLOW_QUEUE_NAME, { workflowId } satisfies WorkflowQueuePayload);
+      return {
+        status: "running",
+        workflowId,
+        workflowName: instance.workflow_name,
+        workflowVersion: instance.workflow_version,
+      };
+    }).catch((error: unknown) => {
+      if (this.transactionDepth > 0) this.transactionFailure ??= { error };
+      throw error;
+    });
   }
 
   private async signalWorkflow<TPayload = unknown>(
@@ -1906,14 +1948,12 @@ export class ChimpbaseEngine {
       return null;
     }
 
-    const definition = this.resolveWorkflowDefinitionByNameAndVersion(
-      row.workflow_name,
-      row.workflow_version,
-    );
+    const definition = this.registry.workflows.get(row.workflow_name)?.get(row.workflow_version);
 
     return {
       currentStepId: row.current_step_id
-        ?? (hasWorkflowSteps(definition) ? definition.steps[row.current_step_index]?.id ?? null : null),
+        ?? (definition !== undefined && isChimpbaseWorkflowDefinition(definition) && hasWorkflowSteps(definition)
+          ? definition.steps[row.current_step_index]?.id ?? null : null),
       input: JSON.parse(row.input_json) as TInput,
       lastError: row.last_error,
       state: JSON.parse(row.state_json) as TState,
@@ -2507,22 +2547,8 @@ export class ChimpbaseEngine {
     state: unknown,
   ): Promise<boolean> {
     if (directive.onTimeout === "fail") {
-      await this.adapter.query(
-        `
-          UPDATE _chimpbase_workflow_instances
-          SET
-            status = 'failed',
-            current_step_id = ?2,
-            wake_at_ms = NULL,
-            last_error = ?3,
-            lease_token = NULL,
-            lease_expires_at_ms = NULL,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE workflow_id = ?1
-        `,
-        [workflowId, directive.stepId ?? directive.signal, `workflow signal timed out: ${workflowId}/${directive.signal}`],
-        databaseRowValidator,
-      );
+      await this.failWorkflowInstance(workflowId,
+        `workflow signal timed out: ${workflowId}/${directive.signal}`, directive.stepId ?? directive.signal);
       return false;
     }
 
@@ -2565,7 +2591,8 @@ export class ChimpbaseEngine {
       : null;
 
     if (step.onTimeout === "fail") {
-      throw new Error(`workflow signal timed out: ${workflowId}/${step.signal}`);
+      await this.failWorkflowInstance(workflowId, `workflow signal timed out: ${workflowId}/${step.signal}`, step.id);
+      return;
     }
 
     const nextState = typeof step.onTimeout === "function"
@@ -2710,12 +2737,13 @@ export class ChimpbaseEngine {
     );
   }
 
-  private async failWorkflowInstance(workflowId: string, errorMessage: string): Promise<void> {
+  private async failWorkflowInstance(workflowId: string, errorMessage: string, stepId?: string): Promise<void> {
     await this.adapter.query(
       `
         UPDATE _chimpbase_workflow_instances
         SET
           status = 'failed',
+          current_step_id = COALESCE(?3, current_step_id),
           wake_at_ms = NULL,
           last_error = ?2,
           lease_token = NULL,
@@ -2723,7 +2751,7 @@ export class ChimpbaseEngine {
           updated_at = CURRENT_TIMESTAMP
         WHERE workflow_id = ?1 AND status NOT IN ('completed', 'failed')
       `,
-      [workflowId, errorMessage],
+      [workflowId, errorMessage, stepId ?? null],
       databaseRowValidator,
     );
   }

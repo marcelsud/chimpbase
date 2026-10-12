@@ -566,7 +566,14 @@ export class ChimpbaseHost<TServer> {
   registerWorkflow<TInput = unknown, TState = unknown>(
     definition: ChimpbaseWorkflowDefinition<TInput, TState>,
   ): ChimpbaseWorkflowDefinition<TInput, TState> {
+    const ownership = this.registry.workflowOwnership.get(definition.name);
+    if (ownership !== undefined) {
+      throw new Error(`workflow ${definition.name} is owned by module ${ownership} and cannot be replaced`);
+    }
     const versions = this.registry.workflows.get(definition.name) ?? new Map();
+    if (versions.has(definition.version)) {
+      throw new Error(`duplicate workflow registration: ${definition.name} v${definition.version}`);
+    }
     versions.set(definition.version, definition);
     this.registry.workflows.set(definition.name, versions);
     return definition;
