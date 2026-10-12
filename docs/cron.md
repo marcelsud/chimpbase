@@ -58,6 +58,10 @@ Standard 5-field cron expressions:
 * * * * *
 ```
 
+Fields accept decimal integers, ascending ranges such as `1-5`, comma-separated lists, and positive integer steps such as `*/15` or `1-9/2`. Malformed ranges, scientific notation, and nonpositive or unsafe step sizes are rejected.
+
+When either day field starts with `*`, including a stepped wildcard, both day restrictions must match. `0 0 */2 * 1` runs on Mondays whose day of the month is odd. When neither field starts with `*`, either matching day restriction is enough; `0 0 1 * 1` runs on the first of each month and every Monday. Schedules use UTC.
+
 **Examples:**
 
 | Expression | Description |
