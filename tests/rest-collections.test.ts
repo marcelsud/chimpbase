@@ -21,6 +21,32 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/rest-collections", () => {
+  test("item routes reject malformed encoded IDs without masking handler errors", async () => {
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      registrations: [restCollections({ collections: {
+        notes: { onWrite() { throw new URIError("application failure"); } },
+      } })],
+    });
+    try {
+      for (const id of ["%", "%E0%A4%A", "%FF"]) {
+        for (const method of ["GET", "PATCH", "DELETE"]) {
+          const outcome = await host.executeRoute(new Request(`http://rest.test/notes/${id}`, { method }));
+          expect(outcome.response?.status).toBe(400);
+          expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "invalid URL encoding in document ID" });
+        }
+      }
+      const escaped = await host.executeRoute(new Request("http://rest.test/notes/%25"));
+      expect(escaped.response?.status).toBe(404);
+      expect(await readJsonResponse<{ error: string }>(escaped.response)).toEqual({ error: "document not found: %" });
+      await expect(host.executeRoute(new Request("http://rest.test/notes", {
+        method: "POST", body: "{}",
+      }))).rejects.toThrow("application failure");
+    } finally {
+      await host.close();
+    }
+  });
+
   for (const transformed of [false, true]) {
     test(`lists 50 documents with ${transformed ? "one metadata batch" : "no metadata reads"}`, async () => {
       const metadataReads: string[] = [];

@@ -266,6 +266,28 @@ async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?:
 }
 
 describe("@chimpbase/webhooks", () => {
+  test("management routes reject malformed encoded IDs with 400", async () => {
+    const host = await createWebhooksHost();
+    try {
+      for (const id of ["%", "%E0%A4%A", "%FF"]) {
+        for (const [method, path] of [
+          ["GET", `/_webhooks/${id}`],
+          ["GET", `/_webhooks/${id}/deliveries`],
+          ["PATCH", `/_webhooks/${id}`],
+          ["DELETE", `/_webhooks/${id}`],
+        ]) {
+          const outcome = await host.executeRoute(new Request(`http://test.local${path}`, { method }));
+          expect(outcome.response?.status).toBe(400);
+          expect(await readJsonResponse<{ error: string }>(outcome.response)).toEqual({ error: "invalid URL encoding in webhook ID" });
+        }
+      }
+      const escaped = await host.executeRoute(new Request("http://test.local/_webhooks/%25"));
+      expect(escaped.response?.status).toBe(404);
+    } finally {
+      await host.close();
+    }
+  });
+
   // ── Outbound management ─────────────────────────────────────────────────
 
   test("registers a webhook", async () => {

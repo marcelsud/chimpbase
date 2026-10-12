@@ -773,7 +773,7 @@ export function chimpbaseWebhooks(
 
           // GET /_webhooks/:id
           if (matchPrefixWithId(segments, baseSegments) && request.method === "GET") {
-            const lastSegment = decodeURIComponent(segments[segments.length - 1]!);
+            const lastSegment = decodeIdentifier(segments[segments.length - 1]!);
 
             const webhook = await env.action("__chimpbase.webhooks.get", lastSegment);
             return webhook === null
@@ -787,14 +787,14 @@ export function chimpbaseWebhooks(
             segments[segments.length - 1] === "deliveries" &&
             request.method === "GET"
           ) {
-            const webhookId = decodeURIComponent(segments[baseSegments.length]!);
+            const webhookId = decodeIdentifier(segments[baseSegments.length]!);
             const deliveries = await env.action("__chimpbase.webhooks.listDeliveries", webhookId);
             return Response.json(deliveries);
           }
 
           // PATCH /_webhooks/:id
           if (matchPrefixWithId(segments, baseSegments) && request.method === "PATCH") {
-            const webhookId = decodeURIComponent(segments[segments.length - 1]!);
+            const webhookId = decodeIdentifier(segments[segments.length - 1]!);
             const body = await parseJsonBody(request);
             const result = await env.action("__chimpbase.webhooks.update", {
               id: webhookId,
@@ -810,7 +810,7 @@ export function chimpbaseWebhooks(
 
           // DELETE /_webhooks/:id
           if (matchPrefixWithId(segments, baseSegments) && request.method === "DELETE") {
-            const webhookId = decodeURIComponent(segments[segments.length - 1]!);
+            const webhookId = decodeIdentifier(segments[segments.length - 1]!);
             const deleted = await env.action("__chimpbase.webhooks.delete", webhookId);
             return deleted === 0
               ? jsonError(404, "webhook not found")
@@ -865,6 +865,14 @@ function requireString(body: Record<string, unknown>, field: string): string {
     throw new WebhooksRequestError(400, `"${field}" is required and must be a non-empty string`);
   }
   return value;
+}
+
+function decodeIdentifier(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new WebhooksRequestError(400, "invalid URL encoding in webhook ID");
+  }
 }
 
 function requireStringArray(body: Record<string, unknown>, field: string): string[] {

@@ -253,7 +253,7 @@ function buildCollectionEntries(
           return await handleDocumentRequest(
             definition,
             request,
-            decodeURIComponent(requestSegments[requestSegments.length - 1] ?? ""),
+            decodeIdentifier(requestSegments[requestSegments.length - 1] ?? ""),
             env,
           );
         }
@@ -646,6 +646,14 @@ async function parseJsonObject(request: Request): Promise<Record<string, unknown
   }
 
   return body;
+}
+
+function decodeIdentifier(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw badRequest("invalid URL encoding in document ID");
+  }
 }
 
 function methodNotAllowed(allowedMethods: readonly string[]): Response {
