@@ -157,6 +157,35 @@ for (let boot = 0; boot < 2; boot++) {
         "const firstDrain = await host.drain({ maxRuns: 1 });",
         "const secondDrain = await host.drain();",
         'const processed = (await host.executeAction("readProcessed")).result;',
+        `const reservation = nodeRuntimeShim.server.create({ port: 0 }, () => new Response("reserved"));
+await nodeRuntimeShim.server.ready(reservation);
+assert(reservation.port > 0);
+let failedReady = 0; let cleaned = 0; let processedOnFailure = 0;
+const failedHost = await createChimpbase({ storage: { engine: "memory" }, server: { port: reservation.port }, workerRuntime: { pollIntervalMs: 1 } });
+failedHost.registerOnStart("ready", () => { failedReady++; }, { phase: "ready" });
+failedHost.registerOnStop("cleanup", () => { cleaned++; });
+failedHost.registerWorker("must-stay-pending", () => { processedOnFailure++; });
+failedHost.registerAction("enqueue", async (ctx) => ctx.enqueue("must-stay-pending", {}));
+try {
+  await failedHost.executeAction("enqueue");
+  await assert.rejects(failedHost.start({ serve: true, runWorker: true }), { code: "EADDRINUSE" });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(failedReady, 0); assert.equal(cleaned, 1); assert.equal(processedOnFailure, 0);
+  assert.equal((await failedHost.listJobs())[0].status, "pending");
+} finally { await failedHost.close(); await nodeRuntimeShim.server.stop(reservation); }
+const readyHost = await createChimpbase({ storage: { engine: "memory" }, server: { port: 0 } });
+let readyServer;
+const originalServe = readyHost.serve.bind(readyHost);
+readyHost.serve = () => (readyServer = originalServe());
+readyHost.registerOnStart("ready", async () => {
+  assert(readyServer.server.listening); assert(readyServer.port > 0);
+  assert.equal(readyServer.port, readyServer.server.address().port);
+  const health = await fetch("http://127.0.0.1:" + readyServer.port + "/health", { signal: AbortSignal.timeout(5000) });
+  assert.equal(health.status, 200);
+}, { phase: "ready", transactional: false });
+const startedReady = await readyHost.start({ serve: true, runWorker: false });
+try { assert.equal(startedReady.server.server.listenerCount("error"), 0); }
+finally { await startedReady.stop(); await readyHost.close(); }`,
         "const kvHost = await ChimpbaseNodeHost.create({",
         `  projectDir: ${JSON.stringify(projectDir)},`,
         '  config: normalizeProjectConfig({ storage: { engine: "memory" }, kv: { retention: { enabled: true } } }),',

@@ -130,6 +130,7 @@ export interface ChimpbaseServerAdapter<TServer> {
     options: { port: number },
     handler: (request: Request) => Response | Promise<Response>,
   ): TServer;
+  ready?(server: TServer): Promise<void>;
   stop(server: TServer): Promise<void>;
 }
 
@@ -702,6 +703,7 @@ export class ChimpbaseHost<TServer> {
         });
       }
       server = runServe ? this.serve() : null;
+      if (server !== null) await this.runtime.server.ready?.(server);
       worker = runWorker ? this.startWorker() : null;
       this.debug("runtime starting", {
         workerConcurrency: runWorker ? this.getWorkerConcurrency() : 0,

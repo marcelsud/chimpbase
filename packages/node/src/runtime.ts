@@ -81,10 +81,28 @@ export const nodeRuntimeShim: ChimpbaseRuntimeShim<NodeServeHandle> = {
         server,
       };
     },
+    async ready(handle: NodeServeHandle): Promise<void> {
+      if (!handle.server.listening) {
+        await new Promise<void>((resolveReady, rejectReady) => {
+          const listening = () => {
+            handle.server.off("error", failed);
+            resolveReady();
+          };
+          const failed = (error: Error) => {
+            handle.server.off("listening", listening);
+            rejectReady(error);
+          };
+          handle.server.once("listening", listening);
+          handle.server.once("error", failed);
+        });
+      }
+      const address = handle.server.address();
+      if (address !== null && typeof address === "object") handle.port = address.port;
+    },
     async stop(handle: NodeServeHandle): Promise<void> {
       await new Promise<void>((resolveStop, rejectStop) => {
         handle.server.close((error?: Error | null) => {
-          if ((error !== null && error !== undefined)) {
+          if (error !== null && error !== undefined && !("code" in error && error.code === "ERR_SERVER_NOT_RUNNING")) {
             rejectStop(error);
             return;
           }
