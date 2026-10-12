@@ -1247,6 +1247,29 @@ describe("chimpbase blobs primitive (fs driver)", () => {
 });
 
 describe("chimpbase blobs signed URLs", () => {
+  test("signed GET and PUT URLs match routes with trailing or root separators", async () => {
+    for (const routeBasePath of ["/_files", "/_files/", "/_files///", "/", "///", ""]) {
+      const plugin = chimpbaseBlobs({ secret: "test-secret", baseUrl: "http://test.local///", routeBasePath });
+      const host = await createChimpbase({
+        storage: { engine: "memory" },
+        blobs: { driver: memoryBlobDriver(), buckets: ["uploads"], signer: plugin.signer },
+        registrations: plugin.registrations,
+      });
+      try {
+        const options = { bucket: "uploads", key: "signed.txt", ttlSec: 60 };
+        const putUrl = host.routeEnv().blobs.sign({ ...options, op: "put" });
+        const uploaded = await host.executeRoute(new Request(putUrl, { method: "PUT", body: "signed contents" }));
+        expect(uploaded.response?.status).toBe(201);
+        const getUrl = host.routeEnv().blobs.sign({ ...options, op: "get" });
+        const downloaded = await host.executeRoute(new Request(getUrl));
+        expect(downloaded.response?.status).toBe(200);
+        expect(await downloaded.response?.text()).toBe("signed contents");
+      } finally {
+        await host.close();
+      }
+    }
+  });
+
   test("GET signed URL streams stored body and rejects tampered/expired tokens", async () => {
     const boot = await bootBlobsHost({ serve: true, baseUrl: "http://127.0.0.1" });
     try {
