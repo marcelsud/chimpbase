@@ -889,7 +889,7 @@ export function createPostgresEngineAdapter(
       validator: ChimpbaseValidator<TValue>,
     ): Promise<TValue | null> {
       const result = await queryable().query<{ value_json: string }>(
-        "SELECT value_json::text AS value_json FROM _chimpbase_kv WHERE key = $1 AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
+        "SELECT value_json::text AS value_json FROM _chimpbase_kv WHERE key = $1 AND (expires_at IS NULL OR expires_at > clock_timestamp()) LIMIT 1",
         [key],
       );
       const row = result.rows[0];
@@ -903,7 +903,7 @@ export function createPostgresEngineAdapter(
         `
           SELECT key
           FROM _chimpbase_kv
-          WHERE key LIKE $1 ESCAPE '!' AND (expires_at IS NULL OR expires_at > NOW())
+          WHERE key LIKE $1 ESCAPE '!' AND (expires_at IS NULL OR expires_at > clock_timestamp())
           ORDER BY key ASC
         `,
         [escapeSqlLikePrefix(prefix)],
@@ -934,7 +934,7 @@ export function createPostgresEngineAdapter(
             value_json = excluded.value_json,
             updated_at = NOW(),
             expires_at = excluded.expires_at
-          WHERE _chimpbase_kv.expires_at <= NOW()
+          WHERE _chimpbase_kv.expires_at <= clock_timestamp()
         `,
         [key, JSON.stringify(value ?? null), expiresAt],
       );
