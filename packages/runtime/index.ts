@@ -2399,7 +2399,12 @@ function createObjectValidator<TShape extends ChimpbaseValidatorShape>(
 
         const parsed = validator.parse(value[key], `${path}.${key}`);
         if (parsed !== undefined || hasKey) {
-          output[key] = parsed;
+          Object.defineProperty(output, key, {
+            configurable: true,
+            enumerable: true,
+            value: parsed,
+            writable: true,
+          });
         }
       }
 

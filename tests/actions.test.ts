@@ -75,6 +75,24 @@ function checkActionTypes(
 }
 void checkActionTypes;
 
+test("object validators retain declared prototype-named properties as ordinary data", () => {
+  const stringShape = v.object({ ["__proto__"]: v.string(), constructor: v.string() });
+  const input: unknown = JSON.parse('{"__proto__":"ordinary data","constructor":"constructor data"}');
+  const parsed = stringShape.parse(input);
+  expect(Reflect.getPrototypeOf(parsed)).toBe(Object.prototype);
+  expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+  expect(parsed.__proto__).toBe("ordinary data");
+  expect(JSON.stringify(parsed)).toBe(JSON.stringify(input));
+  expect(() => stringShape.parse({ constructor: "missing prototype field" })).toThrow("__proto__ is required");
+  const invalidInput: unknown = JSON.parse('{"__proto__":123,"constructor":"data"}');
+  expect(() => stringShape.parse(invalidInput)).toThrow("must be a string");
+  const objectShape = v.object({ ["__proto__"]: v.object({ label: v.string() }) });
+  const nestedInput: unknown = JSON.parse('{"__proto__":{"label":"nested data"}}');
+  const nested = objectShape.parse(nestedInput);
+  expect(Reflect.getPrototypeOf(nested)).toBe(Object.prototype);
+  expect(nested.__proto__).toEqual({ label: "nested data" });
+});
+
 test("shared action references use the current host and require an explicit host outside handlers", async () => {
   const read = action("read", async (ctx) => await ctx.kv.get("identity"));
   const seed = action("seed", async (ctx, identity: string) => await ctx.kv.set("identity", identity));
