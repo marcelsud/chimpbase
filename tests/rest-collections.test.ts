@@ -21,6 +21,40 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/rest-collections", () => {
+  test("rejects collection paths that differ only by repeated separators", () => {
+    for (const basePath of [undefined, "/api", "//api//", "/"]) {
+      expect(() => restCollections({ basePath, collections: {
+        first: { path: "/notes" },
+        second: { path: "///notes///" },
+      } })).toThrow("duplicate rest collection route path");
+    }
+    expect(() => restCollections({ collections: {
+      first: { path: "/" }, second: { path: "////" },
+    } })).toThrow("duplicate rest collection route path: /");
+  });
+
+  test("a unique collection path still accepts repeated separators", async () => {
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      registrations: [restCollections({ basePath: "//api//", collections: {
+        notes: { path: "//notes///" },
+      } })],
+    });
+    try {
+      const created = await host.executeRoute(new Request("http://rest.test//api///notes//", {
+        method: "POST", body: JSON.stringify({ body: "saved" }),
+      }));
+      expect(created.response?.status).toBe(201);
+      const listed = await host.executeRoute(new Request("http://rest.test/api/notes"));
+      expect(await readJsonResponse<Array<{ body: string }>>(listed.response)).toEqual([
+        expect.objectContaining({ body: "saved" }),
+      ]);
+      expect((await host.executeRoute(new Request("http://rest.test/api/notes-extra"))).response).toBeNull();
+    } finally {
+      await host.close();
+    }
+  });
+
   test("item routes reject malformed encoded IDs without masking handler errors", async () => {
     const host = await createChimpbase({
       storage: { engine: "memory" },
