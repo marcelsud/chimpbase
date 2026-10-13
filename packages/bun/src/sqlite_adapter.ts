@@ -52,6 +52,14 @@ export function createSqliteEngineAdapter(
         all(...params) {
           return statement.all(...toSqlBindings(params));
         },
+        *iterate(...params) {
+          const streamingStatement = db.prepare(sql);
+          try {
+            yield* streamingStatement.iterate(...toSqlBindings(params));
+          } finally {
+            streamingStatement.finalize();
+          }
+        },
         run(...params) {
           return statement.run(...toSqlBindings(params));
         },

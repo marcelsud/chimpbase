@@ -91,7 +91,8 @@ jobs:
           bun test tests/listen-event-bus.integration.test.ts tests/mesh*.test.ts
           tests/postgres.durability.integration.test.ts
           tests/postgres.event-bus.integration.test.ts tests/collections.integration.test.ts
-          tests/blobs.test.ts tests/webhooks.test.ts
+          tests/blobs.test.ts tests/webhooks.test.ts tests/modules.test.ts
+          tests/sql-streaming.test.ts
 
       - name: Schema sync tests
         run: bun test tests/schema.sync.test.ts

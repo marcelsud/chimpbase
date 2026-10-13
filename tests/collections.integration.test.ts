@@ -168,7 +168,10 @@ describeIfPg("PostgreSQL collection concurrency and Kysely", () => {
         expect(await db.selectFrom(table).selectAll().orderBy("id").execute()).toEqual(expected);
         for (const chunkSize of [0, 1, 20]) {
           const rows: { id: number; label: string }[] = [];
-          for await (const row of db.selectFrom(table).selectAll().orderBy("id").stream(chunkSize)) rows.push(row);
+          for await (const row of db.selectFrom(table).selectAll().orderBy("id").stream(chunkSize)) {
+            expect(await ctx.db.query("SELECT ?1::int AS id", [row.id])).toEqual([{ id: row.id }]);
+            rows.push(row);
+          }
           expect(rows).toEqual(expected);
         }
         await expect(db.transaction().execute(async () => {})).rejects.toThrow("runtime-managed transactions");

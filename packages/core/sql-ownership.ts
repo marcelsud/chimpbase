@@ -45,15 +45,21 @@ function assertKnownSchemas(
   operation: string,
 ): void {
   const tokens = sqlTokens(sql);
+  const canMoveObjects = operation === "migration" && /^ALTER\b/i.test(sql.trim());
+  const schemaIdentifier = (index: number) => tokens[index]?.startsWith('"')
+    ? tokens[index]?.slice(1, -1).replaceAll('""', '"')
+    : tokens[index]?.toLowerCase();
   for (let index = 0; index < tokens.length; index++) {
-    const referenced = tokens[index]?.startsWith('"')
-      ? tokens[index]?.slice(1, -1).replaceAll('""', '"')
-      : tokens[index]?.toLowerCase();
+    const referenced = schemaIdentifier(index);
     if (referenced?.startsWith("chimpbase_") && referenced !== schema) {
       throw new Error(`module ${moduleName} ${operation} cannot access schema ${referenced}; owned schema is ${schema}`);
     }
     if (referenced === "public" && tokens[index + 1] === ".") {
       throw new Error(`module ${moduleName} ${operation} cannot access schema public; owned schema is ${schema}`);
+    }
+    if (canMoveObjects && tokens[index]?.toLowerCase() === "set"
+      && tokens[index + 1]?.toLowerCase() === "schema" && schemaIdentifier(index + 2) !== schema) {
+      throw new Error(`module ${moduleName} migration cannot move objects to schema ${schemaIdentifier(index + 2)}; owned schema is ${schema}`);
     }
   }
 }
@@ -71,12 +77,19 @@ function assertRelationReferences(
     ? tokens[index]?.slice(1, -1).replaceAll('""', '"')
     : word(index);
   const contexts = [{ expression: false, from: false, relation: false, writeTarget: false, ctes: new Set<string>() }];
+  const completedCtes = new Map<number, string>();
 
   for (let index = 0; index < tokens.length; index++) {
     const context = contexts[contexts.length - 1];
     const token = word(index);
     if (token === "with" && allowCtes && !context.expression) {
-      for (const name of extractCteNames(tokens, index + 1)) context.ctes.add(name);
+      const ctes = extractCtes(tokens, index + 1);
+      if (word(index + 1) === "recursive") {
+        for (const name of ctes.values()) context.ctes.add(name);
+      } else {
+        // Nonrecursive CTEs become visible only after checking their own query.
+        for (const [end, name] of ctes) completedCtes.set(end, name);
+      }
     }
     if (token === "(" || token === "[") {
       const query = /^(?:select|with|insert|update|delete|values|table)$/.test(word(index + 1) ?? "");
@@ -92,6 +105,8 @@ function assertRelationReferences(
     }
     if (token === ")" || token === "]") {
       if (contexts.length > 1) contexts.pop();
+      const name = completedCtes.get(index);
+      if (name !== undefined) contexts[contexts.length - 1].ctes.add(name);
       continue;
     }
     if (context.relation) {
@@ -145,10 +160,12 @@ function sqlTokens(sql: string): string[] {
   return sql.match(/"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*|[(),.\[\];]/gi) ?? [];
 }
 
-function splitSqlStatements(sql: string): string[] {
+/** Returns statements with literals and comments masked for validation, not execution. */
+export function splitSqlStatements(sql: string, dialect: "postgres" | "sqlite" = "postgres"): string[] {
+  sql = maskSqlLiteralsAndComments(sql, dialect === "sqlite");
   const statements: string[] = [];
   let start = 0;
-  for (const match of sql.matchAll(/"(?:[^"]|"")*"|;/g)) {
+  for (const match of sql.matchAll(/"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|;/g)) {
     if (match[0] !== ";") continue;
     statements.push(sql.slice(start, match.index).trim());
     start = match.index + 1;
@@ -172,8 +189,8 @@ function assertMigrationObjectTarget(moduleName: string, schema: string, stateme
   }
 }
 
-function extractCteNames(tokens: string[], start: number): Set<string> {
-  const names = new Set<string>();
+function extractCtes(tokens: string[], start: number): Map<number, string> {
+  const ctes = new Map<number, string>();
   const skipParentheses = (index: number) => {
     let depth = 0;
     do {
@@ -194,21 +211,21 @@ function extractCteNames(tokens: string[], start: number): Set<string> {
     if (tokens[index]?.toLowerCase() === "not") index++;
     if (tokens[index]?.toLowerCase() === "materialized") index++;
     if (tokens[index] !== "(") break;
-    names.add(name.startsWith('"') ? name.slice(1, -1).replaceAll('""', '"') : name.toLowerCase());
     index = skipParentheses(index);
+    ctes.set(index - 1, name.startsWith('"') ? name.slice(1, -1).replaceAll('""', '"') : name.toLowerCase());
     if (tokens[index] !== ",") break;
     index++;
   }
-  return names;
+  return ctes;
 }
 
-function maskSqlLiteralsAndComments(sql: string): string {
+function maskSqlLiteralsAndComments(sql: string, sqlite = false): string {
   let result = "";
   for (let index = 0; index < sql.length;) {
     const current = sql[index];
     const next = sql[index + 1];
     if (current === "-" && next === "-") {
-      const newline = sql.slice(index).search(/[\r\n]/);
+      const newline = sql.slice(index).search(sqlite ? /\n/ : /[\r\n]/);
       const length = newline < 0 ? sql.length - index : newline;
       result += " ".repeat(length);
       index += length;
@@ -218,7 +235,7 @@ function maskSqlLiteralsAndComments(sql: string): string {
       let end = index + 2;
       let depth = 1;
       while (end < sql.length && depth > 0) {
-        if (sql.slice(end, end + 2) === "/*") { depth++; end += 2; }
+        if (!sqlite && sql.slice(end, end + 2) === "/*") { depth++; end += 2; }
         else if (sql.slice(end, end + 2) === "*/") { depth--; end += 2; }
         else end++;
       }
@@ -229,7 +246,7 @@ function maskSqlLiteralsAndComments(sql: string): string {
     }
     if (current === "'") {
       let end = index + 1;
-      const escaped = /[eE]/.test(sql[index - 1] ?? "") && !/[a-z0-9_$]/i.test(sql[index - 2] ?? "");
+      const escaped = !sqlite && /[eE]/.test(sql[index - 1] ?? "") && !/[a-z0-9_$]/i.test(sql[index - 2] ?? "");
       while (end < sql.length) {
         if (escaped && sql[end] === "\\") {
           end += 2;
@@ -249,7 +266,7 @@ function maskSqlLiteralsAndComments(sql: string): string {
       index = end;
       continue;
     }
-    const dollar = current === "$" && !/[a-z0-9_$]/i.test(sql[index - 1] ?? "")
+    const dollar = !sqlite && current === "$" && !/[a-z0-9_$]/i.test(sql[index - 1] ?? "")
       ? sql.slice(index).match(/^\$(?:[a-z_][a-z0-9_]*)?\$/i)?.[0] : undefined;
     if (dollar !== undefined) {
       const closing = sql.indexOf(dollar, index + dollar.length);
@@ -258,11 +275,12 @@ function maskSqlLiteralsAndComments(sql: string): string {
       index = end;
       continue;
     }
-    if (current === '"') {
+    if (current === '"' || (sqlite && (current === "`" || current === "["))) {
+      const closing = current === "[" ? "]" : current;
       let end = index + 1;
       while (end < sql.length) {
-        if (sql[end] === '"' && sql[end + 1] === '"') { end += 2; continue; }
-        if (sql[end++] === '"') break;
+        if (closing !== "]" && sql[end] === closing && sql[end + 1] === closing) { end += 2; continue; }
+        if (sql[end++] === closing) break;
       }
       result += sql.slice(index, end);
       index = end;

@@ -1,3 +1,5 @@
+import { splitSqlStatements } from "./sql-ownership.ts";
+
 export interface ChimpbasePlatformShim {
   hashString(input: string): string;
   now(): number;
@@ -66,13 +68,26 @@ export function applySqliteMigrations(
       if (db.query("SELECT name FROM _chimpbase_migrations WHERE name = ?1").all(migration.name).length > 0) {
         continue;
       }
+      assertSqliteMigrationTransaction(migration);
       db.exec(migration.sql);
       db.query("INSERT INTO _chimpbase_migrations (name) VALUES (?1)").run(migration.name);
     }
     db.exec("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    try { db.exec("ROLLBACK"); } catch { /* SQLite may already have rolled back the transaction. */ }
     throw error;
+  }
+}
+
+function assertSqliteMigrationTransaction(migration: ChimpbaseMigration): void {
+  let trigger = false;
+  for (const statement of splitSqlStatements(migration.sql, "sqlite")) {
+    if (/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/i.test(statement)) trigger = true;
+    else if (trigger) {
+      if (/^END\s*$/i.test(statement)) trigger = false;
+    } else if (/^(?:BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(statement)) {
+      throw new Error(`SQLite migration ${migration.name} cannot control the migration transaction`);
+    }
   }
 }
 

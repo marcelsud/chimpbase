@@ -4,6 +4,11 @@ The built-in hosts already support PostgreSQL, SQLite, and memory. Write a custo
 
 An adapter implements `ChimpbaseEngineAdapter` from `chimpbase/core`. Read that interface for the complete contract.
 
+Kysely integrations implement `ChimpbaseKyselyExecutor.streamQuery` alongside `executeQuery`;
+SQLite statement wrappers implement `ChimpbaseSqliteStatement.iterate` alongside `all` and `run`.
+An adapter's `createKysely(schema, executor)` must honor the optional executor override so
+retained lifecycle queries and streams use the adapter selected when they execute.
+
 ## Events and Transactions
 
 `persistEvents(events)` runs inside the current transaction. It inserts events, assigns IDs, and creates durable subscription jobs. Synchronous subscriptions can publish more events, so this method may run for several batches before commit.

@@ -50,6 +50,49 @@ async function createMemoryHost(
 }
 
 describe("telemetry stream persistence", () => {
+  test("SQLite telemetry retention preserves stream cursors after reopening storage", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "chimpbase-telemetry-cursor-"));
+    cleanupDirs.push(dir);
+    const now = Date.parse("2026-10-09T02:00:00.000Z");
+    const options = {
+      projectDir: dir,
+      config: normalizeProjectConfig({
+        storage: { engine: "sqlite", path: "telemetry.db" },
+        telemetry: { retention: { enabled: true, maxAgeDays: 1 } },
+      }),
+      platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+    };
+    let host = await ChimpbaseBunHost.create(options);
+    cleanupHosts.push(host);
+    host.register(action("seedCursor", async (ctx) => {
+      await ctx.stream.append("_chimpbase.logs", "expired.first", {});
+      const cursor = await ctx.stream.append("_chimpbase.logs", "expired.last", {});
+      await ctx.db.query("UPDATE _chimpbase_stream_events SET created_at = '2000-01-01 00:00:00'");
+      await ctx.db.query(
+        "UPDATE _chimpbase_cron_schedules SET next_fire_at_ms = ?1 WHERE schedule_name = '__chimpbase.telemetry.cleanup'",
+        [now - 1],
+      );
+      return cursor;
+    }));
+    await host.syncCronSchedules();
+    const cursor = v.number().parse((await host.executeAction("seedCursor")).result);
+    await host.processNextCronSchedule();
+    await host.processNextQueueJob();
+    expect((await readStream(host, "_chimpbase.logs")).map((event) => event.event)).toEqual(["expired.last"]);
+    await host.close();
+    cleanupHosts.splice(cleanupHosts.indexOf(host), 1);
+    host = await ChimpbaseBunHost.create(options);
+    cleanupHosts.push(host);
+    host.register(action("appendAfterRetention", async (ctx) => {
+      const id = await ctx.stream.append("_chimpbase.logs", "new", {});
+      return { id, events: await ctx.stream.read("_chimpbase.logs", { sinceId: cursor }) };
+    }));
+    const result = v.object({ id: v.number(), events: v.object({ event: v.string(), id: v.number() }).array() })
+      .parse((await host.executeAction("appendAfterRetention")).result);
+    expect(result.id).toBeGreaterThan(cursor);
+    expect(result.events).toEqual([{ event: "new", id: result.id }]);
+  });
+
   for (const engine of ["memory", "sqlite"] as const) {
     test(`retention compares SQLite and ISO dates at the cutoff without deleting recent logs (${engine})`, async () => {
       const dir = await mkdtemp(join(tmpdir(), "chimpbase-telemetry-retention-"));

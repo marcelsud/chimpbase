@@ -71,6 +71,8 @@ export default {
 
 To remove old persisted telemetry, pass `telemetryRetention: { enabled: true, maxAgeDays: 30 }` to `createChimpbase()`. `maxAgeDays` must be an integer from `1` to `100000000`; invalid values reject startup, even when cleanup is disabled.
 
+SQLite and memory retention preserve the stream table's maximum-ID event even when expired, so later appends cannot reuse a reader's cursor. A later cleanup can remove that event once a higher ID exists.
+
 ## Per-Handler Control
 
 Override telemetry persistence at the handler level. These settings do not suppress in-memory records or export to configured sinks:

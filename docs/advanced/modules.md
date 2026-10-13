@@ -69,7 +69,7 @@ Routes, actions, workers, subscriptions, crons, workflows, and lifecycle hooks r
 
 Collections, KV keys, streams, queues, workflow definitions, and workflow instance identifiers are prefixed with the module identity. Crafted names cannot escape that prefix. Module migrations are ordered by the synchronous dependency graph and receive owner-qualified identities.
 
-PostgreSQL modules receive a stable `chimpbase_<module>` schema. Module Kysely queries are schema-scoped and reject compiled access to another schema. Raw SQL requires explicit references to the owning schema and rejects foreign or unqualified tables. These runtime guards cover all database access exposed through a module context; direct access to an injected pool is outside the module API and outside the trusted-process boundary.
+PostgreSQL modules receive a stable `chimpbase_<module>` schema. Module Kysely queries are schema-scoped and reject compiled access to another schema. Raw SQL requires explicit references to the owning schema and rejects foreign or unqualified tables. CTE references follow PostgreSQL declaration-order and recursive visibility rules. Module migrations cannot move objects outside their owned schema. These runtime guards cover all database access exposed through a module context; direct access to an injected pool is outside the module API and outside the trusted-process boundary.
 
 SQLite and memory adapters enforce generic-storage namespaces, but do not provide PostgreSQL schemas or database privileges. Module raw SQL is therefore intentionally unavailable for owned tables on those adapters; use typed Kysely access or generic storage. Generated `database.d.ts` interfaces list only each module's declared tables and projections.
 

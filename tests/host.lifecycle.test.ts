@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 
-import { createDefaultChimpbasePlatformShim, defineChimpbaseApp, normalizeProjectConfig, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord, type ChimpbaseQueueJobRecord } from "../packages/core/index.ts";
+import { ChimpbaseEngine, createChimpbaseRegistry, createDefaultChimpbasePlatformShim, defineChimpbaseApp, ensureSqliteInternalTables, normalizeProjectConfig, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord, type ChimpbaseQueueJobRecord } from "../packages/core/index.ts";
 import { bunRuntimeShim, ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
+import { createSqliteEngineAdapter } from "../packages/bun/src/sqlite_adapter.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
 import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, v, worker, type ChimpbaseContext } from "../packages/runtime/index.ts";
@@ -89,6 +90,59 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  for (const transactional of [true, false]) {
+    test(`retained lifecycle SQL builders and streams use the detached adapter (${transactional ? "transactional" : "nontransactional"})`, async () => {
+      const activeDb = new Database(":memory:");
+      const detachedDb = new Database(":memory:");
+      const platform = createDefaultChimpbasePlatformShim();
+      const registry = createChimpbaseRegistry();
+      const adapter = createSqliteEngineAdapter(activeDb, platform);
+      const detachedAdapter = createSqliteEngineAdapter(detachedDb, platform);
+      const config = normalizeProjectConfig({ storage: { engine: "memory" } });
+      const engine = new ChimpbaseEngine({
+        adapter, createDetachedAdapter: () => detachedAdapter, platform, registry,
+        secrets: { get: () => null }, subscriptions: config.subscriptions,
+        telemetry: config.telemetry, worker: config.worker,
+      });
+      let background!: () => Promise<void>;
+      const streamed: string[] = [];
+      try {
+        for (const db of [activeDb, detachedDb]) {
+          ensureSqliteInternalTables(db);
+          db.exec("CREATE TABLE effects (label TEXT)");
+        }
+        await engine.executeLifecycleHook(async (ctx) => {
+          const db = ctx.db.kysely<{ effects: { label: string } }>();
+          await db.insertInto("effects").values({ label: "startup" }).execute();
+          const retainedInsert = db.insertInto("effects").values({ label: "retained" });
+          const retainedStream = db.selectFrom("effects").select("label").orderBy("label");
+          background = async () => {
+            await ctx.db.query("INSERT INTO effects VALUES ('raw')");
+            await retainedInsert.execute();
+            await ctx.db.kysely<{ effects: { label: string } }>()
+              .insertInto("effects").values({ label: "late" }).execute();
+            for await (const row of retainedStream.stream(1)) streamed.push(row.label);
+          };
+        }, null, "background", transactional);
+        const failure = new Error("foreground failure");
+        registry.actions.set("fail", action("fail", async (ctx) => {
+          await ctx.db.query("INSERT INTO effects VALUES ('foreground')");
+          await background();
+          throw failure;
+        }));
+        await expect(engine.executeAction("fail", [])).rejects.toBe(failure);
+        expect(activeDb.query("SELECT label FROM effects").all()).toEqual([{ label: "startup" }]);
+        expect(detachedDb.query("SELECT label FROM effects ORDER BY label").all()).toEqual([
+          { label: "late" }, { label: "raw" }, { label: "retained" },
+        ]);
+        expect(streamed).toEqual(["late", "raw", "retained"]);
+      } finally {
+        activeDb.close();
+        detachedDb.close();
+      }
+    });
+  }
+
   test("library cleanup preserves the action failure when a host subclass closes synchronously", async () => {
     const failure = new Error("action failed");
     const cleanupFailure = new Error("synchronous cleanup failed");
