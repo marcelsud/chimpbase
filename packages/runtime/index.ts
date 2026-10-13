@@ -1588,24 +1588,8 @@ export function workflowWaitForSignalStep<TInput = unknown, TState = unknown, TP
 export function describeWorkflow<TInput = unknown, TState = unknown>(
   definition: ChimpbaseWorkflowDefinition<TInput, TState>,
 ): ChimpbaseWorkflowContract {
-  const steps = describeWorkflowSteps(definition);
-  const mode = hasWorkflowSteps(definition) ? "steps" : "run";
-
   return {
-    hash: computeWorkflowContractHash({
-      inputSchema: definition.inputSchema,
-      mode,
-      name: definition.name,
-      signalSchemas: definition.signalSchemas,
-      stateSchema: definition.stateSchema,
-      steps,
-    }),
-    inputSchema: definition.inputSchema,
-    mode,
-    name: definition.name,
-    signalSchemas: definition.signalSchemas,
-    stateSchema: definition.stateSchema,
-    steps,
+    ...buildWorkflowContractDraft(definition),
     version: definition.version,
   };
 }
@@ -3103,6 +3087,13 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
   if (isPlainObject(previous) && isPlainObject(next)) {
     let compatibility: ChimpbaseWorkflowCompatibility = "identical";
 
+    const structuralKeys = new Set(["type", "enum", "properties", "required", "items"]);
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+      if (!structuralKeys.has(key) && stableSerialize(previous[key]) !== stableSerialize(next[key])) {
+        return "breaking";
+      }
+    }
+
     const previousType = previous.type;
     const nextType = next.type;
     if (previousType !== undefined || nextType !== undefined) {
@@ -3112,6 +3103,7 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
     }
 
     if (isArrayValue(previous.enum) || isArrayValue(next.enum)) {
+      if (!isArrayValue(previous.enum) && isArrayValue(next.enum)) return "breaking";
       const previousEnum = isArrayValue(previous.enum) ? previous.enum : [];
       const nextEnum = isArrayValue(next.enum) ? next.enum : [];
       if (previousEnum.some((entry) => !nextEnum.some((candidate) => stableSerialize(candidate) === stableSerialize(entry)))) {
@@ -3129,6 +3121,10 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
       const nextProperties = isPlainObject(next.properties) ? next.properties : {};
       const previousRequired = new Set(isArrayValue(previous.required) ? previous.required : []);
       const nextRequired = new Set(isArrayValue(next.required) ? next.required : []);
+      if ([...nextRequired].some((key) => !previousRequired.has(key))) return "breaking";
+      if ([...previousRequired].some((key) => !nextRequired.has(key))) {
+        compatibility = mergeWorkflowCompatibility(compatibility, "additive");
+      }
 
       for (const key of Object.keys(previousProperties)) {
         if (!Object.prototype.hasOwnProperty.call(nextProperties, key)) {
@@ -3139,20 +3135,14 @@ function compareSchemaShape(previous: unknown, next: unknown): ChimpbaseWorkflow
           compatibility,
           compareSchemaShape(previousProperties[key], nextProperties[key]),
         );
-
-        if (previousRequired.has(key) && !nextRequired.has(key)) {
-          compatibility = mergeWorkflowCompatibility(compatibility, "additive");
-        }
       }
 
       for (const key of Object.keys(nextProperties)) {
         if (!Object.prototype.hasOwnProperty.call(previousProperties, key)) {
           compatibility = mergeWorkflowCompatibility(
             compatibility,
-            nextRequired.has(key) ? "breaking" : "additive",
+            "additive",
           );
-        } else if (!previousRequired.has(key) && nextRequired.has(key)) {
-          return "breaking";
         }
       }
 

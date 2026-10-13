@@ -144,6 +144,60 @@ describe("@chimpbase/pact", () => {
   });
 
   describe("provider verification", () => {
+    test("requires own state handlers, including names inherited from Object.prototype", async () => {
+      let executions = 0;
+      const host = { async executeAction() { executions++; return { result: "ok", emittedEvents: [] }; } };
+      for (const state of ["toString", "valueOf", "constructor", "__proto__"]) {
+        const contract = pact({ consumer: "client", provider: "provider", interactions: [
+          interaction.action("run", { states: [state], example: { args: [] } }),
+        ] });
+        const result = await verifyPact({ host, pact: contract });
+        expect(result.results[0]).toMatchObject({ status: "failed", failure: { kind: "missing_state", state } });
+        expect(executions).toBe(0);
+      }
+      let setups = 0;
+      const states = { toString: () => { setups++; } };
+      const result = await verifyPact({ host, states, pact: pact({ consumer: "client", provider: "provider", interactions: [
+        interaction.action("run", { states: ["toString"], example: { args: [] } }),
+      ] }) });
+      expect(result.passed).toBe(1);
+      expect(setups).toBe(1);
+      expect(executions).toBe(1);
+    });
+
+    test("reports the original event validation failure without parsing the rejected payload again", async () => {
+      let parses = 0;
+      const payload = { ...v.unknown(), parse(value: unknown) {
+        if (++parses === 1) throw new Error("original payload rejected");
+        return value;
+      } };
+      const host = { async executeAction() { return { result: null, emittedEvents: [
+        { name: "event", payload: "invalid", payloadJson: '"invalid"' },
+      ] }; } };
+      const result = await verifyPact({ host, pact: pact({ consumer: "client", provider: "provider", interactions: [
+        interaction.event("event", { states: ["emit"], payload }),
+      ] }), states: { emit: async (stateHost) => { await stateHost.executeAction("emit"); } } });
+      expect(result.results[0]).toMatchObject({ status: "failed", failure: {
+        kind: "event_payload_mismatch", actual: "invalid", error: "original payload rejected",
+      } });
+      expect(parses).toBe(1);
+    });
+
+    test("accepts a later matching event and reports the last failure when all payloads fail", async () => {
+      const run = async (values: unknown[]) => {
+        const host = { async executeAction() { return { result: null, emittedEvents: values.map((value) => ({
+          name: "event", payload: value, payloadJson: JSON.stringify(value),
+        })) }; } };
+        return await verifyPact({ host, pact: pact({ consumer: "client", provider: "provider", interactions: [
+          interaction.event("event", { states: ["emit"], payload: v.string() }),
+        ] }), states: { emit: async (stateHost) => { await stateHost.executeAction("emit"); } } });
+      };
+      expect((await run([1, "valid"])).passed).toBe(1);
+      expect((await run([1, false])).results[0]).toMatchObject({ status: "failed", failure: {
+        kind: "event_payload_mismatch", actual: false,
+      } });
+    });
+
     test("verifies action interactions against a real host", async () => {
       const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-pact-action-"));
       cleanupDirs.push(projectDir);

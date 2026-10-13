@@ -1128,31 +1128,9 @@ export function createPostgresEngineAdapter(
       await queryable().query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify([bucket, key])]);
     },
     async blobPutMetadata(row: ChimpbaseBlobMetaRow, conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">): Promise<void> {
-      const ifMatch = conditions?.ifMatch;
-      const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
-        JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
-      const sql = ifMatch !== undefined && ifMatch.length > 0
-        ? `UPDATE _chimpbase_blobs SET size = $3, etag = $4, content_type = $5,
-             metadata = $6::jsonb, driver_ref = $7, updated_at = $8::timestamptz
-           WHERE bucket = $1 AND key = $2 AND etag = $9`
-        : `
-          INSERT INTO _chimpbase_blobs (
-            bucket, key, size, etag, content_type, metadata, driver_ref, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9::timestamptz)
-          ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
-            size = excluded.size,
-            etag = excluded.etag,
-            content_type = excluded.content_type,
-            metadata = excluded.metadata,
-            driver_ref = excluded.driver_ref,
-            updated_at = excluded.updated_at`}
-        `;
-      if (ifMatch !== undefined && ifMatch.length > 0) {
-        params.splice(7, 1);
-        params.push(ifMatch);
+      if (await putBlobMetadata(queryable(), row, conditions) === 0) {
+        throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
       }
-      const result = await queryable().query(sql, params);
-      if (result.rowCount === 0) throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
     },
     async blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null> {
       const result = await queryable().query<{
@@ -1346,31 +1324,7 @@ export function createPostgresEngineAdapter(
       let failed = false;
       try {
         if (ownedClient !== null) await client.query("BEGIN");
-        await client.query(
-          `
-            INSERT INTO _chimpbase_blobs (
-              bucket, key, size, etag, content_type, metadata, driver_ref, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9::timestamptz)
-            ON CONFLICT(bucket, key) DO UPDATE SET
-              size = excluded.size,
-              etag = excluded.etag,
-              content_type = excluded.content_type,
-              metadata = excluded.metadata,
-              driver_ref = excluded.driver_ref,
-              updated_at = excluded.updated_at
-          `,
-          [
-            finalMeta.bucket,
-            finalMeta.key,
-            finalMeta.size,
-            finalMeta.etag,
-            finalMeta.contentType,
-            JSON.stringify(finalMeta.metadata),
-            finalMeta.driverRef,
-            finalMeta.createdAt,
-            finalMeta.updatedAt,
-          ],
-        );
+        await putBlobMetadata(client, finalMeta);
         await client.query(
           "DELETE FROM _chimpbase_blob_uploads WHERE upload_id = $1",
           [uploadId],
@@ -1446,6 +1400,37 @@ export function createPostgresEngineAdapter(
       return result.rows.map((row) => row.upload_id);
     },
   };
+}
+
+async function putBlobMetadata(
+  queryable: Queryable,
+  row: ChimpbaseBlobMetaRow,
+  conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">,
+): Promise<number | null> {
+  const ifMatch = conditions?.ifMatch;
+  const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
+    JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
+  const sql = ifMatch !== undefined && ifMatch.length > 0
+    ? `UPDATE _chimpbase_blobs SET size = $3, etag = $4, content_type = $5,
+         metadata = $6::jsonb, driver_ref = $7, updated_at = $8::timestamptz
+       WHERE bucket = $1 AND key = $2 AND etag = $9`
+    : `
+      INSERT INTO _chimpbase_blobs (
+        bucket, key, size, etag, content_type, metadata, driver_ref, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9::timestamptz)
+      ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
+        size = excluded.size,
+        etag = excluded.etag,
+        content_type = excluded.content_type,
+        metadata = excluded.metadata,
+        driver_ref = excluded.driver_ref,
+        updated_at = excluded.updated_at`}
+    `;
+  if (ifMatch !== undefined && ifMatch.length > 0) {
+    params.splice(7, 1);
+    params.push(ifMatch);
+  }
+  return (await queryable.query(sql, params)).rowCount;
 }
 
 

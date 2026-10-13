@@ -106,7 +106,7 @@ async function setupStates(
   stateHandlers: Record<string, PactStateSetupFn>,
 ): Promise<{ failure: PactVerificationFailure } | null> {
   for (const state of stateNames) {
-    const handler = stateHandlers[state];
+    const handler = Object.hasOwn(stateHandlers, state) ? stateHandlers[state] : undefined;
     if (!(handler !== null && handler !== undefined)) {
       return { failure: { kind: "missing_state", state } };
     }
@@ -209,32 +209,28 @@ async function verifyEventInteraction(
 
   if ((interaction.payload !== undefined)) {
     const validator = interaction.payload;
+    let lastError: unknown;
     for (const event of matchingEvents) {
       try {
         validator.parse(event.payload);
         return { interaction, status: "passed" };
-      } catch {
-        // Try the next matching event
+      } catch (error) {
+        lastError = error;
       }
     }
 
-    // None of the matching events passed validation
     const lastEvent = matchingEvents[matchingEvents.length - 1];
-    try {
-      validator.parse(lastEvent.payload);
-    } catch (error) {
-      return {
-        interaction,
-        status: "failed",
-        failure: {
-          kind: "event_payload_mismatch",
-          eventName: interaction.eventName,
-          expected: validator.schema,
-          actual: lastEvent.payload,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      };
-    }
+    return {
+      interaction,
+      status: "failed",
+      failure: {
+        kind: "event_payload_mismatch",
+        eventName: interaction.eventName,
+        expected: validator.schema,
+        actual: lastEvent.payload,
+        error: lastError instanceof Error ? lastError.message : String(lastError),
+      },
+    };
   }
 
   return { interaction, status: "passed" };

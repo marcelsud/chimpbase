@@ -723,31 +723,9 @@ export function createSqliteEngineAdapter(
       ).run(scheduleName, cronExpression, nextFireAtMs);
     },
     async blobPutMetadata(row: ChimpbaseBlobMetaRow, conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">) {
-      const ifMatch = conditions?.ifMatch;
-      const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
-        JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
-      const sql = ifMatch !== undefined && ifMatch.length > 0
-        ? `UPDATE _chimpbase_blobs SET size = ?3, etag = ?4, content_type = ?5,
-             metadata_json = ?6, driver_ref = ?7, updated_at = ?8
-           WHERE bucket = ?1 AND key = ?2 AND etag = ?9`
-        : `
-          INSERT INTO _chimpbase_blobs (
-            bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
-          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-          ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
-            size = excluded.size,
-            etag = excluded.etag,
-            content_type = excluded.content_type,
-            metadata_json = excluded.metadata_json,
-            driver_ref = excluded.driver_ref,
-            updated_at = excluded.updated_at`}
-        `;
-      if (ifMatch !== undefined && ifMatch.length > 0) {
-        params.splice(7, 1);
-        params.push(ifMatch);
+      if (putBlobMetadata(db, row, conditions) === 0) {
+        throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
       }
-      const result = db.query(sql).run(...params);
-      if (result.changes === 0) throw new ChimpbasePreconditionFailedError(`blob ${row.bucket}/${row.key} precondition failed`);
     },
     async blobGetMetadata(bucket: string, key: string): Promise<ChimpbaseBlobMetaRow | null> {
       const [row] = parseRows(db.query(
@@ -879,30 +857,8 @@ export function createSqliteEngineAdapter(
       }));
     },
     async blobFinalizeUpload(uploadId: string, finalMeta: ChimpbaseBlobMetaRow): Promise<void> {
-      db.query(
-        `
-          INSERT INTO _chimpbase_blobs (
-            bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
-          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-          ON CONFLICT(bucket, key) DO UPDATE SET
-            size = excluded.size,
-            etag = excluded.etag,
-            content_type = excluded.content_type,
-            metadata_json = excluded.metadata_json,
-            driver_ref = excluded.driver_ref,
-            updated_at = excluded.updated_at
-        `,
-      ).run(
-        finalMeta.bucket,
-        finalMeta.key,
-        finalMeta.size,
-        finalMeta.etag,
-        finalMeta.contentType,
-        JSON.stringify(finalMeta.metadata),
-        finalMeta.driverRef,
-        finalMeta.createdAt,
-        finalMeta.updatedAt,
-      );
+      putBlobMetadata(db, finalMeta);
+      db.query("DELETE FROM _chimpbase_blob_upload_parts WHERE upload_id = ?1").run(uploadId);
       db.query("DELETE FROM _chimpbase_blob_uploads WHERE upload_id = ?1").run(uploadId);
     },
     async blobAbortUpload(uploadId: string): Promise<void> {
@@ -949,6 +905,37 @@ export function createSqliteEngineAdapter(
       return rows.map((row) => row.upload_id);
     },
   };
+}
+
+function putBlobMetadata(
+  db: ChimpbaseSqliteDatabase,
+  row: ChimpbaseBlobMetaRow,
+  conditions?: Pick<ChimpbaseBlobPutOptions, "ifMatch" | "ifNoneMatch">,
+): number {
+  const ifMatch = conditions?.ifMatch;
+  const params: unknown[] = [row.bucket, row.key, row.size, row.etag, row.contentType,
+    JSON.stringify(row.metadata), row.driverRef, row.createdAt, row.updatedAt];
+  const sql = ifMatch !== undefined && ifMatch.length > 0
+    ? `UPDATE _chimpbase_blobs SET size = ?3, etag = ?4, content_type = ?5,
+         metadata_json = ?6, driver_ref = ?7, updated_at = ?8
+       WHERE bucket = ?1 AND key = ?2 AND etag = ?9`
+    : `
+      INSERT INTO _chimpbase_blobs (
+        bucket, key, size, etag, content_type, metadata_json, driver_ref, created_at, updated_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+      ${conditions?.ifNoneMatch === "*" ? "ON CONFLICT(bucket, key) DO NOTHING" : `ON CONFLICT(bucket, key) DO UPDATE SET
+        size = excluded.size,
+        etag = excluded.etag,
+        content_type = excluded.content_type,
+        metadata_json = excluded.metadata_json,
+        driver_ref = excluded.driver_ref,
+        updated_at = excluded.updated_at`}
+    `;
+  if (ifMatch !== undefined && ifMatch.length > 0) {
+    params.splice(7, 1);
+    params.push(ifMatch);
+  }
+  return db.query(sql).run(...params).changes;
 }
 
 

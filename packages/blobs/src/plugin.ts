@@ -66,11 +66,24 @@ export function chimpbaseBlobs(options: ChimpbaseBlobsPluginOptions): ChimpbaseB
       ?? "application/octet-stream";
     let body: Uint8Array | ReadableStream<Uint8Array>;
     if (payload.sizeMax !== undefined) {
-      const buf = new Uint8Array(await request.arrayBuffer());
-      if (buf.byteLength > payload.sizeMax) {
-        return new Response("payload too large", { status: 413 });
+      const reader = request.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      let completed = false;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) { completed = true; break; }
+          size += chunk.value.byteLength;
+          if (size > payload.sizeMax) return new Response("payload too large", { status: 413 });
+          if (chunk.value.byteLength > 0) chunks.push(chunk.value);
+        }
+      } finally {
+        if (!completed) void reader.cancel().catch(() => {});
+        reader.releaseLock();
       }
-      body = buf;
+      if (size > payload.sizeMax) return new Response("payload too large", { status: 413 });
+      body = Buffer.concat(chunks, size);
     } else {
       body = request.body as ReadableStream<Uint8Array>;
     }

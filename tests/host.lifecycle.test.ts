@@ -1,8 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Pool } from "pg";
 
-import { defineChimpbaseApp, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord, type ChimpbaseQueueJobRecord } from "../packages/core/index.ts";
-import { bunRuntimeShim } from "../packages/bun/src/runtime.ts";
+import { createDefaultChimpbasePlatformShim, defineChimpbaseApp, normalizeProjectConfig, type ChimpbaseEventBusCallback, type ChimpbaseEventRecord, type ChimpbaseQueueJobRecord } from "../packages/core/index.ts";
+import { bunRuntimeShim, ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 import { createChimpbaseRuntimeLibrary } from "../packages/host/src/library.ts";
 import { ChimpbaseHost, type ChimpbaseRuntimeShim } from "../packages/host/src/runtime.ts";
 import { action, CHIMPBASE_REQUEST_REJECTED_HEADER, onStart, onStop, plugin, route, subscription, v, worker, type ChimpbaseContext } from "../packages/runtime/index.ts";
@@ -76,7 +80,7 @@ function createTrackedRuntime(errors: {
     },
   };
   return {
-    calls, library: createChimpbaseRuntimeLibrary(TestHost, runtime),
+    calls, runtime, library: createChimpbaseRuntimeLibrary(TestHost, runtime),
     async deliverEvents(events: ChimpbaseEventRecord[]) {
       if (!deliver) throw new Error("event bus did not start");
       await deliver(events);
@@ -85,6 +89,120 @@ function createTrackedRuntime(errors: {
 }
 
 describe("host lifecycle cleanup", () => {
+  test("library cleanup preserves the action failure when a host subclass closes synchronously", async () => {
+    const failure = new Error("action failed");
+    const cleanupFailure = new Error("synchronous cleanup failed");
+    const { calls, runtime } = createTrackedRuntime();
+    let closing: Promise<void> | undefined;
+    class SynchronousCleanupHost extends TestHost {
+      override close(): Promise<void> {
+        closing = super.close();
+        throw cleanupFailure;
+      }
+    }
+    const library = createChimpbaseRuntimeLibrary(SynchronousCleanupHost, runtime);
+    try {
+      await expect(library.runChimpbaseAppAction({ registrations: [action("fail", () => { throw failure; })] },
+        "fail", [], { storage: { engine: "memory" } })).rejects.toBe(failure);
+    } finally {
+      await closing;
+    }
+    expect(calls.storageClose).toBe(1);
+  });
+
+  for (const operation of ["project action", "app action", "workflow contract sync"] as const) {
+    test(`${operation} preserves its failure when cleanup also fails`, async () => {
+      const failure = new Error(`${operation} failed`);
+      const { calls, library } = createTrackedRuntime({ storageClose: new Error("storage cleanup failed") });
+      let sinksClosed = 0;
+      const sink = cleanupSink(() => { sinksClosed += 1; throw new Error("sink cleanup failed"); });
+      const method = spyOn(TestHost.prototype, operation === "workflow contract sync" ? "syncWorkflowContracts" : "executeAction")
+        .mockRejectedValue(failure);
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-failed-library-"));
+      await writeFile(join(projectDir, "chimpbase.app.ts"), "export default {};\n");
+      try {
+        const invoke = operation === "app action"
+          ? library.runChimpbaseAppAction({}, "fail", [], { storage: { engine: "memory" }, sinks: [sink] })
+          : operation === "project action"
+            ? library.runChimpbaseAction("fail", [], { projectDir })
+            : library.syncChimpbaseWorkflowContracts({ projectDir });
+        await expect(invoke).rejects.toBe(failure);
+        expect(calls.storageClose).toBe(1);
+        if (operation === "app action") expect(sinksClosed).toBe(1);
+      } finally {
+        method.mockRestore();
+        await rm(projectDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const engine of ["memory", "sqlite", "postgres"] as const) {
+    const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+    (engine === "postgres" && !pgUrl ? test.skip : test)(`idempotency retention uses one database call and preserves cutoff and namespace rules (${engine})`, async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-idempotency-retention-"));
+      const schema = `idempotency_${crypto.randomUUID().replaceAll("-", "")}`;
+      const pool = engine === "postgres" ? new Pool({ connectionString: pgUrl }) : undefined;
+      const scopedUrl = pgUrl ? new URL(pgUrl) : undefined;
+      await pool?.query(`CREATE SCHEMA ${schema}`);
+      scopedUrl?.searchParams.set("options", `-c search_path=${schema}`);
+      const now = Date.parse("2026-10-12T00:00:00.000Z");
+      const host = await ChimpbaseBunHost.create({
+        projectDir,
+        config: normalizeProjectConfig({
+          storage: { engine, path: "retention.db", url: scopedUrl?.href },
+          subscriptions: { idempotency: { retention: { enabled: true, maxAgeDays: 1 } } },
+        }),
+        platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+      });
+      const adapter = host.engine.getBlobsAdapter();
+      const cutoff = now - 86_400_000;
+      const prefix = "_chimpbase.sub.seen:";
+      const fixtures: [string, string, string | null, boolean][] = [
+        [`${prefix}old-iso`, new Date(cutoff - 1).toISOString(), null, false],
+        [`${prefix}old-sqlite`, "2000-01-01 00:00:00", null, false],
+        [`${prefix}old-offset`, "2026-10-11T01:59:59.999+02:00", null, false],
+        [`${prefix}cutoff`, new Date(cutoff).toISOString(), null, true],
+        [`${prefix}cutoff-offset`, "2026-10-11T02:00:00+02:00", null, true],
+        [`${prefix}recent`, new Date(cutoff + 1).toISOString(), null, true],
+        [`${prefix}expired`, "2000-01-01 00:00:00", "2000-01-01 00:00:00", true],
+        [`${prefix}future-expiry`, "2000-01-01 00:00:00", "2040-01-01 00:00:00", false],
+        ["xchimpbase.sub.seen:lookalike", "2000-01-01 00:00:00", null, true],
+        ["_CHIMPBASE.SUB.SEEN:uppercase", "2000-01-01 00:00:00", null, true],
+        ["unrelated-key", "2000-01-01 00:00:00", null, true],
+      ];
+      if (engine !== "postgres") fixtures.push([`${prefix}invalid-date`, "invalid", null, true]);
+      const query = spyOn(adapter, "query");
+      const list = spyOn(adapter, "kvList");
+      const remove = spyOn(adapter, "kvDelete");
+      try {
+        for (const [key, updatedAt, expiresAt] of fixtures) {
+          await adapter.query("INSERT INTO _chimpbase_kv (key, value_json, updated_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            [key, "true", updatedAt, expiresAt], v.object({}));
+        }
+        const cleanup = host.registry.crons.get("__chimpbase.subscription.idempotency.cleanup");
+        if (!cleanup) throw new Error("idempotency cleanup cron missing");
+        host.registerAction("cleanup", async (ctx) => await cleanup.handler(ctx, {
+          fireAt: new Date(now).toISOString(), fireAtMs: now, name: cleanup.name, schedule: cleanup.schedule,
+        }));
+        query.mockClear();
+        await host.engine.executeAction("cleanup");
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(list).not.toHaveBeenCalled();
+        expect(remove).not.toHaveBeenCalled();
+        query.mockRestore();
+        const rows = await adapter.query("SELECT key FROM _chimpbase_kv ORDER BY key", [], v.object({ key: v.string() }));
+        expect(rows.map((row) => row.key)).toEqual(fixtures.filter(([, , , keep]) => keep).map(([key]) => key).sort());
+      } finally {
+        query.mockRestore();
+        list.mockRestore();
+        remove.mockRestore();
+        await host.close();
+        await pool?.query(`DROP SCHEMA ${schema} CASCADE`);
+        await pool?.end();
+        await rm(projectDir, { recursive: true, force: true });
+      }
+    });
+  }
   test("worker registration rejects duplicate and reserved names without replacing handlers", async () => {
     const { library } = createTrackedRuntime();
     const calls: string[] = [];

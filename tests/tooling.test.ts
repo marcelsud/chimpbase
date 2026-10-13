@@ -37,6 +37,30 @@ afterEach(async () => {
 });
 
 describe("@chimpbase/tooling", () => {
+  test("TOML tables keep inherited names local to the configuration", async () => {
+    const projectDir = await createTempDir("prototype-config");
+    const prototype = Object.prototype as Record<string, unknown>;
+    expect(Object.hasOwn(prototype, "configPollution")).toBe(false);
+    try {
+      await writeFile(resolve(projectDir, "chimpbase.toml"), [
+        "[__proto__]", 'configPollution = "root"',
+        "[storage]", 'engine = "sqlite"',
+        "[storage.__proto__]", 'path = "inherited.db"',
+        "[constructor]", 'configPollution = "constructor"',
+        "[toString]", 'configPollution = "toString"',
+        "[project]", 'name = "safe"',
+      ].join("\n"));
+      const config = await loadProjectConfig(projectDir);
+      expect(({} as Record<string, unknown>).configPollution).toBeUndefined();
+      expect(config.project.name).toBe("safe");
+      expect(config.storage.path).toBeNull();
+      expect(Object.hasOwn(prototype, "path")).toBe(false);
+    } finally {
+      delete prototype.configPollution;
+      delete prototype.path;
+    }
+  });
+
   test("telemetry and subscription retention reject unsafe ages before creating a host", async () => {
     for (const enabled of [true, false]) {
       for (const maxAgeDays of [0, -1, NaN, Infinity, -Infinity, 0.5, 100_000_001, Number.MAX_SAFE_INTEGER + 1]) {

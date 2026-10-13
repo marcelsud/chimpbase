@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { syncChimpbaseWorkflowContracts } from "../packages/bun/src/library.ts";
-import type { ChimpbaseWorkflowContract } from "../packages/runtime/index.ts";
+import { defineWorkflow, describeWorkflow, type ChimpbaseWorkflowContract } from "../packages/runtime/index.ts";
+import { createChimpbaseRegistry } from "../packages/core/index.ts";
+import { syncRegisteredWorkflowContracts } from "../packages/tooling/src/workflow_contracts.ts";
 import { installLocalPackage } from "./support/local_package.ts";
 
 const runtimeRoot = resolve(import.meta.dir, "..");
@@ -17,6 +19,48 @@ afterAll(async () => {
 });
 
 describe("workflow contract sync", () => {
+  test("keeps slash and literal escape-looking workflow names in distinct snapshots", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-workflow-filenames-"));
+    cleanupDirs.push(projectDir);
+    const registry = createChimpbaseRegistry();
+    const names = ["order/a", "order_2Fa", "order%2Fa", "order/a b", "order_2Fa_20b", "customer.onboarding"];
+    for (const name of names) {
+      registry.workflows.set(name, new Map([[1, defineWorkflow({ name, version: 1, initialState: () => ({}), steps: [] })]]));
+    }
+    const result = await syncRegisteredWorkflowContracts(registry, projectDir);
+    expect(new Set(result.entries.map((entry) => entry.path)).size).toBe(names.length);
+    expect(result.entries.find((entry) => entry.contract.name === "customer.onboarding")?.path)
+      .toBe(join(result.contractsDir, "customer.onboarding.v1.contract.json"));
+    const stored = await Promise.all((await readdir(result.contractsDir)).map(async (file) =>
+      (JSON.parse(await readFile(join(result.contractsDir, file), "utf8")) as ChimpbaseWorkflowContract).name));
+    expect(stored.sort()).toEqual(names.sort());
+    expect((await syncRegisteredWorkflowContracts(registry, projectDir, { check: true })).entries)
+      .toHaveLength(names.length);
+  });
+
+  test("reuses existing legacy snapshot paths without overwriting them when a colliding name is added", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-workflow-legacy-"));
+    cleanupDirs.push(projectDir);
+    const contractsDir = join(projectDir, "workflow-contracts");
+    await mkdir(contractsDir);
+    const workflow = defineWorkflow({ name: "order/a", version: 1, initialState: () => ({}), steps: [] });
+    const legacyPath = join(contractsDir, "order_2Fa.v1.contract.json");
+    const original = `${JSON.stringify(describeWorkflow(workflow), null, 2)}\n`;
+    await writeFile(legacyPath, original);
+    const registry = createChimpbaseRegistry();
+    registry.workflows.set(workflow.name, new Map([[1, workflow]]));
+    const checked = await syncRegisteredWorkflowContracts(registry, projectDir, { check: true });
+    expect(checked.entries[0]).toMatchObject({ path: legacyPath, status: "unchanged" });
+    const added = defineWorkflow({ name: "order_2Fa", version: 1, initialState: () => ({}), steps: [] });
+    registry.workflows.set(added.name, new Map([[1, added]]));
+    const synced = await syncRegisteredWorkflowContracts(registry, projectDir);
+    expect(synced.entries.find((entry) => entry.contract.name === added.name)?.path).not.toBe(legacyPath);
+    expect(await readFile(legacyPath, "utf8")).toBe(original);
+    expect(await readdir(contractsDir)).toHaveLength(2);
+    expect((await syncRegisteredWorkflowContracts(registry, projectDir, { check: true })).entries)
+      .toHaveLength(2);
+  });
+
   test("writes workflow contracts and reuses unchanged versions in check mode", async () => {
     const projectDir = await createWorkflowFixture("sync-v1", createWorkflowIndex({
       stateSchema: `

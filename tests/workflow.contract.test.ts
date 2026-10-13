@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   compareWorkflowContracts,
+  describeWorkflow,
   versionWorkflow,
   workflowActionStep,
   workflowSleepStep,
@@ -63,6 +64,7 @@ describe("workflow contracts", () => {
     expect(first.compatibility).toBe("additive");
     expect(first.changed).toBe(true);
     expect(first.contract.hash).toBe("7690bd81f283d424");
+    expect(describeWorkflow(first.definition)).toEqual(first.contract);
     expect(first.contract.steps).toEqual([
       { action: "createCustomerRecord", id: "create-account", kind: "workflow_action" },
       { delayMs: 604_800_000, id: "wait-7-days", kind: "workflow_sleep" },
@@ -241,6 +243,36 @@ describe("workflow contracts", () => {
     expect(
       compareWorkflowContracts(first.contract, requiresMigration.contract),
     ).toBe("requires_migration");
+  });
+
+  test("rejects changed object and array constraints instead of calling them identical", () => {
+    const cases: readonly [unknown, unknown][] = [
+      [{ type: "object", properties: { name: { type: "string" } } }, { type: "object", properties: { name: { type: "string" } }, additionalProperties: false }],
+      [{ type: "object", properties: {} }, { type: "object", properties: {}, minProperties: 1 }],
+      [{ type: "object", properties: {} }, { type: "object", properties: {}, dependentRequired: { name: ["email"] } }],
+      [{ type: "object", properties: {} }, { type: "object", properties: {}, required: ["email"] }],
+      [{ type: "object", properties: {} }, { type: "object", properties: {}, enum: [{}] }],
+      [{ type: "array", items: { type: "string" } }, { type: "array", items: { type: "string" }, enum: [[]] }],
+      [{ type: "array", items: { type: "string" } }, { type: "array", items: { type: "string" }, maxItems: 1 }],
+      [{ type: "array", items: { type: "string" } }, { type: "array", items: { type: "string" }, uniqueItems: true }],
+      [{ type: "array", items: { type: "string" }, maxItems: 2 }, { type: "array", items: { type: "string" }, maxItems: 1 }],
+      [{ type: "object", properties: { name: { type: "array", items: { type: "string" } } } }, { type: "object", properties: { name: { type: "array", items: { type: "string" }, maxItems: 1 } } }],
+    ];
+    for (const [before, after] of cases) {
+      const draft = { name: "constraints", stateSchema: before, initialState: () => ({}), run: () => ({ kind: "workflow_complete" as const, state: {} }) };
+      const first = versionWorkflow(draft);
+      const next = versionWorkflow({ ...draft, stateSchema: after }, first.contract);
+      expect(next.changed).toBe(true);
+      expect(next.definition.version).toBe(2);
+      expect(next.compatibility).toBe("breaking");
+    }
+  });
+
+  test("keeps optional properties and required-property relaxation additive", () => {
+    const draft = { name: "constraints", stateSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] }, initialState: () => ({}), run: () => ({ kind: "workflow_complete" as const, state: {} }) };
+    const first = versionWorkflow(draft);
+    const next = versionWorkflow({ ...draft, stateSchema: { type: "object", properties: { name: { type: "string" }, email: { type: "string" } }, required: [] } }, first.contract);
+    expect(next.compatibility).toBe("additive");
   });
 
   test("supports imperative workflow definitions without step arrays", () => {

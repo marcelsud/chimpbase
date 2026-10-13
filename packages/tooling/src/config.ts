@@ -49,8 +49,8 @@ export async function loadProjectConfig(
     },
     storage: {
       engine: readStorageEngine(storage),
-      path: readNullableString(storage, "path"),
-      url: readNullableString(storage, "url"),
+      path: readString(storage, "path"),
+      url: readString(storage, "url"),
     },
     subscriptions: {
       dispatch: readSubscriptionDispatchMode(subscriptions, "dispatch"),
@@ -75,8 +75,8 @@ export async function loadProjectConfig(
       },
     },
     secrets: {
-      dir: readNullableString(secrets, "dir"),
-      envFile: readNullableString(secrets, "env_file"),
+      dir: readString(secrets, "dir"),
+      envFile: readString(secrets, "env_file"),
     },
     telemetry: {
       minLevel: readLogLevel(telemetry, "min_level"),
@@ -98,13 +98,13 @@ export async function loadProjectConfig(
       },
     },
     workflows: {
-      contractsDir: readNullableString(workflows, "contracts_dir"),
+      contractsDir: readString(workflows, "contracts_dir"),
     },
   });
 }
 
 function parseTomlDocument(raw: string): TomlTable {
-  const root: TomlTable = {};
+  const root: TomlTable = Object.create(null);
   let currentTable = root;
 
   for (const line of raw.split(/\r?\n/)) {
@@ -128,7 +128,7 @@ function parseTomlDocument(raw: string): TomlTable {
           continue;
         }
 
-        const nextTable: TomlTable = {};
+        const nextTable: TomlTable = Object.create(null);
         currentTable[segment] = nextTable;
         currentTable = nextTable;
       }
@@ -233,11 +233,6 @@ function readSubscriptionDispatchMode(table: TomlTable | undefined, key: string)
 }
 
 function readString(table: TomlTable | undefined, key: string): string | undefined {
-  const value = table?.[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function readNullableString(table: TomlTable | undefined, key: string): string | null | undefined {
   const value = table?.[key];
   return typeof value === "string" ? value : undefined;
 }

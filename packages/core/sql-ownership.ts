@@ -70,7 +70,7 @@ function assertRelationReferences(
   const identifier = (index: number) => tokens[index]?.startsWith('"')
     ? tokens[index]?.slice(1, -1).replaceAll('""', '"')
     : word(index);
-  const contexts = [{ expression: false, from: false, relation: false, ctes: new Set<string>() }];
+  const contexts = [{ expression: false, from: false, relation: false, writeTarget: false, ctes: new Set<string>() }];
 
   for (let index = 0; index < tokens.length; index++) {
     const context = contexts[contexts.length - 1];
@@ -84,6 +84,7 @@ function assertRelationReferences(
         expression: !query && !context.relation,
         from: context.relation && !query,
         relation: context.relation && !query,
+        writeTarget: context.writeTarget && !query,
         ctes: new Set(context.ctes),
       });
       context.relation = false;
@@ -95,6 +96,8 @@ function assertRelationReferences(
     }
     if (context.relation) {
       if (token === "only" || token === "lateral") continue;
+      if (context.writeTarget && ["temp", "temporary", "unlogged", "table"].includes(token ?? "")
+        && word(index + 1) !== ".") continue;
       if (operation === "migration" && token === "if" && word(index - 1) === "table") {
         const exists = word(index + 1) === "not" ? index + 2 : index + 1;
         if (word(exists) === "exists") {
@@ -107,7 +110,7 @@ function assertRelationReferences(
       if (first === undefined || !/^[a-z_]|^"/i.test(tokens[index] ?? "")) {
         throw new Error(`module ${moduleName} ${operation} contains an unsupported relation reference`);
       }
-      if (second === undefined && !context.ctes.has(first)) {
+      if (second === undefined && (context.writeTarget || !context.ctes.has(first))) {
         throw new Error(`module ${moduleName} ${operation} must qualify owned relations with schema ${schema}`);
       }
       if (second !== undefined && first !== schema) {
@@ -115,17 +118,21 @@ function assertRelationReferences(
       }
       if (second !== undefined) index += 2;
       context.relation = false;
+      context.writeTarget = false;
       continue;
     }
     if (token === "references" || (!context.expression && (
       token === "from" || token === "join" || token === "table"
-      || (token === "into" && word(index - 1) === "insert")
+      || token === "into"
       || (token === "update" && !["do", "for", "key"].includes(word(index - 1) ?? ""))
       || (token === "using" && word(index + 1) !== "(")
       || (token === "," && context.from)
       || (token === "on" && /^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(sql.trim()))
     ))) {
       context.relation = true;
+      context.writeTarget = token === "into" || token === "update" || token === "references"
+        || (token === "from" && word(index - 1) === "delete")
+        || (token === "table" && operation === "migration");
       if (token === "from" || token === "join" || token === "using") context.from = true;
     }
     if (/^(?:where|group|order|having|limit|offset|window|union|intersect|except|returning|for|set|;)$/.test(token ?? "")) {

@@ -20,6 +20,38 @@ const poolPrototype = Pool.prototype as unknown as {
 afterEach(() => mock.restore());
 
 describe("PostgreSQL storage startup", () => {
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("multipart finalization shares metadata writes and keeps its standalone transaction", async () => {
+    const pool = openPostgresPool(normalizeProjectConfig({ storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL } }));
+    const adapter = createPostgresEngineAdapter(pool, platform);
+    const uploadId = crypto.randomUUID();
+    const original = { bucket: uploadId, key: "target", size: 1, etag: "before", contentType: "text/plain",
+      metadata: { version: "before" }, driverRef: "before", createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z" };
+    const final = { ...original, size: 2, etag: "after", contentType: "application/json", metadata: { version: "after" },
+      driverRef: "after", createdAt: "2021-01-01T00:00:00.000Z", updatedAt: "2021-01-01T00:00:00.000Z" };
+    try {
+      await ensurePostgresInternalTables(pool);
+      await adapter.blobPutMetadata(original);
+      await adapter.blobInitUpload({ uploadId, bucket: uploadId, key: "target", contentType: null, metadata: {},
+        driverRef: "staging", createdAtMs: 0, expiresAtMs: 1 });
+      await adapter.blobRecordPart({ uploadId, partNumber: 1, size: 2, etag: "part", driverRef: "staging", createdAt: final.createdAt });
+      await expect(adapter.blobFinalizeUpload(uploadId, { ...final, updatedAt: "invalid" })).rejects.toThrow();
+      expect((await adapter.blobGetMetadata(uploadId, "target"))?.etag).toBe("before");
+      expect(await adapter.blobGetUpload(uploadId)).not.toBeNull();
+      expect(await adapter.blobListParts(uploadId)).toHaveLength(1);
+      await adapter.blobFinalizeUpload(uploadId, final);
+      const stored = await adapter.blobGetMetadata(uploadId, "target");
+      expect(stored).not.toBeNull();
+      expect(stored).toMatchObject({ ...final, createdAt: stored!.createdAt, updatedAt: stored!.updatedAt });
+      expect(Date.parse(stored!.createdAt)).toBe(Date.parse(original.createdAt));
+      expect(Date.parse(stored!.updatedAt)).toBe(Date.parse(final.updatedAt));
+      expect(await adapter.blobGetUpload(uploadId)).toBeNull();
+      expect(await adapter.blobListParts(uploadId)).toEqual([]);
+    } finally {
+      try { await adapter.blobAbortUpload(uploadId); await adapter.blobDeleteMetadata(uploadId, "target"); }
+      finally { await pool.end(); }
+    }
+  });
+
   test("normalizes bound placeholders without changing literals, quoted identifiers or comments", async () => {
     const query = spyOn(poolPrototype, "query").mockResolvedValue({ rows: [] });
     const pool = openPostgresPool(config);

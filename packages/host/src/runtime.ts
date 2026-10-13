@@ -43,7 +43,6 @@ import {
   subscription as createSubscriptionEntry,
   workflow as createWorkflowEntry,
   worker as createWorkerEntry,
-  v,
   type ChimpbaseActionHandler,
   type ChimpbaseActionRegistrationLike,
   type ChimpbaseContext,
@@ -104,7 +103,6 @@ interface WorkerLane {
   engine: ChimpbaseEngine;
   id: number;
   running: boolean;
-  serializedOperations: Promise<void>;
 }
 
 export interface StartedHost<THost, TServer> {
@@ -742,53 +740,9 @@ export class ChimpbaseHost<TServer> {
   startWorker(): WorkerHandle {
     let stopped = false;
     const shutdown = new AbortController();
-    if (!this.supportsConcurrentWorkers) {
-      let running = false;
-      const activeTicks = new Set<Promise<void>>();
-
-      const tick = async () => {
-        if (running || stopped) {
-          return;
-        }
-
-        running = true;
-        try {
-          while (!stopped) {
-            const outcome = await this.drain({ maxRuns: 1 }, shutdown.signal);
-            if (outcome.idle) {
-              break;
-            }
-          }
-        } catch (error) {
-          console.error(`[${this.runtime.debugNamespace}][worker]`, error);
-        } finally {
-          running = false;
-        }
-      };
-
-      const scheduleTick = () => {
-        const runningTick = tick().finally(() => {
-          activeTicks.delete(runningTick);
-        });
-        activeTicks.add(runningTick);
-      };
-
-      scheduleTick();
-      const interval = setInterval(() => {
-        scheduleTick();
-      }, this.config.worker.pollIntervalMs);
-
-      return {
-        async stop() {
-          stopped = true;
-          clearInterval(interval);
-          shutdown.abort();
-          await Promise.allSettled([...activeTicks]);
-        },
-      };
-    }
-
-    const lanes = this.createWorkerLanes();
+    const lanes = this.supportsConcurrentWorkers
+      ? this.createWorkerLanes()
+      : [{ engine: this.engine, id: 1, running: false }];
     const activeTicks = new Set<Promise<void>>();
     const tickLane = async (lane: WorkerLane) => {
       if (lane.running || stopped) {
@@ -798,26 +752,30 @@ export class ChimpbaseHost<TServer> {
       lane.running = true;
       try {
         while (!stopped) {
-          const outcome = await this.runWorkerLaneOperation(lane, async () => {
+          let idle: boolean;
+          if (this.supportsConcurrentWorkers) {
             await this.syncCronSchedulesIfNeeded();
             const scheduled = await lane.engine.processNextCronSchedule();
             const queueJobs = await lane.engine.processNextQueueJobs(this.getWorkerQueueBatchSize(), shutdown.signal);
-            return {
+            const outcome = {
               cronSchedules: (scheduled !== null) ? 1 : 0,
               idle: !(scheduled !== null) && queueJobs.length === 0,
               queueJobs: queueJobs.length,
               runs: ((scheduled !== null) ? 1 : 0) + queueJobs.length,
               stopReason: !(scheduled !== null) && queueJobs.length === 0 ? "idle" : "max_runs",
             } satisfies DrainResult;
-          });
-          this.debug("worker drain completed", {
-            cronSchedules: outcome.cronSchedules,
-            lane: lane.id,
-            queueJobs: outcome.queueJobs,
-            runs: outcome.runs,
-            stopReason: outcome.stopReason,
-          });
-          if (outcome.idle) {
+            this.debug("worker drain completed", {
+              cronSchedules: outcome.cronSchedules,
+              lane: lane.id,
+              queueJobs: outcome.queueJobs,
+              runs: outcome.runs,
+              stopReason: outcome.stopReason,
+            });
+            idle = outcome.idle;
+          } else {
+            idle = (await this.drain({ maxRuns: 1 }, shutdown.signal)).idle;
+          }
+          if (idle) {
             break;
           }
         }
@@ -985,7 +943,6 @@ export class ChimpbaseHost<TServer> {
       engine: this.createWorkerEngine(),
       id: index + 1,
       running: false,
-      serializedOperations: Promise.resolve(),
     }));
   }
 
@@ -1008,15 +965,6 @@ export class ChimpbaseHost<TServer> {
     }
 
     return POSTGRES_WORKER_QUEUE_BATCH_SIZE;
-  }
-
-  private async runWorkerLaneOperation<TResult>(lane: WorkerLane, operation: () => Promise<TResult>): Promise<TResult> {
-    const queued = lane.serializedOperations
-      .catch(() => undefined)
-      .then(operation);
-
-    lane.serializedOperations = queued.then(() => undefined, () => undefined);
-    return await queued;
   }
 
   private debug(message: string, details?: Record<string, unknown>): void {
@@ -1357,20 +1305,15 @@ function registerInternalCleanupCrons<TServer>(
       "__chimpbase.subscription.idempotency.cleanup",
       config.subscriptions.idempotency.retention.schedule,
       async (ctx) => {
-        const cutoffMs = platform.now() - config.subscriptions.idempotency.retention.maxAgeDays * 86_400_000;
-        const keys = await ctx.kv.list({ prefix: IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX });
-
-        for (const key of keys) {
-          const [row] = await ctx.db.query(
-            "SELECT updated_at FROM _chimpbase_kv WHERE key = ?1 LIMIT 1",
-            [key],
-            v.object({ updated_at: v.unknown() }),
-          );
-          const updatedAtMs = parseDatabaseTimestampMs(row?.updated_at);
-          if (updatedAtMs !== null && updatedAtMs < cutoffMs) {
-            await ctx.kv.delete(key);
-          }
-        }
+        const cutoff = new Date(platform.now() - config.subscriptions.idempotency.retention.maxAgeDays * 86_400_000).toISOString();
+        await ctx.db.query(
+          `DELETE FROM _chimpbase_kv WHERE substr(key, 1, length(?1)) = ?1 AND ${
+            config.storage.engine === "postgres"
+              ? "updated_at < ?2 AND (expires_at IS NULL OR expires_at > clock_timestamp())"
+              : "julianday(updated_at) < julianday(?2) AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))"
+          }`,
+          [IDEMPOTENT_SUBSCRIPTION_MARKER_PREFIX, cutoff],
+        );
       },
     );
     host.setTelemetryOverride("cron:__chimpbase.subscription.idempotency.cleanup", false);
@@ -1402,24 +1345,6 @@ function normalizeActionExecutionArgs(args: unknown[] | unknown): unknown[] {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseDatabaseTimestampMs(value: unknown): number | null {
-  if (value instanceof Date) {
-    const ms = value.getTime();
-    return Number.isFinite(ms) ? ms : null;
-  }
-
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const normalized = value.includes("T") ? value : value.replace(" ", "T");
-  const withTimezone = /[zZ]|[+-]\d{2}(?::?\d{2})?$/.test(normalized)
-    ? normalized
-    : `${normalized}Z`;
-  const parsed = Date.parse(withTimezone);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function isTruthyEnv(value: string | undefined): boolean {
