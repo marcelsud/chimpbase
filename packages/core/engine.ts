@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import type { CompiledQuery, Kysely, QueryResult } from "kysely";
 
 import type {
   ChimpbaseActionInvoker,
@@ -81,6 +81,7 @@ import {
   chimpbaseModuleSchemaName,
 } from "./modules.ts";
 import { assertChimpbaseModuleRuntimeSql } from "./sql-ownership.ts";
+import type { ChimpbaseKyselyExecutor } from "./sqlite-kysely.ts";
 import type { ChimpbaseRegistry, ChimpbaseSubscriptionEntry, ChimpbaseTelemetryPersistOverride } from "./index.ts";
 
 export interface ChimpbaseExecutionScope {
@@ -394,7 +395,7 @@ export interface ChimpbaseEngineAdapter {
     errorMessage: string,
   ): Promise<void>;
   persistEvents(events: ChimpbaseEventRecord[]): Promise<void>;
-  createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase>;
+  createKysely<TDatabase = Record<string, never>>(schema?: string, executor?: ChimpbaseKyselyExecutor): Kysely<TDatabase>;
   query<T>(sql: string, params: readonly unknown[], validator: ChimpbaseValidator<T>): Promise<T[]>;
   queueEnqueue<TPayload = unknown>(
     name: string,
@@ -1605,7 +1606,14 @@ export class ChimpbaseEngine {
         schema,
         query,
         kysely: <TDatabase = Record<string, never>>() =>
-          this.adapter.createKysely<TDatabase>(schema ?? undefined),
+          this.adapter.createKysely<TDatabase>(schema ?? undefined, {
+            executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+              return queryAdapter().createKysely<TDatabase>(schema ?? undefined).executeQuery<R>(compiledQuery);
+            },
+            async *streamQuery<R>(compiledQuery: CompiledQuery, chunkSize: number): AsyncIterableIterator<QueryResult<R>> {
+              yield* queryAdapter().createKysely<TDatabase>(schema ?? undefined).getExecutor().stream<R>(compiledQuery, chunkSize);
+            },
+          }),
       },
       pubsub: {
         publish: (topic: string, payload: unknown) => {

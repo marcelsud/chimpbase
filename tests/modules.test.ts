@@ -336,6 +336,47 @@ describe("business modules", () => {
     ]) expect(() => assertChimpbaseModuleMigrationSql("left", "chimpbase_left", sql)).toThrow();
   });
 
+  test("module SQL follows CTE declaration order and recursive visibility", () => {
+    const check = (sql: string) => assertChimpbaseModuleRuntimeSql("left", "chimpbase_left", sql);
+    for (const sql of [
+      "WITH _chimpbase_kv AS (SELECT * FROM _chimpbase_kv) SELECT * FROM _chimpbase_kv",
+      'WITH "_chimpbase_kv" AS NOT MATERIALIZED (SELECT * FROM "_chimpbase_kv") SELECT * FROM "_chimpbase_kv"',
+      "WITH first AS (SELECT * FROM _chimpbase_kv), _chimpbase_kv AS (SELECT 1) SELECT * FROM first",
+      "WITH first AS (SELECT * FROM _chimpbase_kv), second AS (SELECT 1), _chimpbase_kv AS (SELECT 1) SELECT * FROM first",
+      "WITH outer_cte AS (WITH inner_cte AS (SELECT * FROM outer_cte) SELECT * FROM inner_cte) SELECT * FROM outer_cte",
+      "WITH owned AS (SELECT 1) SELECT * FROM (WITH _chimpbase_kv AS (SELECT * FROM _chimpbase_kv) SELECT * FROM _chimpbase_kv) nested",
+    ]) expect(() => check(sql)).toThrow("must qualify owned relations");
+    for (const sql of [
+      "WITH first AS (SELECT * FROM chimpbase_left.items), second AS (SELECT * FROM first) SELECT * FROM second",
+      'WITH "owned"(id) AS NOT MATERIALIZED (SELECT id FROM chimpbase_left.items), later AS (SELECT * FROM "owned") SELECT * FROM later',
+      "WITH RECURSIVE counter(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM counter WHERE id < 3) SELECT * FROM counter",
+      "WITH RECURSIVE first AS (SELECT * FROM later), later AS (SELECT id FROM chimpbase_left.items) SELECT * FROM first",
+      "WITH outer_cte AS (WITH _chimpbase_kv AS (SELECT 1) SELECT * FROM _chimpbase_kv) SELECT * FROM outer_cte",
+      "WITH owned AS (SELECT 1), nested AS (WITH owned AS (SELECT * FROM owned) SELECT * FROM owned) SELECT * FROM nested",
+      "WITH _chimpbase_kv AS (SELECT 1 AS id), nested AS (WITH _chimpbase_kv AS (SELECT id FROM _chimpbase_kv) SELECT * FROM _chimpbase_kv) SELECT * FROM nested",
+    ]) expect(() => check(sql)).not.toThrow();
+  });
+
+  test("module migrations keep objects in their owned schema", () => {
+    const check = (sql: string) => assertChimpbaseModuleMigrationSql("left", "chimpbase_left", sql);
+    for (const sql of [
+      "ALTER TABLE chimpbase_left.items SET SCHEMA public",
+      'ALTER TABLE chimpbase_left.items SET /* destination */ SCHEMA "public"',
+      "ALTER VIEW chimpbase_left.items SET SCHEMA archive",
+      'ALTER SEQUENCE chimpbase_left.ids SET SCHEMA "Archive"',
+      "ALTER TABLE chimpbase_left.items SET SCHEMA chimpbase_right",
+      'ALTER TABLE chimpbase_left.items SET SCHEMA "Chimpbase_Left"',
+    ]) expect(() => check(sql)).toThrow();
+    for (const sql of [
+      "ALTER TABLE chimpbase_left.items SET SCHEMA chimpbase_left",
+      'ALTER TABLE chimpbase_left.items SET SCHEMA "chimpbase_left"',
+      "ALTER TABLE chimpbase_left.items ALTER COLUMN label SET DEFAULT 'SET SCHEMA public'",
+      "ALTER TABLE chimpbase_left.items ALTER COLUMN label SET DEFAULT $$SET SCHEMA public$$",
+      "ALTER TABLE chimpbase_left.items ADD COLUMN label text /* SET SCHEMA public */",
+      "UPDATE chimpbase_left.items SET schema = 'public'",
+    ]) expect(() => check(sql)).not.toThrow();
+  });
+
   test("a module cannot read framework KV through a comma join in its public call", async () => {
     const guarded = defineChimpbaseModuleInterface({
       name: "sqlguard", version: 1, events: {},
@@ -407,11 +448,23 @@ describe("business modules", () => {
       expect((await host.executeAction(guarded.calls.read.id, {})).result).toEqual([{ year: 2026 }]);
       await expect(host.executeAction(guarded.calls.leak.id, {})).rejects.toThrow("must qualify owned relations");
       expect((await host.executeAction(guarded.calls.tableRead.id, {})).result).toEqual([{ id: 1 }]);
+      expect((await host.executeAction(guarded.calls.leakTable.id,
+        `WITH first AS (SELECT id FROM chimpbase_sqlguard.${table}), second AS (SELECT * FROM first) SELECT id FROM second`,
+      )).result).toEqual([{ id: 1 }]);
+      expect((await host.executeAction(guarded.calls.leakTable.id,
+        "WITH RECURSIVE counter(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM counter WHERE id < 3) SELECT id FROM counter ORDER BY id",
+      )).result).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+      expect((await host.executeAction(guarded.calls.leakTable.id,
+        `WITH RECURSIVE first AS (SELECT id FROM later), later AS (SELECT id FROM chimpbase_sqlguard.${table}) SELECT id FROM first`,
+      )).result).toEqual([{ id: 1 }]);
       await host.executeAction(guarded.calls.leakTable.id,
         `SELECT id INTO TABLE chimpbase_sqlguard.${copyTable} FROM chimpbase_sqlguard.${table}`);
       expect((await host.executeAction(guarded.calls.leakTable.id, `SELECT id FROM chimpbase_sqlguard.${copyTable}`)).result)
         .toEqual([{ id: 1 }]);
       for (const sql of [
+        "WITH _chimpbase_kv AS (SELECT * FROM _chimpbase_kv) SELECT key, value_json FROM _chimpbase_kv",
+        "WITH first AS (SELECT * FROM _chimpbase_kv), _chimpbase_kv AS (SELECT 1) SELECT key, value_json FROM first",
+        'WITH "_chimpbase_kv" AS NOT MATERIALIZED (SELECT * FROM "_chimpbase_kv") SELECT key, value_json FROM "_chimpbase_kv"',
         "WITH owned AS (TABLE _chimpbase_kv) SELECT key, value_json FROM owned",
         "SELECT key, value_json FROM chimpbase_sqlguard.sqlguard_missing UNION TABLE _chimpbase_kv",
         "SELECT 1 WHERE EXISTS (TABLE _chimpbase_kv)",
@@ -428,6 +481,23 @@ describe("business modules", () => {
       try { await host.executeAction("cleanupSqlGuard"); }
       finally { await host.close(); }
     }
+  });
+
+  (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("PostgreSQL module migration cannot move an owned table to public", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+    const guarded = defineChimpbaseModuleInterface({ name: `migration-${suffix}`, version: 1, calls: {}, events: {} });
+    const schema = `chimpbase_migration_${suffix}`;
+    await expect(createChimpbase({
+      storage: { engine: "postgres", url: process.env.CHIMPBASE_TEST_PG_URL },
+      modules: [defineChimpbaseModuleImplementation({
+        interface: guarded,
+        calls: {},
+        migrations: { postgres: [{
+          name: "move-items",
+          sql: `CREATE TABLE ${schema}.items(id integer); ALTER TABLE ${schema}.items SET SCHEMA public`,
+        }] },
+      })],
+    })).rejects.toThrow("cannot move objects to schema public");
   });
 
   test("validates calls and events and enforces public, internal, and dependency guards", async () => {

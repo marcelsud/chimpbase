@@ -139,6 +139,57 @@ test("SQLite internal upgrades propagate failures and can retry without losing K
   } finally { db.close(); }
 });
 
+test("named SQLite migrations reject transaction control without committing pending work", () => {
+  const db = new Database(":memory:");
+  try {
+    applySqliteMigrations(db, [{ name: "initial", sql: "CREATE TABLE migrated_items (value TEXT)" }]);
+    for (const transaction of [
+      "BEGIN", "BEGIN IMMEDIATE", "COMMIT", "END TRANSACTION", "ROLLBACK", "SAVEPOINT user_savepoint", "RELEASE user_savepoint",
+      "/* /* */ COMMIT; -- */\nINSERT INTO migrated_items VALUES ('escaped')",
+      "SELECT $value$; COMMIT; -- $value$",
+      "SELECT e'\\' FROM (SELECT 1 AS e); COMMIT; -- '",
+    ]) {
+      expect(() => applySqliteMigrations(db, [
+        { name: "pending", sql: "INSERT INTO migrated_items VALUES ('pending')" },
+        { name: "escape", sql: `-- comment\nINSERT INTO migrated_items VALUES ('escape'); /* comment */ ${transaction};` },
+        { name: "failure", sql: "INSERT INTO missing_table VALUES (1)" },
+      ])).toThrow("cannot control the migration transaction");
+      expect(db.inTransaction).toBe(false);
+      expect(db.query("SELECT * FROM migrated_items").all()).toEqual([]);
+      expect(db.query("SELECT name FROM _chimpbase_migrations").all()).toEqual([{ name: "initial" }]);
+    }
+  } finally { db.close(); }
+});
+
+test("named SQLite migrations allow trigger bodies and preserve errors from automatic rollback", () => {
+  const db = new Database(":memory:");
+  try {
+    applySqliteMigrations(db, [{ name: "initial", sql: `
+      CREATE TABLE migrated_items (value TEXT);
+      CREATE TABLE \`quoted'; COMMIT\` ([quoted'; END] TEXT);
+      CREATE TRIGGER reject_insert BEFORE INSERT ON migrated_items BEGIN
+        SELECT CASE WHEN NEW.value = 'rejected' THEN RAISE(ROLLBACK, 'migration rejected by trigger') END;
+        SELECT '; COMMIT; END;';
+      END;
+      INSERT INTO migrated_items VALUES ('initial');
+    ` }]);
+    expect(() => applySqliteMigrations(db, [
+      { name: "update", sql: "UPDATE migrated_items SET value = 'pending'" },
+      { name: "rejected", sql: "INSERT INTO migrated_items VALUES ('rejected')" },
+    ])).toThrow("migration rejected by trigger");
+    expect(db.inTransaction).toBe(false);
+    expect(db.query("SELECT * FROM migrated_items").all()).toEqual([{ value: "initial" }]);
+    expect(db.query("SELECT name FROM _chimpbase_migrations").all()).toEqual([{ name: "initial" }]);
+    applySqliteMigrations(db, [{ name: "retry", sql: "INSERT INTO migrated_items VALUES ('retry')" }]);
+    expect(db.query("SELECT * FROM migrated_items").all()).toEqual([{ value: "initial" }, { value: "retry" }]);
+    expect(() => applySqliteMigrations(db, [{ name: "trigger_escape", sql: `
+      CREATE TRIGGER harmless AFTER INSERT ON migrated_items BEGIN SELECT 1; END;
+      COMMIT;
+    ` }])).toThrow("cannot control the migration transaction");
+    expect(db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'harmless'").all()).toEqual([]);
+  } finally { db.close(); }
+});
+
 test("named SQLite migrations run once, apply new names and roll back failed batches", () => {
   const db = new Database(":memory:");
   const initial = { name: "001_create", sql: "CREATE TABLE migrated_items (value TEXT)" };

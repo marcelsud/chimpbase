@@ -55,6 +55,9 @@ function createSqliteDatabase(db: DatabaseSync): SqliteDatabase {
         all(...params: unknown[]) {
           return statement.all(...toNodeSqlBindings(params));
         },
+        iterate(...params: unknown[]) {
+          return statement.iterate(...toNodeSqlBindings(params));
+        },
         run(...params: unknown[]) {
           const result = statement.run(...toNodeSqlBindings(params));
           return {

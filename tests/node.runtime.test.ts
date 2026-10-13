@@ -76,7 +76,7 @@ describe("chimpbase-node runtime", () => {
       [
         `import { createChimpbase } from "${nodeLibraryPath}";`,
         `import { ChimpbaseNodeHost, nodeRuntimeShim } from ${JSON.stringify(nodeRuntimePath)};`,
-        `import { normalizeProjectConfig } from ${JSON.stringify(corePath)};`,
+        `import { normalizeProjectConfig, createSqliteEngineAdapter, createDefaultChimpbasePlatformShim } from ${JSON.stringify(corePath)};`,
         'import assert from "node:assert/strict";',
         'import { DatabaseSync } from "node:sqlite";',
         'import { once } from "node:events";',
@@ -278,6 +278,30 @@ finally { await startedReady.stop(); await readyHost.close(); }`,
         "    const rows = []; for await (const row of sqliteKysely.selectFrom(\"kysely_items\").selectAll().orderBy(\"id\").stream(chunkSize)) rows.push({ ...row });",
         "    assert.deepEqual(rows, expectedRows);",
         "  }",
+        "  for (const chunkSize of [NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(sqliteKysely.selectFrom(\"kysely_items\").selectAll().stream(chunkSize).next(), /finite safe integer/);",
+        `  const nativeStreamDb = new DatabaseSync(":memory:");
+  let nativeReadCount = 0;
+  nativeStreamDb.function("count_read", (id) => { nativeReadCount++; return id; });
+  nativeStreamDb.exec("CREATE TABLE large_stream (id integer); WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id + 1 FROM n WHERE id < 10000) INSERT INTO large_stream SELECT id FROM n");
+  const boundedStreamDb = createSqliteEngineAdapter({
+    exec(sql) { return nativeStreamDb.exec(sql); },
+    query(sql) {
+      const statement = nativeStreamDb.prepare(sql);
+      return {
+        reader: statement.columns().length > 0,
+        all() { throw new Error("streaming must not materialize all rows"); },
+        run(...params) { return statement.run(...params); },
+        iterate(...params) { return statement.iterate(...params); },
+      };
+    },
+  }, createDefaultChimpbasePlatformShim()).createKysely();
+  try {
+    for await (const row of boundedStreamDb.selectFrom("large_stream").select(boundedStreamDb.fn("count_read", ["id"]).as("id")).stream(2)) {
+      assert.equal(row.id, 1); assert.equal(nativeReadCount, 2); break;
+    }
+    assert.equal(nativeReadCount, 2);
+    nativeStreamDb.exec("DROP TABLE large_stream");
+  } finally { await boundedStreamDb.destroy(); nativeStreamDb.close(); }`,
         "  await assert.rejects(sqliteKysely.transaction().execute(async () => {}), /runtime-managed transactions/);",
         "  await sqliteKysely.destroy();",
         "} finally { await kvHost.close(); }",

@@ -14,6 +14,7 @@ import {
 
 export interface ChimpbaseKyselyExecutor {
   executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>>;
+  streamQuery<R>(compiledQuery: CompiledQuery, chunkSize: number): AsyncIterableIterator<QueryResult<R>>;
 }
 
 class ChimpbaseKyselyConnection implements DatabaseConnection {
@@ -24,19 +25,10 @@ class ChimpbaseKyselyConnection implements DatabaseConnection {
   }
 
   async *streamQuery<R>(compiledQuery: CompiledQuery, chunkSize = 100): AsyncIterableIterator<QueryResult<R>> {
-    const result = await this.executeQuery<R>(compiledQuery);
-
-    if (chunkSize <= 0 || result.rows.length <= chunkSize) {
-      yield result;
-      return;
+    if (!Number.isSafeInteger(chunkSize)) {
+      throw new RangeError("Kysely stream chunk size must be a finite safe integer");
     }
-
-    for (let index = 0; index < result.rows.length; index += chunkSize) {
-      yield {
-        ...result,
-        rows: result.rows.slice(index, index + chunkSize),
-      };
-    }
+    yield* this.executor.streamQuery<R>(compiledQuery, chunkSize <= 0 ? 100 : chunkSize);
   }
 }
 

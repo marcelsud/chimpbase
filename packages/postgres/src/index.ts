@@ -1,5 +1,5 @@
-import type { CompiledQuery, Kysely, QueryResult } from "kysely";
-import { Pool, type PoolClient, type QueryResultRow } from "pg";
+import { DeleteQueryNode, InsertQueryNode, UpdateQueryNode, type CompiledQuery, type Kysely, type QueryResult } from "kysely";
+import { escapeIdentifier, escapeLiteral, Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import type {
   ChimpbaseBlobListMetaResult,
@@ -8,6 +8,7 @@ import type {
   ChimpbaseBlobUploadListMetaResult,
   ChimpbaseBlobUploadRow,
   ChimpbaseEngineAdapter,
+  ChimpbaseKyselyExecutor,
   ChimpbaseEventRecord,
   ChimpbaseMigration,
   ChimpbasePlatformShim,
@@ -982,8 +983,8 @@ export function createPostgresEngineAdapter(
         [status, nextAvailableAtMs, errorMessage, jobId],
       );
     },
-    createKysely<TDatabase = Record<string, never>>(schema?: string): Kysely<TDatabase> {
-      const database = createPostgresKysely<TDatabase>({
+    createKysely<TDatabase = Record<string, never>>(schema?: string, executor?: ChimpbaseKyselyExecutor): Kysely<TDatabase> {
+      const database = createPostgresKysely<TDatabase>(executor ?? {
         async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
           if (schema !== undefined) assertChimpbaseModuleCompiledSql(schema, compiledQuery.sql);
           const result = await queryable().query<Record<string, unknown>>(
@@ -995,6 +996,86 @@ export function createPostgresEngineAdapter(
             numAffectedRows: result.rowCount == null ? undefined : BigInt(result.rowCount),
             rows: parseKyselyRows<R>(result.rows),
           };
+        },
+        async *streamQuery<R>(compiledQuery: CompiledQuery, chunkSize: number): AsyncIterableIterator<QueryResult<R>> {
+          if (schema !== undefined) assertChimpbaseModuleCompiledSql(schema, compiledQuery.sql);
+          if (failedTransaction !== null) throw failedTransaction.error;
+          const activeTransaction = transactionClient;
+          const client = activeTransaction ?? await pool.connect();
+          let failure: { error: unknown } | null = null;
+          const fail = (error: unknown) => {
+            if (failure !== null) return;
+            failure = { error };
+            if (activeTransaction === null) {
+              client.removeListener("error", fail);
+              client.release(true);
+            } else if (transactionClient === activeTransaction) {
+              failTransaction(error);
+            }
+          };
+          const run = async (sql: string, params?: unknown[]) => {
+            if (failure !== null) throw failure.error;
+            if (activeTransaction !== null && transactionClient !== activeTransaction) {
+              throw new Error("PostgreSQL transaction is not active");
+            }
+            return await (activeTransaction === null ? client : transactionQueryable).query<Record<string, unknown>>(sql, params);
+          };
+          const name = `chimpbase_stream_${platform.randomUUID().replaceAll("-", "")}`;
+          const cursor = escapeIdentifier(name);
+          let cursorOpen = false;
+          client.on("error", fail);
+          try {
+            if (activeTransaction === null) await run("BEGIN");
+            const query = compiledQuery.query;
+            const isWrite = InsertQueryNode.is(query) || UpdateQueryNode.is(query) || DeleteQueryNode.is(query);
+            if (isWrite && query.returning === undefined) {
+              const result = await run(compiledQuery.sql, [...compiledQuery.parameters]);
+              yield { rows: parseKyselyRows<R>(result.rows), numAffectedRows: result.rowCount == null ? undefined : BigInt(result.rowCount) };
+            } else {
+              let using = "";
+              if (compiledQuery.parameters.length > 0) {
+                const preparedName = `${name}_params`;
+                const prepared = escapeIdentifier(preparedName);
+                await run(`PREPARE ${prepared} AS ${compiledQuery.sql}`);
+                try {
+                  const metadata = await run("SELECT parameter_types::text[] AS types FROM pg_prepared_statements WHERE name = $1", [preparedName]);
+                  const types = v.string().array().parse(metadata.rows[0]?.types, "stream parameter types");
+                  const quoted = await run(`SELECT ${types.map((type, index) => `quote_nullable($${index + 1}::${type}) AS param_${index}`).join(", ")}`, [...compiledQuery.parameters]);
+                  using = ` USING ${types.map((type, index) => `${v.string().parse(quoted.rows[0]?.[`param_${index}`])}::${type}`).join(", ")}`;
+                } finally {
+                  await run(`DEALLOCATE ${prepared}`);
+                }
+              }
+              // SPI supports write cursors; DECLARE accepts only read queries.
+              const body = `DECLARE stream_cursor refcursor := ${escapeLiteral(name)}; BEGIN OPEN stream_cursor NO SCROLL FOR EXECUTE ${escapeLiteral(compiledQuery.sql)}${using}; END`;
+              await run(`DO ${escapeLiteral(body)}`);
+              cursorOpen = true;
+              const batchSize = Math.min(chunkSize, 2_147_483_647);
+              let rowCount = 0n;
+              while (true) {
+                const result = await run(`FETCH FORWARD ${batchSize} FROM ${cursor}`);
+                rowCount += BigInt(result.rows.length);
+                yield { rows: parseKyselyRows<R>(result.rows), numAffectedRows: result.rows.length < batchSize ? rowCount : undefined };
+                if (result.rows.length < batchSize) break;
+              }
+            }
+          } catch (error) {
+            fail(error);
+            throw error;
+          } finally {
+            try {
+              if (failure === null) {
+                if (cursorOpen) await run(`CLOSE ${cursor}`);
+                if (activeTransaction === null) await run("COMMIT");
+              }
+            } catch (error) {
+              fail(error);
+              throw error;
+            } finally {
+              client.removeListener("error", fail);
+              if (activeTransaction === null && failure === null) client.release();
+            }
+          }
         },
       });
       return schema === undefined ? database : database.withSchema(schema);

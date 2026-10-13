@@ -12,7 +12,7 @@ import type {
   ChimpbaseQueueJobRecord,
 } from "./engine.ts";
 import { ChimpbasePreconditionFailedError, createChimpbaseEventDeliveryPayloads, paginateChimpbaseBlobMetadata } from "./engine.ts";
-import { createSqliteKysely } from "./sqlite-kysely.ts";
+import { createSqliteKysely, type ChimpbaseKyselyExecutor } from "./sqlite-kysely.ts";
 import { assertWorkerInteger, type ChimpbasePlatformShim } from "./host.ts";
 import type {
   ChimpbaseBlobListOptions,
@@ -35,6 +35,7 @@ import { isArrayValue, isJsonObject, parseJson, parseJsonObject, parseStringReco
 export interface ChimpbaseSqliteStatement {
   readonly reader: boolean;
   all(...params: unknown[]): unknown[];
+  iterate(...params: unknown[]): IterableIterator<unknown>;
   run(...params: unknown[]): { changes: number; lastInsertRowid?: bigint | number };
 }
 
@@ -595,8 +596,8 @@ export function createSqliteEngineAdapter(
         `,
       ).run(status, nextAvailableAtMs, errorMessage, jobId);
     },
-    createKysely<TDatabase = Record<string, never>>(): Kysely<TDatabase> {
-      return createSqliteKysely<TDatabase>({
+    createKysely<TDatabase = Record<string, never>>(_schema?: string, executor?: ChimpbaseKyselyExecutor): Kysely<TDatabase> {
+      return createSqliteKysely<TDatabase>(executor ?? {
         executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
           const statement = db.query(compiledQuery.sql);
 
@@ -613,6 +614,27 @@ export function createSqliteEngineAdapter(
             numAffectedRows: BigInt(result.changes),
             rows: [],
           });
+        },
+        async *streamQuery<R>(compiledQuery: CompiledQuery, chunkSize: number): AsyncIterableIterator<QueryResult<R>> {
+          const statement = db.query(compiledQuery.sql);
+          if (!statement.reader) {
+            const result = statement.run(...compiledQuery.parameters);
+            yield {
+              insertId: result.lastInsertRowid === undefined ? undefined : BigInt(result.lastInsertRowid),
+              numAffectedRows: BigInt(result.changes),
+              rows: [],
+            };
+            return;
+          }
+          let rows: unknown[] = [];
+          for (const row of statement.iterate(...compiledQuery.parameters)) {
+            rows.push(row);
+            if (rows.length === chunkSize) {
+              yield { rows: parseKyselyRows<R>(rows) };
+              rows = [];
+            }
+          }
+          if (rows.length > 0) yield { rows: parseKyselyRows<R>(rows) };
         },
       });
     },

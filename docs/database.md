@@ -71,6 +71,12 @@ const order = await db
   .executeTakeFirst();
 ```
 
+Kysely `stream(chunkSize)` reads incrementally through SQLite statement iterators and
+PostgreSQL cursors. Chunk size must be a finite safe integer; zero and negative values use
+the default batch of 100. Breaking out of iteration closes the iterator or cursor and
+releases any connection owned by the stream. PostgreSQL streams inside an action use its
+existing transaction, including `INSERT`, `UPDATE`, and `DELETE` queries with `RETURNING`.
+
 ## Migrations
 
 Define migrations in your app:
@@ -114,6 +120,9 @@ Named migrations run automatically on startup and are recorded in `_chimpbase_mi
 Each name runs once; add a new name for subsequent changes. Pending migrations and their
 history records run in one transaction, so a failed batch is rolled back and can be retried.
 PostgreSQL startup also locks migration execution across hosts.
+SQLite named migrations cannot contain transaction-control statements (`BEGIN`, `COMMIT`,
+`END`, `ROLLBACK`, `SAVEPOINT`, or `RELEASE`); the runner owns the transaction. Trigger bodies
+may still use their required `BEGIN` and `END` delimiters.
 
 Databases created before migration history was introduced need their already applied names
 recorded before restarting with non-idempotent migrations. Anonymous `migrationsSql` statements
