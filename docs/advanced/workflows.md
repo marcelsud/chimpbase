@@ -132,6 +132,8 @@ Pauses until an external signal arrives (or times out):
 
 `onTimeout: "fail"` makes the instance terminal in both authoring styles. A late signal cannot resume it. A payload type on `workflowWaitForSignalStep<Input, State, Payload>()` or `wf.waitForSignal<Payload>()` checks the callback at compile time; validate external payloads in `onSignal` with a validator such as `v.object(...)`.
 
+For a suspended wait, the signal's receipt time determines whether it meets the saved deadline. A signal received strictly before the deadline remains valid even if the worker processes it later. A signal received at or after the deadline follows `onTimeout`. Both authoring styles record receipt in milliseconds using the host platform clock, so workers sharing a database must use synchronized clocks. Existing databases are upgraded automatically; historical signals use their stored `created_at` timestamp, which has only second precision in SQLite.
+
 ## Starting Workflows
 
 ```ts

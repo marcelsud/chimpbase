@@ -987,6 +987,10 @@ function findCollectionDocuments(
   filter: ChimpbaseCollectionFilter = {},
   options?: ChimpbaseCollectionFindOptions,
 ): PersistedCollectionDocument[] {
+  const limit = options?.limit;
+  const sqlLimit = typeof limit === "number" && Number.isFinite(limit)
+    && limit > 0 && limit <= Number.MAX_SAFE_INTEGER && Object.keys(filter).length === 0
+    ? Math.trunc(limit) : undefined;
   const rows = parseRows(db.query(
     `
       SELECT
@@ -995,14 +999,14 @@ function findCollectionDocuments(
       FROM _chimpbase_collections
       WHERE collection_name = ?1
       ORDER BY document_id ASC
+      ${sqlLimit === undefined ? "" : "LIMIT ?2"}
     `,
-  ).all(name), collectionDocumentRowValidator, "collection document rows");
+  ).all(...(sqlLimit === undefined ? [name] : [name, sqlLimit])), collectionDocumentRowValidator, "collection document rows");
 
   const matched = rows.filter((row) => {
     const document = parseJsonObject(row.document_json, "collection document");
     return Object.entries(filter).every(([key, value]) => document[key] === value);
   });
 
-  const limit = options?.limit;
   return typeof limit === "number" ? matched.slice(0, limit) : matched;
 }

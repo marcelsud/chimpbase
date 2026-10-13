@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 import { createDefaultChimpbasePlatformShim, normalizeProjectConfig } from "../packages/core/index.ts";
-import { applyPostgresSqlMigrations } from "../packages/postgres/src/index.ts";
+import { applyPostgresSqlMigrations, ensurePostgresInternalTables } from "../packages/postgres/src/index.ts";
 import {
   action,
   cron,
@@ -13,6 +13,7 @@ import {
   worker,
   workflow,
   workflowActionStep,
+  workflowWaitForSignalStep,
   type ChimpbaseDlqEnvelope,
 } from "../packages/runtime/index.ts";
 
@@ -47,6 +48,91 @@ describeIfPg("PostgreSQL queue durability", () => {
     }
     await pool.end();
   });
+
+  test("PostgreSQL upgrades historical signal receipts without replacing precise timestamps", async () => {
+    const schema = `signal_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+    const scopedUrl = new URL(postgresUrl());
+    scopedUrl.searchParams.set("options", `-c search_path=${schema}`);
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    const scopedPool = new Pool({ connectionString: scopedUrl.href });
+    try {
+      await scopedPool.query(`CREATE TABLE _chimpbase_workflow_signals (
+        id BIGSERIAL PRIMARY KEY, workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
+        payload_json TEXT NOT NULL, consumed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO _chimpbase_workflow_signals (workflow_id, signal_name, payload_json, created_at)
+        VALUES ('legacy', 'approve', '{"saved":true}', '2026-10-11T12:00:00.123Z')`);
+      await ensurePostgresInternalTables(scopedPool);
+      await ensurePostgresInternalTables(scopedPool);
+      expect((await scopedPool.query<{ payload_json: string; received_at_ms: string; consumed_at: Date | null }>(
+        "SELECT payload_json, received_at_ms, consumed_at FROM _chimpbase_workflow_signals",
+      )).rows).toEqual([
+        { payload_json: '{"saved":true}', received_at_ms: String(Date.parse("2026-10-11T12:00:00.123Z")), consumed_at: null },
+      ]);
+    } finally {
+      await scopedPool.end();
+      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  for (const style of ["steps", "run"] as const) {
+    for (const receiptOffsetMs of [-1, 0, 1]) {
+      for (const policy of ["fail", "callback"] as const) {
+        test(`workflow signal receipt controls delayed timeout (${style}, ${receiptOffsetMs}, ${policy})`, async () => {
+          const workflowName = uniqueName("signal-receipt");
+          const workflowId = uniqueName("signal-instance");
+          let now = Date.parse("2026-10-11T12:00:00.123Z");
+          type State = { outcome: string };
+          const onTimeout = policy === "fail" ? "fail" : () => ({ outcome: "timeout" });
+          const definition = style === "steps"
+            ? workflow<{}, State>({ name: workflowName, version: 1, initialState: () => ({ outcome: "waiting" }), steps: [
+              workflowWaitForSignalStep<{}, State, { outcome: string }>("approval", "approve", {
+                timeoutMs: 10, onTimeout, onSignal: ({ payload }) => ({ outcome: payload.outcome }),
+              }),
+            ] })
+            : workflow<{}, State>({ name: workflowName, version: 1, initialState: () => ({ outcome: "waiting" }), run(wf) {
+              if (wf.state.outcome !== "waiting") return wf.complete();
+              return wf.waitForSignal<{ outcome: string }>("approve", { timeoutMs: 10, onTimeout, stepId: "approval",
+                onSignal: ({ payload }) => ({ outcome: payload.outcome }),
+              });
+            } });
+          const host = await ChimpbaseBunHost.create({
+            config: normalizeProjectConfig({ storage: { engine: "postgres", url: postgresUrl() } }),
+            platform: { ...createDefaultChimpbasePlatformShim(), now: () => now },
+          });
+          host.register(definition,
+            action("launch", async (ctx) => await ctx.workflow.start(definition, {}, { workflowId })),
+            action("send", async (ctx) => await ctx.workflow.signal(workflowId, "approve", { outcome: "signal" })),
+            action("inspect", async (ctx) => await ctx.workflow.get(workflowId)),
+          );
+          try {
+            await host.executeAction("launch");
+            await host.processNextQueueJob();
+            const deadline = now + 10;
+            expect((await host.executeAction("inspect")).result).toMatchObject({ status: "waiting_signal", wakeAtMs: deadline });
+            now = deadline + receiptOffsetMs;
+            await host.executeAction("send");
+            expect((await pool.query<{ received_at_ms: string }>(
+              "SELECT received_at_ms FROM _chimpbase_workflow_signals WHERE workflow_id = $1", [workflowId],
+            )).rows)
+              .toEqual([{ received_at_ms: String(now) }]);
+            now = deadline + 100;
+            await host.processNextQueueJob();
+            const inTime = receiptOffsetMs < 0;
+            expect((await host.executeAction("inspect")).result).toMatchObject({
+              status: !inTime && policy === "fail" ? "failed" : "completed",
+              state: { outcome: inTime ? "signal" : policy === "callback" ? "timeout" : "waiting" }, wakeAtMs: null,
+            });
+          } finally {
+            await host.close();
+            await pool.query("DELETE FROM _chimpbase_queue_jobs WHERE payload_json->>'workflowId' = $1", [workflowId]);
+            await pool.query("DELETE FROM _chimpbase_workflow_signals WHERE workflow_id = $1", [workflowId]);
+            await pool.query("DELETE FROM _chimpbase_workflow_instances WHERE workflow_id = $1", [workflowId]);
+          }
+        });
+      }
+    }
+  }
 
   test("concurrent workflow retries resume once and fence stale claimed jobs", async () => {
     const workflowName = uniqueName("retry");

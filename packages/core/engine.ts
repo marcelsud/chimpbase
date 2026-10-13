@@ -224,6 +224,7 @@ interface PersistedWorkflowInstanceRow {
 interface PersistedWorkflowSignalRow {
   id: number;
   payload_json: string;
+  received_at_ms: number;
 }
 
 interface PersistedCronScheduleRow {
@@ -273,6 +274,7 @@ const workflowIdRowValidator = v.object({ workflow_id: v.string() });
 const workflowSignalRowValidator = v.object({
   id: v.integer(),
   payload_json: v.string(),
+  received_at_ms: v.integer(),
 });
 const workflowInstanceRowValidator = v.object({
   current_step_id: v.string().nullable(),
@@ -1911,6 +1913,7 @@ export class ChimpbaseEngine {
     signalName: string,
     payload: TPayload,
   ): Promise<void> {
+    const receivedAtMs = this.platform.now();
     const instance = await this.loadWorkflowInstanceRow(workflowId);
     if (!(instance !== null)) {
       throw new Error(`workflow not found: ${workflowId}`);
@@ -1926,13 +1929,15 @@ export class ChimpbaseEngine {
           workflow_id,
           signal_name,
           payload_json,
+          received_at_ms,
           consumed_at
-        ) VALUES (?1, ?2, ?3, NULL)
+        ) VALUES (?1, ?2, ?3, ?4, NULL)
       `,
       [
         workflowId,
         signalName,
         JSON.stringify(payload ?? null),
+        receivedAtMs,
       ],
       databaseRowValidator,
     );
@@ -2156,7 +2161,8 @@ export class ChimpbaseEngine {
         }
 
         case "workflow_wait_for_signal": {
-          const signal = await this.findPendingWorkflowSignal(workflowId, step.signal);
+          const signal = await this.findPendingWorkflowSignal(workflowId, step.signal,
+            row.status === "waiting_signal" ? row.wake_at_ms : null);
           if ((signal !== null)) {
             await this.adapter.query(
               `
@@ -2447,7 +2453,8 @@ export class ChimpbaseEngine {
     input: unknown,
   ): Promise<boolean> {
     const state = directive.state;
-    const signal = await this.findPendingWorkflowSignal(workflowId, directive.signal);
+    const signal = await this.findPendingWorkflowSignal(workflowId, directive.signal,
+      row.status === "waiting_signal" ? row.wake_at_ms : null);
     if ((signal !== null)) {
       await this.adapter.query(
         `
@@ -2763,20 +2770,23 @@ export class ChimpbaseEngine {
   private async findPendingWorkflowSignal(
     workflowId: string,
     signalName: string,
+    deadlineMs: number | null,
   ): Promise<PersistedWorkflowSignalRow | null> {
     const [row] = await this.adapter.query<PersistedWorkflowSignalRow>(
       `
         SELECT
           CAST(id AS DOUBLE PRECISION) AS id,
-          payload_json
+          payload_json,
+          CAST(received_at_ms AS DOUBLE PRECISION) AS received_at_ms
         FROM _chimpbase_workflow_signals
         WHERE workflow_id = ?1
           AND signal_name = ?2
           AND consumed_at IS NULL
+          AND (received_at_ms < ?3 OR CAST(?3 AS BIGINT) IS NULL)
         ORDER BY id ASC
         LIMIT 1
       `,
-      [workflowId, signalName],
+      [workflowId, signalName, deadlineMs],
       workflowSignalRowValidator,
     );
 

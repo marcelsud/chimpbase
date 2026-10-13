@@ -1,19 +1,20 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Pool } from "pg";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { action } from "../packages/runtime/index.ts";
+import * as runtime from "../packages/runtime/index.ts";
 
 const PG_URL = process.env.CHIMPBASE_TEST_PG_URL;
 const describeIfPg = PG_URL ? describe : describe.skip;
 
-for (const engine of ["memory", "postgres"] as const) {
+for (const engine of ["memory", "sqlite", "postgres"] as const) {
   const describeEngine = engine === "postgres" ? describeIfPg : describe;
   describeEngine(`collection semantics (${engine})`, () => {
     test("preserves strict filters, missing fields, limits and shallow patches", async () => {
       const name = `collection.'semantics.${crypto.randomUUID()}`;
       const host = await createChimpbase({
-        storage: engine === "postgres" ? { engine, url: PG_URL } : { engine },
+        storage: engine === "postgres" ? { engine, url: PG_URL } : engine === "sqlite" ? { engine, path: ":memory:" } : { engine },
         registrations: [action("checkCollections", async (ctx) => {
           for (const document of [
             { kind: "number", value: 7, nullable: null, obsolete: "remove", nested: { left: 1, right: 2 }, array: [1, 2], "odd'field": "quoted" },
@@ -33,9 +34,10 @@ for (const engine of ["memory", "postgres"] as const) {
             for (const filter of filters) {
               const expected = all.filter((document) => Object.entries(filter).every(([key, value]) => document[key] === value));
               expect(await ctx.collection.find(name, filter)).toEqual(expected);
+              expect(await ctx.collection.find(name, filter, { limit: 1 })).toEqual(expected.slice(0, 1));
               expect(await ctx.collection.findOne(name, filter)).toEqual(expected[0] ?? null);
             }
-            for (const limit of [0, 1, 1.9, -1, -1.9, -0.5, NaN, Infinity, -Infinity, Number.MAX_VALUE, -Number.MAX_VALUE]) {
+            for (const limit of [0, 0.5, 1, 1.9, -1, -1.9, -0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, 2 ** 63, Number.MAX_VALUE, -Number.MAX_VALUE]) {
               expect(await ctx.collection.find(name, {}, { limit })).toEqual(all.slice(0, limit));
             }
             expect(await ctx.collection.update(name, { kind: "number" }, {
@@ -63,6 +65,35 @@ for (const engine of ["memory", "postgres"] as const) {
     });
   });
 }
+
+test("SQLite materializes only the bounded unfiltered collection results", async () => {
+  const name = `collection.limit.${crypto.randomUUID()}`;
+  const host = await createChimpbase({
+    storage: { engine: "sqlite", path: ":memory:" },
+    registrations: [action("checkBoundedReads", async (ctx) => {
+      for (let index = 0; index < 100; index++) {
+        await ctx.collection.insert(name, { marker: name, index });
+      }
+      const all = await ctx.collection.find(name);
+      expect(all.map((document) => document.id)).toEqual(all.map((document) => document.id).sort());
+      const parse = spyOn(runtime, "parseJsonObject");
+      const parsedDocuments = () => parse.mock.calls.filter(([json]) => json.includes(name)).length;
+      try {
+        for (const limit of [1, 1.9, 2]) {
+          parse.mockClear();
+          expect(await ctx.collection.find(name, {}, { limit })).toEqual(all.slice(0, limit));
+          expect(parsedDocuments()).toBeLessThanOrEqual(Math.trunc(limit));
+        }
+        parse.mockClear();
+        expect(await ctx.collection.findOne(name, {})).toEqual(all[0]);
+        expect(parsedDocuments()).toBeLessThanOrEqual(1);
+        expect(await ctx.collection.findOne(`${name}.empty`, {})).toBeNull();
+      } finally { parse.mockRestore(); }
+    })],
+  });
+  try { await host.executeAction("checkBoundedReads"); }
+  finally { await host.close(); }
+});
 
 describeIfPg("PostgreSQL collection concurrency and Kysely", () => {
   test("preserves disjoint patches while a competing transaction holds the row lock", async () => {
