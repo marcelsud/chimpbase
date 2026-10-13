@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createDefaultChimpbasePlatformShim } from "../packages/core/index.ts";
 
 import {
   compareWorkflowContracts,
@@ -58,6 +59,19 @@ function createWorkflowDraft() {
 }
 
 describe("workflow contracts", () => {
+  test("keeps platform and persisted workflow hashes compatible for empty, ASCII and Unicode inputs", () => {
+    const platform = createDefaultChimpbasePlatformShim();
+    for (const [input, hash] of [
+      ["", "cbf29ce484222325"], ["hello", "a430d84680aabd0b"], ["ação/😀", "1a4f1d8f073cef1b"],
+      ["\u0000", "af63bd4c8601b7df"], ["\ud800", "6f6d661b9658624a"],
+    ]) {
+      expect(platform.hashString(input)).toBe(hash);
+    }
+    for (const [name, hash] of [["", "26268af42048c71d"], ["hello", "a713f811bb0569ab"], ["ação/😀", "244d341f54bc6c7b"]]) {
+      expect(versionWorkflow({ name, initialState: () => null, steps: [] }).contract.hash).toBe(hash);
+    }
+  });
+
   test("assigns version 1 for the first generated contract and reuses it when unchanged", () => {
     const first = versionWorkflow(createWorkflowDraft());
     expect(first.definition.version).toBe(1);

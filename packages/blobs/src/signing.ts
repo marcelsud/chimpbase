@@ -22,16 +22,11 @@ interface SignedTokenPayload {
 }
 
 function base64UrlEncode(input: Uint8Array | string): string {
-  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  return Buffer.from(bytes).toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return Buffer.from(input).toString("base64url");
 }
 
 function base64UrlDecode(input: string): Uint8Array {
-  const padded = input.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(input.length / 4) * 4, "=");
-  return Uint8Array.from(Buffer.from(padded, "base64"));
+  return Buffer.from(input, "base64url");
 }
 
 function randomNonce(): string {

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,7 +8,7 @@ import { createChimpbase } from "../packages/bun/src/library.ts";
 import { chimpbaseAuth, type AuthApiKey, type AuthScope, type AuthUser, type ChimpbaseAuthOptions } from "../packages/auth/src/index.ts";
 import { chimpbaseWebhooks } from "../packages/webhooks/src/index.ts";
 import { readJsonResponse } from "./support/http.ts";
-import { v } from "../packages/runtime/index.ts";
+import { action, v } from "../packages/runtime/index.ts";
 
 
 /** The API key route returns the raw key once, alongside the stored record's public fields. */
@@ -62,6 +63,30 @@ function authHeaders(key: string = BOOTSTRAP_KEY) {
 }
 
 describe("@chimpbase/auth", () => {
+  test("native hex preserves leading zero key bytes and the stored SHA-256 digest", async () => {
+    const host = await createAuthHost();
+    const digest = v.object({ keyHash: v.string() }).nullable();
+    host.register(action("storedKey", (ctx, id: string) => ctx.collection.findOne("__chimpbase.auth.api_keys", { id }, digest)));
+    const bytes = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const random = spyOn(crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(value: T): T => {
+      if (value !== null) new Uint8Array(value.buffer, value.byteOffset, value.byteLength).set(bytes);
+      return value;
+    });
+    try {
+      const user = idResultValidator.parse((await host.executeAction("__chimpbase.auth.createUser", {
+        email: "hex@test.com", name: "Hex",
+      })).result);
+      const created = v.object({ id: v.string(), key: v.string(), keyPrefix: v.string() }).parse(
+        (await host.executeAction("__chimpbase.auth.createApiKey", { userId: user.id })).result,
+      );
+      expect(created.key).toBe("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+      expect(created.keyPrefix).toBe("00010203");
+      const stored = digest.parse((await host.executeAction("storedKey", created.id)).result);
+      expect(stored?.keyHash).toBe(createHash("sha256").update(created.key).digest("hex"));
+      expect((await host.executeRoute(new Request("http://test.local/protected", { headers: authHeaders(created.key) }))).response).toBeNull();
+    } finally { random.mockRestore(); await host.close(); }
+  });
+
   test("management routes reject malformed encoded IDs with 400", async () => {
     const host = await createAuthHost();
     try {

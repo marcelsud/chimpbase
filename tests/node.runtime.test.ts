@@ -51,6 +51,9 @@ describe("chimpbase-node runtime", () => {
         "postgres",
         "host",
         "node",
+        "auth",
+        "blobs",
+        "webhooks",
       ],
       {
         cwd: repoRoot,
@@ -77,10 +80,47 @@ describe("chimpbase-node runtime", () => {
         `import { createChimpbase } from "${nodeLibraryPath}";`,
         `import { ChimpbaseNodeHost, nodeRuntimeShim } from ${JSON.stringify(nodeRuntimePath)};`,
         `import { normalizeProjectConfig, createSqliteEngineAdapter, createDefaultChimpbasePlatformShim } from ${JSON.stringify(corePath)};`,
+        `import { chimpbaseAuth } from ${JSON.stringify(resolve(repoRoot, "packages/auth/dist/src/index.js"))};`,
+        `import { createBlobSigner } from ${JSON.stringify(resolve(repoRoot, "packages/blobs/dist/src/index.js"))};`,
+        `import { chimpbaseWebhooks, hmac } from ${JSON.stringify(resolve(repoRoot, "packages/webhooks/dist/src/index.js"))};`,
         'import assert from "node:assert/strict";',
+        'import { createHash, createHmac } from "node:crypto";',
         'import { DatabaseSync } from "node:sqlite";',
         'import { once } from "node:events";',
         'import { get } from "node:http";',
+        `const platformHashes = createDefaultChimpbasePlatformShim();
+for (const [input, expected] of [["", "cbf29ce484222325"], ["hello", "a430d84680aabd0b"], ["ação/😀", "1a4f1d8f073cef1b"]]) {
+  assert.equal(platformHashes.hashString(input), expected);
+}
+const encodingHost = await createChimpbase({ storage: { engine: "memory" }, registrations: [
+  chimpbaseAuth({ bootstrapKeySecret: "BOOTSTRAP" }), chimpbaseWebhooks({ allowedEvents: ["order.created"] }),
+], secrets: { get: () => "bootstrap" } });
+const originalRandom = crypto.getRandomValues;
+crypto.getRandomValues = (value) => {
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = index;
+  return value;
+};
+try {
+  encodingHost.registerAction("storedHash", (ctx, id) => ctx.collection.findOne("__chimpbase.auth.api_keys", { id }));
+  const user = (await encodingHost.executeAction("__chimpbase.auth.createUser", { email: "hex@test.com", name: "Hex" })).result;
+  const key = (await encodingHost.executeAction("__chimpbase.auth.createApiKey", { userId: user.id })).result;
+  const secret = (await encodingHost.executeAction("__chimpbase.webhooks.register", { url: "https://example.invalid", events: ["order.created"] })).result.secret;
+  assert.equal(key.key, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+  assert.equal(secret, key.key);
+  assert.equal((await encodingHost.executeAction("storedHash", key.id)).result.keyHash, createHash("sha256").update(key.key).digest("hex"));
+  const body = "ação/😀";
+  const signature = createHmac("sha256", secret).update(body).digest("hex");
+  const verify = hmac({ signatureHeader: "x-signature", secretName: "SECRET" });
+  assert.equal(await verify(new Request("https://example.test", { headers: { "x-signature": signature } }), body, () => secret), true);
+  assert.equal(await verify(new Request("https://example.test", { headers: { "x-signature": "!" } }), body, () => secret), false);
+  const signer = createBlobSigner({ secret: "legacy-secret", baseUrl: "https://example.test", clock: () => 1000 });
+  const issued = "eyJidWNrZXQiOiJ1cGxvYWRzIiwia2V5IjoiYcOnw6NvL_CfmIAiLCJvcCI6ImdldCIsImV4cCI6NjEsIm5vbmNlIjoiQUFBQUFBQUFBQUFBQUFBQSJ9.dVnV0aZHy9dO-rJtU84KAk38WbZY1Qbw7941kFg-BuM";
+  assert.equal(signer.verify(issued).key, "ação/😀");
+  assert.equal(signer.verify(issued + "=").key, "ação/😀");
+  assert.equal(signer.verify(issued.split(".")[0] + ".!"), null);
+  assert.equal(signer.verify(new URL(signer.sign({ bucket: "uploads", key: "ação/😀", op: "get", ttlSec: 60 })).searchParams.get("token")).key, "ação/😀");
+} finally { crypto.getRandomValues = originalRandom; await encodingHost.close(); }`,
         "",
         "const migrationOptions = {",
         `  projectDir: ${JSON.stringify(projectDir)},`,

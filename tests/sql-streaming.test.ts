@@ -2,12 +2,14 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { sql, type QueryResult } from "kysely";
 import { Client } from "pg";
+import { EventEmitter } from "node:events";
 
 import { createDefaultChimpbasePlatformShim } from "../packages/core/host.ts";
 import { normalizeProjectConfig } from "../packages/core/index.ts";
 import { createSqliteEngineAdapter as createSharedSqliteEngineAdapter } from "../packages/core/sqlite-storage.ts";
 import { createSqliteEngineAdapter } from "../packages/bun/src/sqlite_adapter.ts";
 import { createPostgresEngineAdapter, openPostgresPool } from "../packages/postgres/src/index.ts";
+import { isArrayValue } from "../packages/runtime/index.ts";
 
 const platform = createDefaultChimpbasePlatformShim();
 
@@ -15,6 +17,56 @@ async function nextRow<TRow>(stream: AsyncIterator<TRow, unknown>): Promise<TRow
   const result = await stream.next();
   if (result.done) throw new Error("stream ended before the expected row");
   return result.value;
+}
+
+for (const engine of ["sqlite", "postgres"] as const) {
+  test(`${engine} Kysely validates rows without dropping columns or copying records`, async () => {
+    let rows: unknown = [];
+    let fetched = false;
+    const client = Object.assign(new EventEmitter(), {
+      async query(statement: string) {
+        if (statement.startsWith("DO ")) fetched = false;
+        const result = statement.startsWith("FETCH ") ? (fetched ? [] : rows) : statement.startsWith("select ") ? rows : [];
+        if (statement.startsWith("FETCH ")) fetched = true;
+        return { rows: result, rowCount: isArrayValue(result) ? result.length : 0 };
+      },
+      release() {},
+    });
+    const adapter = engine === "sqlite"
+      ? createSharedSqliteEngineAdapter({
+          exec() {},
+          query() {
+            return {
+              reader: true,
+              all() { return rows; },
+              *iterate() { if (isArrayValue(rows)) yield* rows; },
+              run() { throw new Error("unexpected write"); },
+            };
+          },
+        } as unknown as Parameters<typeof createSharedSqliteEngineAdapter>[0], platform)
+      : createPostgresEngineAdapter({ query: client.query, async connect() { return client; } } as unknown as Parameters<typeof createPostgresEngineAdapter>[0], platform);
+    type Row = { id: number; extra: string; nullable: null; data: { nested: number[] }; timestamp: Date; bytes: Buffer };
+    const db = adapter.createKysely<{ items: Row }>();
+    try {
+      const original: Row[] = [{ id: 1, extra: "ação/😀", nullable: null, data: { nested: [1, 2] },
+        timestamp: new Date("2020-01-01T00:00:00Z"), bytes: Buffer.from([0, 255]) }];
+      for (const valid of [[], original]) {
+        rows = valid;
+        expect(await db.selectFrom("items").selectAll().execute()).toBe(valid);
+        const streamed: Row[] = [];
+        for await (const row of db.selectFrom("items").selectAll().stream(1)) streamed.push(row);
+        expect(streamed).toEqual(valid);
+        if (valid.length > 0) expect(streamed[0]).toBe(valid[0]);
+      }
+      for (const invalid of [undefined, null, 42, {}, [null], ["value"], [1], [[]]]) {
+        rows = invalid;
+        await expect(db.selectFrom("items").selectAll().execute()).rejects.toThrow(/^Kysely query rows must be database records$/);
+        if (isArrayValue(invalid)) {
+          await expect(db.selectFrom("items").selectAll().stream(1).next()).rejects.toThrow(/^Kysely query rows must be database records$/);
+        }
+      }
+    } finally { await db.destroy(); }
+  });
 }
 
 test("SQLite streaming reads only the requested chunk and closes an abandoned iterator", async () => {
