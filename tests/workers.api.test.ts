@@ -41,6 +41,60 @@ test("decorated workers receive execution metadata", async () => {
 });
 
 const pgUrl = process.env.CHIMPBASE_TEST_PG_URL;
+(pgUrl ? test : test.skip)("three PostgreSQL worker lanes never overlap themselves and all stop before cleanup", async () => {
+  const queue = `workers.lanes.${crypto.randomUUID()}`;
+  const entered = Promise.withResolvers<void>();
+  const aborted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const seen = new Set<number>();
+  let active = 0;
+  let maxActive = 0;
+  let aborts = 0;
+  let hooks = 0;
+  const host = await createChimpbase({
+    storage: { engine: "postgres", url: pgUrl }, workerRuntime: { concurrency: 3, pollIntervalMs: 1 },
+    registrations: [
+      action("enqueue", async (ctx) => { for (let i = 0; i < 6; i += 1) await ctx.enqueue(queue, {}); }),
+      worker(queue, async (_ctx, _payload, execution) => {
+        if (!execution) throw new Error("worker metadata missing");
+        expect(seen.has(execution.jobId)).toBe(false);
+        seen.add(execution.jobId);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        execution.signal.addEventListener("abort", () => { if (++aborts === 3) aborted.resolve(); }, { once: true });
+        if (active === 3) entered.resolve();
+        await release.promise;
+        active -= 1;
+      }),
+    ],
+  });
+  host.registerOnStop("cleanup", () => { expect(active).toBe(0); hooks += 1; });
+  await host.executeAction("enqueue");
+  const started = await host.start({ serve: false, runWorker: true });
+  let stopping: Promise<void> | undefined;
+  try {
+    await entered.promise;
+    await Bun.sleep(15);
+    expect(seen.size).toBe(3);
+    expect(maxActive).toBe(3);
+    stopping = started.stop();
+    await aborted.promise;
+    expect(hooks).toBe(0);
+    release.resolve();
+    await stopping;
+    expect(hooks).toBe(1);
+    expect(seen.size).toBe(3);
+    const jobs = await host.listJobs({ queue });
+    expect(jobs.filter((job) => job.status === "completed")).toHaveLength(3);
+    expect(jobs.filter((job) => job.status === "pending" && job.attempt === 0)).toHaveLength(3);
+  } finally {
+    release.resolve();
+    await (stopping ?? started.stop());
+    await host.engine.getBlobsAdapter().query("DELETE FROM _chimpbase_queue_jobs WHERE queue_name = ?1", [queue], v.object({}));
+    await host.close();
+  }
+});
+
 for (const engine of ["memory", "postgres"] as const) {
   const suite = engine === "postgres" && !pgUrl ? describe.skip : describe;
   suite(`worker API (${engine})`, () => {

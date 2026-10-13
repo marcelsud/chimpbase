@@ -520,6 +520,7 @@ for (const engine of ["memory", "sqlite", "postgres"] as const) {
         expect(cleanupCalls).toBe(2);
         const live = await host.routeEnv().blobs.resumeUpload(liveId);
         await live.complete();
+        expect(await inspect()).toEqual({ uploads: [], parts: [] });
         const object = await host.routeEnv().blobs.get(bucket, "live.txt");
         expect(object === null ? null : await new Response(object.body).text()).toBe("live bytes");
       } finally {
@@ -1230,6 +1231,7 @@ for (const useFs of [false, true]) {
           expect(await resumed.listParts()).toEqual(parts);
         }
         await (await blobs.resumeUpload(upload.id)).complete();
+        expect(await host.engine.getBlobsAdapter().blobListParts(upload.id)).toEqual([]);
         const completed = await blobs.get("uploads", "target.txt");
         expect(completed === null ? null : await new Response(completed.body).text()).toBe("after");
         await expect(blobs.resumeUpload(upload.id)).rejects.toThrow(/not found/);
@@ -1421,6 +1423,102 @@ describe("chimpbase blobs primitive (fs driver)", () => {
 });
 
 describe("chimpbase blobs signed URLs", () => {
+  test("rejects an empty closed upload stream when its signed maximum size is negative", async () => {
+    const plugin = chimpbaseBlobs({ secret: "bounded-upload-test", baseUrl: "http://test" });
+    const driver = memoryBlobDriver();
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, blobs: { driver, buckets: ["uploads"], signer: plugin.signer },
+      registrations: plugin.registrations,
+    });
+    const put = spyOn(driver, "put");
+    try {
+      const body = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+      const url = plugin.signer.sign({ bucket: "uploads", key: "negative-limit", op: "put", ttlSec: 60, sizeMax: -1 });
+      const outcome = await host.executeRoute(new Request(url, { method: "PUT", body, duplex: "half" } as RequestInit));
+      expect(outcome.response?.status).toBe(413);
+      expect(put).not.toHaveBeenCalled();
+      expect(await host.routeEnv().blobs.head("uploads", "negative-limit")).toBeNull();
+      expect(body.locked).toBe(false);
+    } finally { put.mockRestore(); await host.close(); }
+  });
+
+  test("rejects a signed upload at the size limit without consuming the remaining stream or changing stored data", async () => {
+    const plugin = chimpbaseBlobs({ secret: "bounded-upload-test", baseUrl: "http://test" });
+    const driver = memoryBlobDriver();
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, blobs: { driver, buckets: ["uploads"], signer: plugin.signer },
+      registrations: plugin.registrations,
+    });
+    try {
+      await host.routeEnv().blobs.put("uploads", "existing", new TextEncoder().encode("before"));
+      const before = await host.routeEnv().blobs.head("uploads", "existing");
+      const put = spyOn(driver, "put");
+      try {
+        for (const key of ["new", "existing"]) {
+          let pulls = 0;
+          let cancelled = false;
+          const body = new ReadableStream<Uint8Array>({
+            pull(controller) { pulls++; controller.enqueue(new Uint8Array(5)); if (pulls === 10) controller.close(); },
+            cancel() { cancelled = true; return new Promise<void>(() => {}); },
+          }, { highWaterMark: 0 });
+          const url = plugin.signer.sign({ bucket: "uploads", key, op: "put", ttlSec: 60, sizeMax: 4 });
+          const outcome = await Promise.race([
+            host.executeRoute(new Request(url, { method: "PUT", body, duplex: "half" } as RequestInit)),
+            Bun.sleep(1000).then(() => { throw new Error("rejection waited for stream cancellation"); }),
+          ]);
+          expect(outcome.response?.status).toBe(413);
+          expect(pulls).toBe(1);
+          expect(cancelled).toBe(true);
+          expect(body.locked).toBe(false);
+        }
+        expect(put).not.toHaveBeenCalled();
+        expect(await host.routeEnv().blobs.head("uploads", "new")).toBeNull();
+        expect(await host.routeEnv().blobs.head("uploads", "existing")).toEqual(before);
+        const preserved = await host.routeEnv().blobs.get("uploads", "existing");
+        expect(preserved === null ? null : await new Response(preserved.body).text()).toBe("before");
+      } finally { put.mockRestore(); }
+    } finally { await host.close(); }
+  });
+
+  test("accepts signed streamed uploads up to the limit and keeps stream failures atomic", async () => {
+    const plugin = chimpbaseBlobs({ secret: "bounded-upload-test", baseUrl: "http://test" });
+    const driver = memoryBlobDriver();
+    const host = await createChimpbase({
+      storage: { engine: "memory" }, blobs: { driver, buckets: ["uploads"], signer: plugin.signer },
+      registrations: plugin.registrations,
+    });
+    try {
+      for (const text of ["", "abc", "abcd"]) {
+        const key = `size-${text.length}`;
+        let completed = false;
+        const body = new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(new Uint8Array());
+          for (const character of text) controller.enqueue(new TextEncoder().encode(character));
+          controller.close(); completed = true;
+        } });
+        const url = plugin.signer.sign({ bucket: "uploads", key, op: "put", ttlSec: 60, sizeMax: text.length === 0 ? 0 : 4 });
+        const outcome = await host.executeRoute(new Request(url, { method: "PUT", body, duplex: "half" } as RequestInit));
+        expect(outcome.response?.status).toBe(201);
+        expect(completed).toBe(true);
+        const object = await host.routeEnv().blobs.get("uploads", key);
+        expect(object === null ? null : await new Response(object.body).text()).toBe(text);
+      }
+      const put = spyOn(driver, "put");
+      try {
+        let pulls = 0;
+        const body = new ReadableStream<Uint8Array>({ pull(controller) {
+          if (++pulls === 1) controller.enqueue(new Uint8Array([1]));
+          else controller.error(new Error("signed upload stream failed"));
+        } }, { highWaterMark: 0 });
+        const url = plugin.signer.sign({ bucket: "uploads", key: "failed", op: "put", ttlSec: 60, sizeMax: 4 });
+        await expect(host.executeRoute(new Request(url, { method: "PUT", body, duplex: "half" } as RequestInit)))
+          .rejects.toThrow("signed upload stream failed");
+        expect(put).not.toHaveBeenCalled();
+        expect(await host.routeEnv().blobs.head("uploads", "failed")).toBeNull();
+      } finally { put.mockRestore(); }
+    } finally { await host.close(); }
+  });
+
   test("signed GET and PUT URLs match routes with trailing or root separators", async () => {
     for (const routeBasePath of ["/_files", "/_files/", "/_files///", "/", "///", ""]) {
       const plugin = chimpbaseBlobs({ secret: "test-secret", baseUrl: "http://test.local///", routeBasePath });

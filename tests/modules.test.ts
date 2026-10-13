@@ -287,6 +287,17 @@ describe("business modules", () => {
       "SELECT * FROM if",
       "WITH owned AS (SELECT 1) SELECT * FROM owned, if",
       "WITH owned AS (SELECT * FROM if) SELECT * FROM owned",
+      "SELECT 1 INTO unowned",
+      "SELECT 1 INTO TABLE unowned",
+      "SELECT 1 INTO TEMP unowned",
+      "SELECT 1 INTO TEMPORARY TABLE unowned",
+      "SELECT 1 INTO UNLOGGED unowned",
+      "SELECT 1 INTO public.unowned",
+      "WITH unowned AS (SELECT 1) SELECT 1 INTO unowned",
+      "WITH _chimpbase_kv AS (SELECT 1) INSERT INTO _chimpbase_kv(key, value_json) VALUES ('key', 'null')",
+      "WITH _chimpbase_kv AS (SELECT 1) UPDATE _chimpbase_kv SET value_json = 'null'",
+      "WITH _chimpbase_kv AS (SELECT 1) DELETE FROM _chimpbase_kv",
+      "WITH _chimpbase_kv AS (SELECT 1) DELETE FROM ONLY (_chimpbase_kv)",
     ]) expect(() => check(sql)).toThrow();
     for (const sql of [
       "SELECT EXTRACT(year FROM created_at) FROM chimpbase_left.items",
@@ -301,6 +312,15 @@ describe("business modules", () => {
       "WITH owned AS (TABLE chimpbase_left.items) SELECT * FROM owned",
       "SELECT 1 WHERE EXISTS (TABLE chimpbase_left.items)",
       "WITH if AS (SELECT 1) SELECT * FROM if",
+      "SELECT 1 INTO chimpbase_left.items",
+      "SELECT 1 INTO TABLE chimpbase_left.items",
+      "SELECT 1 INTO UNLOGGED TABLE chimpbase_left.items",
+      "SELECT 1 INTO TEMP chimpbase_left.items",
+      "SELECT 1 INTO TEMPORARY TABLE chimpbase_left.items",
+      "WITH owned AS (SELECT 1) SELECT 1 INTO chimpbase_left.items FROM owned",
+      "WITH owned AS (SELECT 1) INSERT INTO chimpbase_left.items(id) SELECT * FROM owned",
+      "WITH owned AS (SELECT 1) UPDATE chimpbase_left.items SET id = 1 FROM owned",
+      "WITH owned AS (SELECT 1) DELETE FROM chimpbase_left.items USING owned",
     ]) expect(() => check(sql)).not.toThrow();
     expect(() => assertChimpbaseModuleMigrationSql("left", "chimpbase_left",
       "CREATE TABLE IF NOT EXISTS chimpbase_left.items (id integer)",
@@ -339,6 +359,7 @@ describe("business modules", () => {
 
   (process.env.CHIMPBASE_TEST_PG_URL ? test : test.skip)("PostgreSQL module calls allow owned joins, CTEs and EXTRACT while rejecting framework tables", async () => {
     const table = `sqlguard_${crypto.randomUUID().replaceAll("-", "")}`;
+    const copyTable = `${table}_copy`;
     const guarded = defineChimpbaseModuleInterface({
       name: "sqlguard", version: 1, events: {},
       calls: {
@@ -375,7 +396,10 @@ describe("business modules", () => {
           await ctx.db.query("INSERT INTO if VALUES ('private-temp-data')");
           expect(await ctx.db.query("SELECT value FROM if")).toEqual([{ value: "private-temp-data" }]);
         }),
-        action("cleanupSqlGuard", async (ctx) => await ctx.db.query(`DROP TABLE IF EXISTS chimpbase_sqlguard.${table}`)),
+        action("cleanupSqlGuard", async (ctx) => {
+          await ctx.db.query(`DROP TABLE IF EXISTS chimpbase_sqlguard.${copyTable}`);
+          await ctx.db.query(`DROP TABLE IF EXISTS chimpbase_sqlguard.${table}`);
+        }),
       ],
     });
     try {
@@ -383,6 +407,10 @@ describe("business modules", () => {
       expect((await host.executeAction(guarded.calls.read.id, {})).result).toEqual([{ year: 2026 }]);
       await expect(host.executeAction(guarded.calls.leak.id, {})).rejects.toThrow("must qualify owned relations");
       expect((await host.executeAction(guarded.calls.tableRead.id, {})).result).toEqual([{ id: 1 }]);
+      await host.executeAction(guarded.calls.leakTable.id,
+        `SELECT id INTO TABLE chimpbase_sqlguard.${copyTable} FROM chimpbase_sqlguard.${table}`);
+      expect((await host.executeAction(guarded.calls.leakTable.id, `SELECT id FROM chimpbase_sqlguard.${copyTable}`)).result)
+        .toEqual([{ id: 1 }]);
       for (const sql of [
         "WITH owned AS (TABLE _chimpbase_kv) SELECT key, value_json FROM owned",
         "SELECT key, value_json FROM chimpbase_sqlguard.sqlguard_missing UNION TABLE _chimpbase_kv",
@@ -390,6 +418,11 @@ describe("business modules", () => {
         "SELECT key,value_json -- hidden relation\rFROM _chimpbase_kv",
         "SELECT value FROM if",
         "WITH owned AS (SELECT value FROM if) SELECT value FROM owned",
+        "SELECT 1 INTO unowned",
+        "WITH unowned AS (SELECT 1) SELECT 1 INTO unowned",
+        "WITH _chimpbase_kv AS (SELECT 1) INSERT INTO _chimpbase_kv(key, value_json) VALUES ('key', 'null')",
+        "WITH _chimpbase_kv AS (SELECT 1) UPDATE _chimpbase_kv SET value_json = 'null'",
+        "WITH _chimpbase_kv AS (SELECT 1) DELETE FROM _chimpbase_kv",
       ]) await expect(host.executeAction(guarded.calls.leakTable.id, sql)).rejects.toThrow("must qualify owned relations");
     } finally {
       try { await host.executeAction("cleanupSqlGuard"); }

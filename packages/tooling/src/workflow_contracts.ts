@@ -34,7 +34,8 @@ export async function syncRegisteredWorkflowContracts(
   options: WorkflowContractSyncOptions = {},
 ): Promise<WorkflowContractSyncResult> {
   const contractsDir = resolve(projectDir, options.contractsDir ?? "workflow-contracts");
-  const existing = await readWorkflowContracts(contractsDir);
+  const { contracts: existing, paths: existingPaths } = await readWorkflowContracts(contractsDir);
+  const occupiedPaths = new Set(existingPaths.values());
   const entries: WorkflowContractSyncEntry[] = [];
   const issues: string[] = [];
   const latestByName = new Map<string, ChimpbaseWorkflowContract>();
@@ -50,7 +51,12 @@ export async function syncRegisteredWorkflowContracts(
     const compatibility = (previousVersion !== null && previousVersion !== undefined)
       ? compareWorkflowContracts(previousVersion, contract)
       : "additive";
-    const path = join(contractsDir, workflowContractFileName(contract.name, contract.version));
+    let path = storedSameVersion === null ? join(contractsDir, workflowContractFileName(contract.name, contract.version))
+      : existingPaths.get(storedSameVersion)!;
+    if (storedSameVersion === null && occupiedPaths.has(path)) {
+      // Legacy escaping used underscores, so reserve their native percent encoding on collisions.
+      path = join(contractsDir, workflowContractFileName(contract.name, contract.version).replaceAll("_", "%5F"));
+    }
 
     if ((storedSameVersion !== null)) {
       if (storedSameVersion.hash !== contract.hash) {
@@ -156,15 +162,19 @@ function flattenRegisteredWorkflowContracts(registry: ChimpbaseRegistry): Chimpb
   return contracts;
 }
 
-async function readWorkflowContracts(contractsDir: string): Promise<Map<string, ChimpbaseWorkflowContract[]>> {
+async function readWorkflowContracts(contractsDir: string): Promise<{
+  contracts: Map<string, ChimpbaseWorkflowContract[]>;
+  paths: Map<ChimpbaseWorkflowContract, string>;
+}> {
   const contracts = new Map<string, ChimpbaseWorkflowContract[]>();
+  const paths = new Map<ChimpbaseWorkflowContract, string>();
   let files: string[] = [];
 
   try {
     files = await readdir(contractsDir);
   } catch (error) {
     if ((error !== null && error !== undefined) && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return contracts;
+      return { contracts, paths };
     }
 
     throw error;
@@ -175,20 +185,18 @@ async function readWorkflowContracts(contractsDir: string): Promise<Map<string, 
       continue;
     }
 
-    const contract = JSON.parse(await readFile(join(contractsDir, fileName), "utf8")) as ChimpbaseWorkflowContract;
+    const path = join(contractsDir, fileName);
+    const contract = JSON.parse(await readFile(path, "utf8")) as ChimpbaseWorkflowContract;
+    paths.set(contract, path);
     const versions = contracts.get(contract.name) ?? [];
     versions.push(contract);
     versions.sort((left, right) => left.version - right.version);
     contracts.set(contract.name, versions);
   }
 
-  return contracts;
+  return { contracts, paths };
 }
 
 function workflowContractFileName(name: string, version: number): string {
-  return `${encodeWorkflowName(name)}.v${version}.contract.json`;
-}
-
-function encodeWorkflowName(name: string): string {
-  return encodeURIComponent(name).replaceAll("%", "_");
+  return `${encodeURIComponent(name)}.v${version}.contract.json`;
 }

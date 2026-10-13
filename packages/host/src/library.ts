@@ -203,7 +203,7 @@ export function createChimpbaseRuntimeLibrary<
       const outcome = await host.executeAction(actionName, args);
       return { host, outcome };
     } catch (error) {
-      await host.close();
+      await Promise.resolve().then(() => host.close()).catch(() => {});
       throw error;
     }
   }
@@ -224,7 +224,7 @@ export function createChimpbaseRuntimeLibrary<
       const result = await host.syncWorkflowContracts(options);
       return { host, result };
     } catch (error) {
-      await host.close();
+      await Promise.resolve().then(() => host.close()).catch(() => {});
       throw error;
     }
   }
@@ -263,7 +263,7 @@ export function createChimpbaseRuntimeLibrary<
       const outcome = await host.executeAction(actionName, args);
       return { host, outcome };
     } catch (error) {
-      await host.close();
+      await Promise.resolve().then(() => host.close()).catch(() => {});
       throw error;
     }
   }
