@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { memoryBlobDriver } from "../packages/blobs/src/index.ts";
 import { defineChimpbaseApp, normalizeProjectConfig, type ChimpbaseEventBusCallback } from "../packages/core/index.ts";
-import { action, cron, subscription, v, worker } from "../packages/runtime/index.ts";
+import { action, ChimpbaseInputValidationError, cron, subscription, v, worker } from "../packages/runtime/index.ts";
 import { ChimpbaseBunHost, bunRuntimeShim } from "../packages/bun/src/runtime.ts";
 import { createRuntimeHost } from "../packages/host/src/runtime.ts";
 import type {
@@ -774,6 +774,94 @@ describe("telemetry sink interface", () => {
     );
     expect(scopes.some((s) => s.kind === "route" && s.name.includes("route:"))).toBe(true);
   });
+});
+
+describe("telemetry span failure cleanup", () => {
+  for (const target of ["action", "route", "trace"] as const) {
+    for (const phase of ["execution", "startup", "completion"] as const) {
+      test(`${target} preserves ${phase} failure and closes opened spans`, async () => {
+        const first = createMockSink();
+        const second = createMockSink();
+        const failure = new Error(`${phase} failed`);
+        const closed: string[] = [];
+        let executions = 0;
+        const startFirst = (): ChimpbaseSinkSpan => ({
+          setAttribute() {},
+          end(status) {
+            if (status === "error") closed.push("first");
+            throw phase === "completion" ? failure : new Error("span cleanup failed");
+          },
+        });
+        const startSecond = (): ChimpbaseSinkSpan => {
+          if (phase === "startup") throw failure;
+          return { setAttribute() {}, end(status) { if (status === "error") closed.push("second"); } };
+        };
+        if (target === "trace") {
+          first.sink.startSpan = startFirst;
+          second.sink.startSpan = startSecond;
+        } else {
+          first.sink.startHandlerSpan = startFirst;
+          second.sink.startHandlerSpan = startSecond;
+        }
+        const invoke = () => {
+          executions += 1;
+          if (phase === "execution") throw failure;
+          return "done";
+        };
+        const host = await createChimpbase({
+          storage: { engine: "memory" }, sinks: [first.sink, second.sink],
+          app: defineChimpbaseApp({
+            project: { name: "span-failure-test" },
+            httpHandler: () => new Response(invoke()),
+            registrations: [action("fail", (ctx) => target === "trace" ? ctx.trace("fail", invoke) : invoke())],
+          }),
+        });
+        cleanupHosts.push(host);
+        const execution = target === "route"
+          ? host.executeRoute(new Request("http://test.local/fail"))
+          : host.executeAction("fail");
+        await expect(execution).rejects.toBe(failure);
+        expect(closed).toEqual(phase === "startup" ? ["first"] : ["first", "second"]);
+        expect(executions).toBe(phase === "startup" ? 0 : 1);
+      });
+    }
+  }
+
+  for (const phase of ["execution", "startup"] as const) {
+    test.each(["response", "validation"] as const)(`route preserves %s ${phase} errors when span cleanup throws`, async (kind) => {
+      const first = createMockSink();
+      const second = createMockSink();
+      const start = first.sink.startHandlerSpan.bind(first.sink);
+      first.sink.startHandlerSpan = (scope) => {
+        const span = start(scope);
+        return { ...span, end(status, message) { span.end(status, message); throw new Error("span cleanup failed"); } };
+      };
+      const failure = kind === "response"
+        ? new Response("rejected", { status: 403 })
+        : new ChimpbaseInputValidationError("invalid input");
+      if (phase === "startup") second.sink.startHandlerSpan = () => { throw failure; };
+      const host = await createChimpbase({
+        storage: { engine: "memory" }, sinks: [first.sink, second.sink],
+        app: defineChimpbaseApp({
+          project: { name: "route-error-test" }, registrations: [],
+          httpHandler: () => { throw failure; },
+        }),
+      });
+      cleanupHosts.push(host);
+      const execution = host.executeRoute(new Request("http://test.local/fail"));
+      if (phase === "startup") await expect(execution).rejects.toBe(failure);
+      else {
+        const result = await execution;
+        if (failure instanceof Response) expect(result.response).toBe(failure);
+        else {
+          expect(result.response?.status).toBe(400);
+          expect(await result.response?.json() as unknown).toEqual({ error: { code: "INVALID_ACTION_INPUT", message: failure.message } });
+        }
+      }
+      expect(first.handlerSpanEnds[0]?.status).toBe("error");
+      expect(second.handlerSpanEnds).toHaveLength(phase === "startup" ? 0 : 1);
+    });
+  }
 });
 
 describe("runtime shutdown", () => {

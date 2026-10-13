@@ -1,7 +1,5 @@
 import { access } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import {
   defineChimpbaseApp,
@@ -14,9 +12,9 @@ import {
   isJsonObject,
   setChimpbaseActionRegistrationName,
 } from "@chimpbase/runtime";
+import { importProjectModule } from "./import_module.ts";
 
 const PROJECT_APP_MODULE_FILE = "chimpbase.app.ts";
-const require = createRequire(import.meta.url);
 
 export async function loadProjectAppDefinition(projectDir: string): Promise<ChimpbaseAppDefinition | null> {
   const resolvedProjectDir = resolve(projectDir);
@@ -41,12 +39,7 @@ export async function loadChimpbaseAppDefinitionModule(
   modulePath: string,
   projectDir = dirname(modulePath),
 ): Promise<ChimpbaseAppDefinition> {
-  const resolvedModulePath = resolve(modulePath);
-  // Bun shares the require/import cache and ignores query strings on file imports.
-  delete require.cache[resolvedModulePath];
-  const moduleUrl = pathToFileURL(resolvedModulePath);
-  moduleUrl.searchParams.set("chimpbase_load", globalThis.crypto.randomUUID());
-  const moduleExports: unknown = await import(moduleUrl.href);
+  const moduleExports = await importProjectModule(modulePath);
   if (!isJsonObject(moduleExports)) {
     throw new Error(`project app module did not resolve to a module namespace: ${modulePath}`);
   }

@@ -720,10 +720,11 @@ export class ChimpbaseEngine {
       module: ownership?.module ?? null,
       name,
     };
-    const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
+    const handlerSpans: ChimpbaseSinkSpan[] = [];
 
     try {
       this.telemetryExecutionDepth += 1;
+      for (const sink of this.sinks) handlerSpans.push(sink.startHandlerSpan(scope));
       let invoke: () => Promise<unknown> = () => this.invokeActionByName(name, args);
       for (const span of handlerSpans) {
         const runInContext = span.runInContext?.bind(span);
@@ -745,7 +746,7 @@ export class ChimpbaseEngine {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      for (const span of handlerSpans) span.end("error", message);
+      this.endErrorSpans(handlerSpans, message);
       throw error;
     } finally {
       this.finishTelemetryExecution();
@@ -794,10 +795,11 @@ export class ChimpbaseEngine {
       module: null,
       name: `route:${request.method} ${url.pathname}`,
     };
-    const handlerSpans = this.sinks.map((sink) => sink.startHandlerSpan(scope));
+    const handlerSpans: ChimpbaseSinkSpan[] = [];
 
     try {
       this.telemetryExecutionDepth += 1;
+      for (const sink of this.sinks) handlerSpans.push(sink.startHandlerSpan(scope));
       const routeContext = new Map<string, unknown>();
       let invoke = async () => {
         for (const route of this.registry.routes) {
@@ -841,8 +843,8 @@ export class ChimpbaseEngine {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      for (const span of handlerSpans) span.end("error", message);
-      if (error instanceof Response || error instanceof ChimpbaseInputValidationError) {
+      this.endErrorSpans(handlerSpans, message);
+      if (handlerSpans.length === this.sinks.length && (error instanceof Response || error instanceof ChimpbaseInputValidationError)) {
         const emittedEvents = this.takeCommittedEvents();
         if (runOperation !== undefined) await runOperation(async () => await this.flushTelemetryToStreams(undefined, telemetryStart));
         else await this.flushTelemetryToStreams(undefined, telemetryStart);
@@ -1157,9 +1159,7 @@ export class ChimpbaseEngine {
           }
         }
       } finally {
-        for (const span of handlerSpans) {
-          try { span.end("error", message); } catch { /* Span cleanup must preserve the execution error. */ }
-        }
+        this.endErrorSpans(handlerSpans, message);
       }
       throw error;
     } finally {
@@ -1256,6 +1256,12 @@ export class ChimpbaseEngine {
 
   drainTelemetryRecords(): ChimpbaseTelemetryRecord[] {
     return this.telemetryRecords.splice(0);
+  }
+
+  private endErrorSpans(spans: readonly ChimpbaseSinkSpan[], message: string): void {
+    for (const span of spans) {
+      try { span.end("error", message); } catch { /* Span cleanup must preserve the execution error. */ }
+    }
   }
 
   private finishTelemetryExecution(): void {
@@ -1453,9 +1459,7 @@ export class ChimpbaseEngine {
       for (const span of handlerSpans) span.end("ok");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      for (const span of handlerSpans) {
-        try { span.end("error", message); } catch { /* Span cleanup must preserve the execution error. */ }
-      }
+      this.endErrorSpans(handlerSpans, message);
       throw error;
     }
   }
@@ -1724,9 +1728,10 @@ export class ChimpbaseEngine {
           timestamp: this.timestampNow(),
         });
 
-        const sinkSpans = this.sinks.map((sink) => sink.startSpan(scope, name, { ...spanAttributes }));
+        const sinkSpans: ChimpbaseSinkSpan[] = [];
 
         try {
+          for (const sink of this.sinks) sinkSpans.push(sink.startSpan(scope, name, { ...spanAttributes }));
           let invoke: () => TResult | Promise<TResult> = () => callback(span);
           for (const sinkSpan of sinkSpans) {
             const runInContext = sinkSpan.runInContext?.bind(sinkSpan);
@@ -1761,7 +1766,7 @@ export class ChimpbaseEngine {
             status: "error",
             timestamp: this.timestampNow(),
           });
-          for (const sinkSpan of sinkSpans) sinkSpan.end("error", errorMessage);
+          this.endErrorSpans(sinkSpans, errorMessage);
           throw error;
         }
       },

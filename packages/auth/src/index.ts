@@ -1,3 +1,6 @@
+import { Buffer } from "node:buffer";
+import { timingSafeEqual as equalBytes } from "node:crypto";
+
 import {
   action,
   isJsonObject,
@@ -163,15 +166,7 @@ function isExcludedPath(pathname: string, excludePaths: string[]): boolean {
 }
 
 function isProtectedPath(pathname: string, protectedPaths: string[] | "all"): boolean {
-  if (protectedPaths === "all") {
-    return true;
-  }
-
-  const normalized = normalizePath(pathname);
-  return protectedPaths.some((path) => {
-    const normalizedPath = normalizePath(path);
-    return normalizedPath === "/" || normalized === normalizedPath || normalized.startsWith(normalizedPath + "/");
-  });
+  return protectedPaths === "all" || pathStartsWith(pathname, protectedPaths);
 }
 
 function pathStartsWith(pathname: string, prefixes: string[]): boolean {
@@ -225,16 +220,7 @@ function validateScopes(scopes: string[]): void {
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-
-  return result === 0;
+  return a.length === b.length && equalBytes(Buffer.from(a, "utf16le"), Buffer.from(b, "utf16le"));
 }
 
 function nowIso(): string {

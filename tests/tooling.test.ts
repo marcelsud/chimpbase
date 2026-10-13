@@ -17,6 +17,7 @@ import { inferNumberEnv } from "../packages/host/src/runtime.ts";
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import {
   loadProjectMigrations,
+  loadProjectMigrationsDefinition,
   loadProjectPostgresMigrations,
   readSqlMigrations,
   resolveLocalMigrationsDir,
@@ -275,6 +276,68 @@ describe("@chimpbase/tooling", () => {
     expect(await resolvePostgresMigrationsDir(baseProjectDir)).toBe(resolve(baseProjectDir, "migrations"));
   });
 
+  test("Postgres loader preserves default, empty, missing and engine-specific directory choices", async () => {
+    const projectDir = await createTempDir("postgres-loader-directories");
+    expect(await loadProjectPostgresMigrations(projectDir)).toEqual([]);
+    await mkdir(resolve(projectDir, "migrations/postgres"), { recursive: true });
+    await writeFile(resolve(projectDir, "migrations/postgres/ignored.txt"), "ignored");
+    await writeFile(resolve(projectDir, "migrations/002_second.sql"), "SELECT 2;");
+    await writeFile(resolve(projectDir, "migrations/001_first.sql"), "SELECT 1;");
+    const base = [{ name: "001_first.sql", sql: "SELECT 1;" }, { name: "002_second.sql", sql: "SELECT 2;" }];
+    for (const migrationsDir of [undefined, null, ""]) {
+      expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir })).toEqual(base);
+    }
+    await writeFile(resolve(projectDir, "migrations/postgres/003_pg.sql"), "SELECT 3;");
+    for (const migrationsDir of [undefined, null, ""]) {
+      expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir })).toEqual([
+        { name: "003_pg.sql", sql: "SELECT 3;" },
+      ]);
+    }
+    expect(await loadProjectMigrations(projectDir, "postgres", { migrationsDir: "" })).toEqual([]);
+    expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir: resolve(projectDir, "missing") })).toEqual([]);
+
+    const migrationsDir = resolve(projectDir, "custom");
+    await mkdir(resolve(migrationsDir, "postgres"), { recursive: true });
+    await writeFile(resolve(migrationsDir, "001_custom.sql"), "SELECT 4;");
+    expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir })).toEqual([
+      { name: "001_custom.sql", sql: "SELECT 4;" },
+    ]);
+    await writeFile(resolve(migrationsDir, "postgres/002_custom_pg.sql"), "SELECT 5;");
+    expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir })).toEqual([
+      { name: "002_custom_pg.sql", sql: "SELECT 5;" },
+    ]);
+  });
+
+  test("Postgres loader preserves app, definition and SQL precedence including module ownership", async () => {
+    const projectDir = await createTempDir("postgres-loader-precedence");
+    await mkdir(resolve(projectDir, "migrations"));
+    await writeFile(resolve(projectDir, "migrations/001_disk.sql"), "SELECT 1;");
+    const migrationsPath = resolve(projectDir, "chimpbase.migrations.ts");
+    await writeFile(migrationsPath, "export default { sqlite: [] };");
+    expect(await loadProjectPostgresMigrations(projectDir)).toEqual([]);
+    await writeFile(migrationsPath, 'export default { postgres: [{ name: "inline", sql: "SELECT 2;" }] };');
+    const appPath = resolve(projectDir, "chimpbase.app.ts");
+    await writeFile(appPath, "export const app = { migrations: { sqlite: [] } };");
+    expect(await loadProjectPostgresMigrations(projectDir)).toEqual([
+      { name: "inline", owner: "framework", sql: "SELECT 2;" },
+    ]);
+    const coreImportPath = resolve(import.meta.dir, "../packages/core/index.ts");
+    await writeFile(appPath, `
+      import { defineChimpbaseModuleInterface, defineChimpbaseModuleImplementation } from ${JSON.stringify(coreImportPath)};
+      const inventory = defineChimpbaseModuleInterface({ name: "inventory", version: 1, calls: {}, events: {} });
+      export const app = { modules: [defineChimpbaseModuleImplementation({
+        interface: inventory, calls: {},
+        migrations: { postgres: [{ name: "init", sql: "CREATE TABLE chimpbase_inventory.items (id TEXT);" }] },
+      })] };
+    `);
+    const owned = [
+      { name: "inventory:__schema", owner: "inventory", sql: "CREATE SCHEMA IF NOT EXISTS chimpbase_inventory" },
+      { name: "inventory:init", owner: "inventory", sql: "CREATE TABLE chimpbase_inventory.items (id TEXT);" },
+    ];
+    expect(await loadProjectPostgresMigrations(projectDir, { migrationsDir: "" })).toEqual(owned);
+    expect(await loadProjectMigrations(projectDir, "postgres")).toEqual(owned);
+  });
+
   test("prefers chimpbase.migrations.ts over local SQL files", async () => {
     const projectDir = await createTempDir("typed-migrations");
     await mkdir(resolve(projectDir, "migrations/sqlite"), { recursive: true });
@@ -305,6 +368,29 @@ describe("@chimpbase/tooling", () => {
     ]);
     expect(postgresMigrations).toEqual([
       { name: "001_pg_inline", owner: "framework", sql: "SELECT 'postgres-inline';" },
+    ]);
+  });
+
+  test("reloads changed migration definitions from their original read-only source", async () => {
+    const projectDir = await createTempDir("reload-migrations");
+    const modulePath = resolve(projectDir, "chimpbase.migrations.ts");
+    const source = 'export const migrations = { postgres: [{ name: "first", sql: "SELECT 1;" }] };';
+    await writeFile(modulePath, source);
+    await chmod(projectDir, 0o555);
+    try {
+      expect((await loadProjectMigrationsDefinition(projectDir))?.postgres).toEqual([
+        { name: "first", owner: "framework", sql: "SELECT 1;" },
+      ]);
+      expect(await readdir(projectDir)).toEqual(["chimpbase.migrations.ts"]);
+    } finally {
+      await chmod(projectDir, 0o755);
+    }
+    await writeFile(modulePath, source.replace("first", "second").replace("SELECT 1;", "SELECT 2;"));
+    expect((await loadProjectMigrationsDefinition(projectDir))?.postgres).toEqual([
+      { name: "second", owner: "framework", sql: "SELECT 2;" },
+    ]);
+    expect(await loadProjectPostgresMigrations(projectDir)).toEqual([
+      { name: "second", owner: "framework", sql: "SELECT 2;" },
     ]);
   });
 

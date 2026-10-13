@@ -9,7 +9,6 @@ import type {
   ChimpbaseBlobDriver,
   ChimpbaseBlobDriverGetResult,
   ChimpbaseBlobDriverPutResult,
-  ChimpbaseBlobDriverRange,
 } from "@chimpbase/core";
 
 export interface FsBlobDriverOptions {
@@ -91,6 +90,28 @@ function toBuffer(chunk: unknown): Buffer {
   throw new Error("unexpected stream chunk type");
 }
 
+async function writeBlob(
+  target: string,
+  reader: Readable,
+  writePath = target,
+): Promise<ChimpbaseBlobDriverPutResult> {
+  const hash = createHash("sha256");
+  let size = 0;
+  reader.on("data", (chunk: unknown) => {
+    const buf = toBuffer(chunk);
+    hash.update(buf);
+    size += buf.byteLength;
+  });
+  try {
+    await pipeline(reader, createWriteStream(writePath));
+    if (writePath !== target) await rename(writePath, target);
+  } catch (error) {
+    await rm(writePath, { force: true });
+    throw error;
+  }
+  return { driverRef: target, size, sha256: hash.digest("hex") };
+}
+
 export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver {
   const root = resolve(options.root);
   const shardBytes = options.shardBytes ?? 2;
@@ -107,24 +128,7 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
     async put(bucket, key, body) {
       const target = objectPath(bucket, key);
       await ensureDir(dirname(target));
-      const hash = createHash("sha256");
-      let size = 0;
-      const tempTarget = `${target}.tmp-${Date.now()}`;
-      const writeStream = createWriteStream(tempTarget);
-      const reader = webToNode(body);
-      reader.on("data", (chunk: unknown) => {
-        const buf = toBuffer(chunk);
-        hash.update(buf);
-        size += buf.byteLength;
-      });
-      try {
-        await pipeline(reader, writeStream);
-        await rename(tempTarget, target);
-      } catch (error) {
-        await rm(tempTarget, { force: true });
-        throw error;
-      }
-      return { driverRef: target, size, sha256: hash.digest("hex") };
+      return await writeBlob(target, webToNode(body), `${target}.tmp-${Date.now()}`);
     },
     async get(_bucket, _key, driverRef, range): Promise<ChimpbaseBlobDriverGetResult | null> {
       const source = childPath(root, driverRef);
@@ -161,73 +165,25 @@ export function fsBlobDriver(options: FsBlobDriverOptions): ChimpbaseBlobDriver 
       const source = childPath(root, src.driverRef);
       const target = objectPath(dst.bucket, dst.key);
       await ensureDir(dirname(target));
-      const reader = createReadStream(source);
-      const writer = createWriteStream(target);
-      const hash = createHash("sha256");
-      let size = 0;
-      reader.on("data", (chunk: unknown) => {
-        const buf = toBuffer(chunk);
-        hash.update(buf);
-        size += buf.byteLength;
-      });
-      try {
-        await pipeline(reader, writer);
-      } catch (error) {
-        await rm(target, { force: true });
-        throw error;
-      }
-      return { driverRef: target, size, sha256: hash.digest("hex") };
+      return await writeBlob(target, createReadStream(source));
     },
     async putPart(uploadId, partNumber, body) {
       const dir = uploadsRoot(uploadId);
       await ensureDir(dir);
       const target = join(dir, `part-${String(partNumber).padStart(6, "0")}-${randomUUID()}`);
-      const hash = createHash("sha256");
-      let size = 0;
-      const writer = createWriteStream(target);
-      const reader = webToNode(body);
-      reader.on("data", (chunk: unknown) => {
-        const buf = toBuffer(chunk);
-        hash.update(buf);
-        size += buf.byteLength;
-      });
-      try {
-        await pipeline(reader, writer);
-      } catch (error) {
-        await rm(target, { force: true });
-        throw error;
-      }
-      return { driverRef: target, size, sha256: hash.digest("hex") };
+      return await writeBlob(target, webToNode(body));
     },
     async assemble(uploadId, parts, finalBucket, finalKey) {
       const target = objectPath(finalBucket, finalKey);
       const ordered = parts.map((part) => ({ ...part, driverRef: childPath(root, part.driverRef) }))
         .sort((a, b) => a.partNumber - b.partNumber);
       await ensureDir(dirname(target));
-      const hash = createHash("sha256");
-      let size = 0;
-      const writer = createWriteStream(target);
-      try {
+      const reader = Readable.from((async function* (): AsyncGenerator<unknown, void, undefined> {
         for (const part of ordered) {
-          const reader = createReadStream(part.driverRef);
-          reader.on("data", (chunk: unknown) => {
-            const buf = toBuffer(chunk);
-            hash.update(buf);
-            size += buf.byteLength;
-          });
-          await pipeline(reader, writer, { end: false });
+          yield* createReadStream(part.driverRef);
         }
-        writer.end();
-        await new Promise<void>((resolveClose, rejectClose) => {
-          writer.once("close", () => resolveClose());
-          writer.once("error", rejectClose);
-        });
-      } catch (error) {
-        writer.destroy();
-        await rm(target, { force: true });
-        throw error;
-      }
-      return { driverRef: target, size, sha256: hash.digest("hex") };
+      })());
+      return await writeBlob(target, reader);
     },
     async abortUpload(uploadId) {
       try {
