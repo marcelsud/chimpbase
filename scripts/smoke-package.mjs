@@ -79,6 +79,10 @@ const expectedScripts = {
   "build:check": "node ./scripts/build-package.mjs --check",
   prepack: "bun run build:publish:packages && bun run smoke:package",
   "publish:dry-run": "npm pack --dry-run",
+  "publish:dry-run:built": "bun run smoke:package && npm pack --dry-run --ignore-scripts",
+  "docs:check": "bun run build:publish:packages && bun run docs:check:built",
+  "docs:check:built": "node ./scripts/check-docs.mjs",
+  "test:built": "CHIMPBASE_TEST_PREBUILT=1 bun run test",
   "release:publish": "npm publish",
 };
 const cliSmokeCommand = "__chimpbase_package_smoke__";

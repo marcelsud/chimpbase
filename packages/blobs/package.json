@@ -2,40 +2,13 @@
   "name": "@chimpbase/blobs",
   "version": "0.7.0",
   "private": true,
-  "description": "Blob storage primitive and drivers for Chimpbase (filesystem + in-memory).",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/blobs"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "chimpbase",
-    "blobs",
-    "object-storage",
-    "filesystem",
-    "typescript"
-  ],
-  "files": [
-    "dist"
-  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js",
       "default": "./dist/src/index.js"
     }
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "prepack": "node ../../scripts/build-package.mjs blobs"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",

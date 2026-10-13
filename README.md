@@ -84,5 +84,5 @@ bun install
 bun run dev:bun:basic
 ```
 
-Run the repository checks with `bun run ci:check`. Build the documentation with `bun run docs:build`.
+Run the repository checks with `bun run ci:check`; it builds the public package once and reuses the output for tests, documentation checks and packing. Standalone `bun run docs:check` and `bun run publish:dry-run` still build automatically. Build the documentation with `bun run docs:build`.
 

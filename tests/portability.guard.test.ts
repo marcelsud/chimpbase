@@ -79,39 +79,25 @@ describe("portable package guards", () => {
     expect(violations).toEqual([]);
   });
 
-  test("@chimpbase/core publishes the internal files its entrypoint imports", async () => {
-    const manifest = JSON.parse(
-      await readFile(resolve(repoRoot, "packages/core/package.json"), "utf8"),
-    ) as { files?: string[] };
-
-    expect(manifest.files).toEqual([
-      "dist",
-      "README.md",
-      "LICENSE",
-      "NOTICE",
-    ]);
-  });
-
-  test("published packages do not use workspace protocol for internal runtime dependencies", async () => {
-    const packageDirs = ["bun", "core", "host", "node", "postgres", "rest-collections", "runtime", "tooling"] as const;
-    const violations: string[] = [];
-
-    for (const packageName of packageDirs) {
+  test("implementation workspaces stay private without publishing metadata", async () => {
+    for await (const path of new Bun.Glob("packages/*/package.json").scan({ cwd: repoRoot })) {
       const manifest = JSON.parse(
-        await readFile(resolve(repoRoot, `packages/${packageName}/package.json`), "utf8"),
-      ) as { dependencies?: Record<string, string> };
+        await readFile(resolve(repoRoot, path), "utf8"),
+      ) as {
+        private?: boolean;
+        files?: unknown;
+        publishConfig?: unknown;
+        scripts?: { prepack?: string };
+      };
 
-      for (const [dependency, version] of Object.entries(manifest.dependencies ?? {})) {
-        if (dependency.startsWith("@chimpbase/") && version.startsWith("workspace:")) {
-          violations.push(`packages/${packageName}/package.json: ${dependency} -> ${version}`);
-        }
-      }
+      expect(manifest.private).toBe(true);
+      expect(manifest.files).toBeUndefined();
+      expect(manifest.publishConfig).toBeUndefined();
+      expect(manifest.scripts?.prepack).toBeUndefined();
     }
-
-    expect(violations).toEqual([]);
   });
 
-  test("packages consumed by the Node host publish JavaScript runtime exports", async () => {
+  test("Node host dependencies expose compiled JavaScript and declarations", async () => {
     const packageDirs = ["runtime", "core", "tooling", "postgres", "rest-collections", "host", "node"] as const;
     const violations: string[] = [];
 
@@ -120,12 +106,7 @@ describe("portable package guards", () => {
         await readFile(resolve(repoRoot, `packages/${packageName}/package.json`), "utf8"),
       ) as {
         exports?: Record<string, string | { default?: string; import?: string; types?: string }>;
-        files?: string[];
       };
-
-      if (!(manifest.files?.includes("dist") === true)) {
-        violations.push(`packages/${packageName}/package.json: missing dist in files`);
-      }
 
       for (const [subpath, entry] of Object.entries(manifest.exports ?? {})) {
         if (typeof entry === "string") {

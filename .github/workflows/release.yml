@@ -34,10 +34,6 @@ jobs:
       - name: Verify release
         run: bun run release:check
 
-      - name: Publish packages (dry run)
-        if: ${{ inputs.dry_run }}
-        run: bun run publish:dry-run
-
       - name: Publish package
         if: ${{ !inputs.dry_run }}
         shell: bash
@@ -51,4 +47,4 @@ jobs:
             exit 0
           fi
 
-          bun run release:publish
+          npm publish --ignore-scripts

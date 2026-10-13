@@ -171,7 +171,7 @@
   "scripts": {
     "build:publish:packages": "node ./scripts/build-package.mjs --publish runtime core tooling postgres host node bun rest-collections otel auth blobs webhooks pact mesh",
     "build:check": "node ./scripts/build-package.mjs --check",
-    "ci:check": "bun run modules:check && bun run typecheck && bun run check:any && bun run test && bun run docs:check && bun run docs:build && bun run publish:dry-run",
+    "ci:check": "bun run build:publish:packages && bun run modules:check && bun run typecheck && bun run check:any && bun run test:built && bun run docs:check:built && bun run docs:build && bun run publish:dry-run:built",
     "check:any": "node ./scripts/check-any.mjs",
     "modules:check": "bun packages/bun/src/cli.ts modules check --project-dir examples/modular-monolith",
     "dev:bun:basic": "bun run --filter @chimpbase/example-bun-basic dev",
@@ -182,15 +182,18 @@
     "dev:node:advanced": "bun run --filter @chimpbase/example-node-advanced dev",
     "prepack": "bun run build:publish:packages && bun run smoke:package",
     "publish:dry-run": "npm pack --dry-run",
+    "publish:dry-run:built": "bun run smoke:package && npm pack --dry-run --ignore-scripts",
     "release:check": "bun run ci:check",
     "release:publish": "npm publish",
     "smoke:package": "node ./scripts/smoke-package.mjs",
     "docs:dev": "vitepress dev docs",
-    "docs:check": "bun run build:publish:packages && node ./scripts/check-docs.mjs",
+    "docs:check": "bun run build:publish:packages && bun run docs:check:built",
+    "docs:check:built": "node ./scripts/check-docs.mjs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "docs:deploy": "vitepress build docs && wrangler pages deploy docs/.vitepress/dist --project-name chimpbase-docs",
     "test": "bun test --pass-with-no-tests",
+    "test:built": "CHIMPBASE_TEST_PREBUILT=1 bun run test",
     "typecheck": "./node_modules/.bin/tsc --noEmit"
   },
   "dependencies": {

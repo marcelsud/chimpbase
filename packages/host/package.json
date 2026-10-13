@@ -2,40 +2,13 @@
   "name": "@chimpbase/host",
   "version": "0.7.0",
   "private": true,
-  "description": "Shared host runtime and adapters for Chimpbase runtimes.",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/host"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "chimpbase",
-    "host",
-    "runtime",
-    "postgres",
-    "typescript"
-  ],
-  "files": [
-    "dist"
-  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js",
       "default": "./dist/src/index.js"
     }
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "prepack": "node ../../scripts/build-package.mjs host"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",

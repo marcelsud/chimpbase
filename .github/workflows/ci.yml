@@ -28,7 +28,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build packages
-        run: node ./scripts/build-package.mjs runtime core tooling postgres host node rest-collections otel bun pact auth webhooks
+        run: bun run build:publish:packages
 
       - name: Typecheck
         run: bun run typecheck
@@ -37,13 +37,13 @@ jobs:
         run: bun run check:any
 
       - name: Unit tests
-        run: bun test
+        run: bun run test:built
 
       - name: Check documentation examples
-        run: bun run docs:check
+        run: bun run docs:check:built
 
       - name: Publish dry-run
-        run: bun run publish:dry-run
+        run: bun run publish:dry-run:built
 
       - name: Build documentation
         run: bun run docs:build
@@ -84,7 +84,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build packages
-        run: node ./scripts/build-package.mjs runtime core tooling postgres host node rest-collections otel bun pact auth webhooks
+        run: bun run build:publish:packages
 
       - name: Postgres integration tests
         run: >-

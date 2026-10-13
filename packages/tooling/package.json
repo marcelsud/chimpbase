@@ -2,28 +2,7 @@
   "name": "@chimpbase/tooling",
   "version": "0.7.0",
   "private": true,
-  "description": "Local tooling, config loading and CLI helpers for Chimpbase.",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/tooling"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "chimpbase",
-    "tooling",
-    "cli",
-    "config",
-    "schema"
-  ],
-  "files": [
-    "dist"
-  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
@@ -75,12 +54,6 @@
       "import": "./dist/src/workflow_contracts.js",
       "default": "./dist/src/workflow_contracts.js"
     }
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "prepack": "node ../../scripts/build-package.mjs tooling"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",
