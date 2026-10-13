@@ -196,10 +196,17 @@ export function createOtelSink(
     },
 
     async shutdown() {
-      await tracerProvider.shutdown();
-      await meterProvider.shutdown();
-      await loggerProvider.shutdown();
-      context.disable();
+      const results = await Promise.allSettled(
+        [tracerProvider, meterProvider, loggerProvider].map(async (provider) => await provider.shutdown()),
+      );
+      try {
+        context.disable();
+      } catch (error) {
+        results.push({ status: "rejected", reason: error });
+      }
+      const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason as unknown] : []);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "OpenTelemetry cleanup failed");
     },
   };
 }

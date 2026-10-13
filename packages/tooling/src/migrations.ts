@@ -1,6 +1,5 @@
 import { access, readdir, readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import {
   defineChimpbaseMigrations,
@@ -11,6 +10,7 @@ import {
 } from "@chimpbase/core";
 import { isArrayValue, isJsonObject } from "@chimpbase/runtime";
 import { loadProjectAppDefinition } from "./app.ts";
+import { importProjectModule } from "./import_module.ts";
 
 export interface SqlMigration extends ChimpbaseMigration {}
 
@@ -96,24 +96,7 @@ export async function loadProjectPostgresMigrations(
   projectDir: string,
   options: { migrationsDir?: string | null } = {},
 ): Promise<SqlMigration[]> {
-  const app = await loadProjectAppDefinition(projectDir);
-  if ((app !== null)) {
-    const appMigrations = [...app.migrations.postgres];
-    if (appMigrations.length > 0) {
-      return appMigrations;
-    }
-  }
-
-  const definedMigrations = await loadProjectMigrationsDefinition(projectDir);
-  if ((definedMigrations !== null)) {
-    return [...definedMigrations.postgres];
-  }
-
-  if ((options.migrationsDir !== null && options.migrationsDir !== undefined && options.migrationsDir.length > 0)) {
-    return await readSqlMigrations(await resolveLocalMigrationsDir(options.migrationsDir, "postgres"));
-  }
-
-  return await readSqlMigrations(await resolvePostgresMigrationsDir(projectDir));
+  return await loadProjectMigrations(projectDir, "postgres", { migrationsDir: options.migrationsDir || undefined });
 }
 
 export async function loadProjectMigrationsDefinition(
@@ -124,9 +107,7 @@ export async function loadProjectMigrationsDefinition(
     return null;
   }
 
-  const moduleUrl = pathToFileURL(modulePath);
-  moduleUrl.searchParams.set("chimpbase_migrations", globalThis.crypto.randomUUID());
-  const moduleExports: unknown = await import(moduleUrl.href);
+  const moduleExports = await importProjectModule(modulePath);
   if (!isJsonObject(moduleExports)) {
     throw new Error(`project migrations module did not resolve to a module namespace: ${modulePath}`);
   }

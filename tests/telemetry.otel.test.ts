@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { context, SpanStatusCode, trace } from "@opentelemetry/api";
+import { context, createContextKey, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
@@ -15,6 +17,7 @@ import {
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { defineChimpbaseApp } from "../packages/core/index.ts";
+import { createOtelSink } from "../packages/otel/src/index.ts";
 import { action } from "../packages/runtime/index.ts";
 import type { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 import type {
@@ -170,6 +173,56 @@ async function createHostWithOtel(sink: ChimpbaseTelemetrySink) {
 }
 
 describe("opentelemetry integration", () => {
+  test.each(["traces", "metrics", "logs", "context", "multiple"] as const)("shutdown attempts every provider when %s fails", async (failing) => {
+    const closed: string[] = [];
+    const traceFailure = new Error("trace shutdown failed");
+    const metricFailure = new Error("metric shutdown failed");
+    const logFailure = new Error("log shutdown failed");
+    const contextFailure = new Error("context shutdown failed");
+    const traceExporter = new InMemorySpanExporter();
+    const metricExporter = new OTLPMetricExporter();
+    const logExporter = new OTLPLogExporter();
+    traceExporter.shutdown = async () => {
+      closed.push("traces");
+      if (failing === "traces" || failing === "multiple") throw traceFailure;
+    };
+    metricExporter.export = (_metrics, callback) => callback({ code: 0 });
+    metricExporter.shutdown = async () => {
+      closed.push("metrics");
+      if (failing === "metrics" || failing === "multiple") throw metricFailure;
+    };
+    logExporter.shutdown = async () => {
+      closed.push("logs");
+      if (failing === "logs" || failing === "multiple") throw logFailure;
+    };
+    const sink = createOtelSink({ traceExporter, metricExporter, logExporter });
+    const disableContext = context.disable.bind(context);
+    const disable = failing === "context" ? spyOn(context, "disable").mockImplementation(() => {
+      disableContext();
+      throw contextFailure;
+    }) : undefined;
+    try {
+      if (failing === "multiple") {
+        try {
+          await sink.shutdown?.();
+          throw new Error("shutdown unexpectedly succeeded");
+        } catch (error) {
+          expect(error).toBeInstanceOf(AggregateError);
+          if (error instanceof AggregateError) expect(error.errors as unknown[]).toEqual([traceFailure, metricFailure, logFailure]);
+        }
+      } else {
+        await expect(sink.shutdown?.()).rejects.toBe(
+          failing === "traces" ? traceFailure : failing === "metrics" ? metricFailure : failing === "logs" ? logFailure : contextFailure,
+        );
+      }
+      expect(closed.sort()).toEqual(["logs", "metrics", "traces"]);
+      const key = createContextKey("shutdown-test");
+      expect(context.with(context.active().setValue(key, true), () => context.active().getValue(key))).toBeUndefined();
+    } finally {
+      disable?.mockRestore();
+    }
+  });
+
   test("creates handler span for action execution", async () => {
     const { exporter, sink } = createTestOtelSink();
     const host = await createHostWithOtel(sink);

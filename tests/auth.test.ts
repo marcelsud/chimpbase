@@ -106,6 +106,20 @@ describe("@chimpbase/auth", () => {
     }
   });
 
+  test("protected prefixes normalize separators and preserve segment boundaries", async () => {
+    const host = await createAuthHost({ protectedPaths: [" //api///items// "] });
+    try {
+      for (const path of ["/api/items", "//api///items///child//"]) {
+        expect((await host.executeRoute(new Request(`http://test.local${path}`))).response?.status).toBe(401);
+      }
+      for (const path of ["/", "/api", "/api/items-extra", "/public"]) {
+        expect((await host.executeRoute(new Request(`http://test.local${path}`))).response).toBeNull();
+      }
+    } finally {
+      await host.close();
+    }
+  });
+
   test("blocks request without API key", async () => {
     const host = await createAuthHost();
     try {
@@ -1020,6 +1034,27 @@ describe("@chimpbase/auth", () => {
   });
 
   // ── Timing-safe bootstrap key comparison ──────────────────────────────
+
+  test("bootstrap comparison preserves Unicode code units and rejects empty secrets", async () => {
+    let bootstrapKey = "";
+    const host = await createChimpbase({
+      storage: { engine: "memory" },
+      secrets: { get: () => bootstrapKey },
+      registrations: [chimpbaseAuth({ bootstrapKeySecret: "BOOTSTRAP_KEY" })],
+    });
+    try {
+      for (const [expected, candidate, valid] of [
+        ["café", "café", true], ["🚀", "🚀", true],
+        ["\ud800", "\ud800", true], ["\ud800", "\ud801", false], ["\ud800", "\ufffd", false],
+        ["secret", "secrex", false], ["secret", "secret-longer", false], ["", "", false],
+      ] as const) {
+        bootstrapKey = expected;
+        expect((await host.executeAction("__chimpbase.auth.validateApiKey", candidate)).result).toMatchObject({ valid });
+      }
+    } finally {
+      await host.close();
+    }
+  });
 
   test("bootstrap key with wrong value is rejected", async () => {
     const host = await createAuthHost();

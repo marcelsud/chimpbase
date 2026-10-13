@@ -2,11 +2,15 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHmac } from "node:crypto";
 
 import { createChimpbase } from "../packages/bun/src/library.ts";
 import { chimpbaseAuth } from "../packages/auth/src/index.ts";
 import {
   chimpbaseWebhooks,
+  basicAuth,
+  bearerToken,
+  hmac,
   headerToken,
   type WebhookDeliveryLog,
   type WebhookRegistration,
@@ -330,6 +334,38 @@ async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?:
 }
 
 describe("@chimpbase/webhooks", () => {
+  test("native comparison preserves HMAC, Basic, Bearer and header verifier results", async () => {
+    const body = '{"ok":true}';
+    const signature = createHmac("sha256", "secret").update(body).digest("hex");
+    for (const [received, valid] of [[signature, true], ["0".repeat(signature.length), false], ["short", false]] as const) {
+      expect(await hmac({ signatureHeader: "x-signature", secretName: "SECRET", prefix: "sha256=" })(
+        new Request("https://test.local", { headers: { "x-signature": `sha256=${received}` } }), body, () => "secret",
+      )).toBe(valid);
+    }
+    for (const [password, valid] of [["sécret", true], ["sécres", false], ["short", false], ["", false]] as const) {
+      expect(await basicAuth({ username: "user", passwordSecretName: "SECRET" })(
+        new Request("https://test.local", { headers: { authorization: `Basic ${btoa(`user:${password}`)}` } }), "", () => "sécret",
+      )).toBe(valid);
+    }
+    for (const [expected, received, valid] of [
+      ["token", "token", true], ["token", "tokex", false], ["token", "shorter", false],
+      ["café", "café", true], ["🚀", "🚀", true],
+      ["\ud800", "\ud800", true], ["\ud800", "\ud801", false], ["\ud800", "\ufffd", false], ["", "", false],
+    ] as const) {
+      const request = new Request("https://test.local");
+      const getHeader = spyOn(request.headers, "get");
+      try {
+        getHeader.mockReturnValue(`Bearer ${received}`);
+        expect(await bearerToken({ secretName: "SECRET" })(request, "", () => expected)).toBe(valid);
+        getHeader.mockReturnValue(received);
+        expect(await bearerToken({ secretName: "SECRET", header: "x-token" })(request, "", () => expected)).toBe(valid);
+        expect(await headerToken({ secretName: "SECRET", header: "x-token" })(request, "", () => expected)).toBe(valid);
+      } finally {
+        getHeader.mockRestore();
+      }
+    }
+  });
+
   test("management routes reject malformed encoded IDs with 400", async () => {
     const host = await createWebhooksHost();
     try {

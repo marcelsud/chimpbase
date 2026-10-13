@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as nodeCrypto from "node:crypto";
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -251,6 +252,130 @@ describe("PostgreSQL blob concurrency", () => {
       if (!closed) await a.close();
       await b.routeEnv().blobs.delete(bucket, "key");
       await b.close();
+    }
+  });
+});
+
+describe("filesystem blob streaming writes", () => {
+  test("put, copy and ordered assembly preserve bytes, hashes and independent files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-writes-"));
+    cleanupDirs.push(root);
+    const driver = fsBlobDriver({ root });
+    const contents = "0123456789abcdef".repeat(16 * 1024) + "😀\0";
+    const sha256 = nodeCrypto.createHash("sha256").update(contents).digest("hex");
+    const size = new TextEncoder().encode(contents).byteLength;
+    const original = await driver.put("uploads", "key", new Blob([contents]).stream());
+    const copied = await driver.copy({ bucket: "uploads", key: "key", driverRef: original.driverRef }, { bucket: "uploads", key: "key" });
+    expect(original).toMatchObject({ size, sha256 });
+    expect(copied).toEqual({ ...original, driverRef: copied.driverRef });
+    expect(copied.driverRef).not.toBe(original.driverRef);
+    await driver.delete("uploads", "key", original.driverRef);
+    expect(await Bun.file(copied.driverRef).text()).toBe(contents);
+
+    const chunks = Array.from({ length: 12 }, (_, i) => i === 5 ? "" : `${i}:😀\0`);
+    const parts: { partNumber: number; driverRef: string }[] = [];
+    for (const [i, chunk] of chunks.entries()) {
+      const part = await driver.putPart("upload", i + 1, new Blob([chunk]).stream());
+      expect(part).toMatchObject({ size: new TextEncoder().encode(chunk).byteLength, sha256: nodeCrypto.createHash("sha256").update(chunk).digest("hex") });
+      parts.push({ partNumber: i + 1, driverRef: part.driverRef });
+    }
+    const reversed = parts.slice().reverse();
+    const assembled = await driver.assemble("upload", reversed, "uploads", "key");
+    const combined = chunks.join("");
+    expect(assembled).toMatchObject({ size: new TextEncoder().encode(combined).byteLength, sha256: nodeCrypto.createHash("sha256").update(combined).digest("hex") });
+    expect(await Bun.file(assembled.driverRef).text()).toBe(combined);
+    expect(reversed.map((part) => part.partNumber)).toEqual(parts.map((part) => part.partNumber).reverse());
+    expect(await readdir(join(root, "_uploads", "upload"))).toHaveLength(12);
+    const ranged = await driver.get("uploads", "key", copied.driverRef, { start: 2, end: 5 });
+    expect(ranged?.size).toBe(4);
+    expect(await new Response(ranged?.body).text()).toBe("2345");
+    const empty = await driver.assemble("empty", [], "uploads", "key");
+    expect(empty).toMatchObject({ size: 0, sha256: nodeCrypto.createHash("sha256").digest("hex") });
+    expect(Bun.file(empty.driverRef).size).toBe(0);
+  });
+
+  for (const operation of ["put", "putPart"] as const) {
+    test(`${operation} releases errored inputs and removes only the failed replacement`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-input-failure-"));
+      cleanupDirs.push(root);
+      const driver = fsBlobDriver({ root });
+      const write = (body: ReadableStream<Uint8Array>) => operation === "put"
+        ? driver.put("uploads", "key", body) : driver.putPart("upload", 1, body);
+      const original = await write(new Blob(["before"]).stream());
+      const files = await readdir(root, { recursive: true });
+      const failure = new Error("input stream failed after a chunk");
+      let pulls = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulls++ === 0) controller.enqueue(new Uint8Array(128 * 1024));
+          else controller.error(failure);
+        },
+      }, { highWaterMark: 0 });
+      await expect(write(body)).rejects.toBe(failure);
+      expect(body.locked).toBe(false);
+      expect((await readdir(root, { recursive: true })).sort()).toEqual(files.sort());
+      expect(await Bun.file(original.driverRef).text()).toBe("before");
+    });
+  }
+
+  test("failed copy and assembly remove partial outputs and retain staged parts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-read-failure-"));
+    cleanupDirs.push(root);
+    const driver = fsBlobDriver({ root });
+    const original = await driver.put("uploads", "key", new Blob(["before"]).stream());
+    const part = await driver.putPart("upload", 1, new Blob(["partial"]).stream());
+    const files = await readdir(root, { recursive: true });
+    const missing = join(root, "missing");
+    await expect(driver.copy({ bucket: "uploads", key: "key", driverRef: missing }, { bucket: "uploads", key: "key" })).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(driver.assemble("upload", [{ partNumber: 1, driverRef: part.driverRef }, { partNumber: 2, driverRef: missing }], "uploads", "key")).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(root, { recursive: true })).sort()).toEqual(files.sort());
+    expect(await Bun.file(original.driverRef).text()).toBe("before");
+    expect(await Bun.file(part.driverRef).text()).toBe("partial");
+  });
+
+  test("writer failure cancels the input, releases its lock and removes the failed file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-writer-failure-"));
+    cleanupDirs.push(root);
+    const driver = fsBlobDriver({ root });
+    const original = await driver.putPart("upload", 1, new Blob(["before"]).stream());
+    const files = await readdir(root, { recursive: true });
+    const id = nodeCrypto.randomUUID();
+    const target = join(root, "_uploads", "upload", `part-000001-${id}`);
+    await symlink(root, target);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(new Uint8Array(1024)); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const uuid = spyOn(nodeCrypto, "randomUUID").mockReturnValue(id);
+    try {
+      await expect(driver.putPart("upload", 1, body)).rejects.toMatchObject({ code: "EISDIR" });
+      expect(cancelled).toBe(true);
+      expect(body.locked).toBe(false);
+      expect((await readdir(root, { recursive: true })).sort()).toEqual(files.sort());
+      expect(await Bun.file(original.driverRef).text()).toBe("before");
+    } finally {
+      uuid.mockRestore();
+    }
+  });
+
+  test("rename failure removes the temporary put and preserves the previous payload", async () => {
+    const root = await mkdtemp(join(tmpdir(), "chimpbase-blobs-rename-failure-"));
+    cleanupDirs.push(root);
+    const driver = fsBlobDriver({ root });
+    const original = await driver.put("uploads", "key", new Blob(["before"]).stream());
+    const id = nodeCrypto.randomUUID();
+    const shard = nodeCrypto.createHash("sha256").update("key").digest("hex").slice(0, 2);
+    const directory = join(root, "uploads", "objects", shard);
+    await mkdir(join(directory, id));
+    const files = await readdir(root, { recursive: true });
+    const uuid = spyOn(nodeCrypto, "randomUUID").mockReturnValue(id);
+    try {
+      await expect(driver.put("uploads", "key", new Blob(["replacement"]).stream())).rejects.toMatchObject({ code: "EISDIR" });
+      expect((await readdir(root, { recursive: true })).sort()).toEqual(files.sort());
+      expect(await Bun.file(original.driverRef).text()).toBe("before");
+    } finally {
+      uuid.mockRestore();
     }
   });
 });
