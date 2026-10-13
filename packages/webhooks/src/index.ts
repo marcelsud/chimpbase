@@ -630,12 +630,12 @@ export function chimpbaseWebhooks(
         let statusCode: number | null = null;
         let error: string | null = null;
         let status: string;
+        let response: Response | undefined;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), deliveryTimeoutMs);
 
         try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), deliveryTimeoutMs);
-
-          const response = await fetch(webhook.url, {
+          response = await fetch(webhook.url, {
             method: "POST",
             headers: {
               "content-type": "application/json",
@@ -648,7 +648,6 @@ export function chimpbaseWebhooks(
             signal: controller.signal,
           });
 
-          clearTimeout(timeout);
           statusCode = response.status;
 
           if (response.ok) {
@@ -660,6 +659,13 @@ export function chimpbaseWebhooks(
         } catch (err) {
           status = "failed";
           error = err instanceof Error ? err.message : String(err);
+        } finally {
+          clearTimeout(timeout);
+          try {
+            void response?.body?.cancel().catch(() => {});
+          } catch {
+            // Body cleanup must not change or delay the delivery outcome.
+          }
         }
 
         // Log delivery attempt

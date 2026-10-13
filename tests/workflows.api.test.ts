@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { ChimpbaseBunHost } from "../packages/bun/src/runtime.ts";
 import {
   createDefaultChimpbasePlatformShim, normalizeProjectConfig, defineChimpbaseApp,
   defineChimpbaseModuleInterface, defineChimpbaseModuleImplementation,
+  ensureSqliteInternalTables,
 } from "../packages/core/index.ts";
 import {
   action, v, workflow, workflowActionStep, workflowSleepStep, workflowWaitForSignalStep,
@@ -29,6 +31,27 @@ async function createHost(engine: "memory" | "sqlite", now: () => number = Date.
     platform: { ...createDefaultChimpbasePlatformShim(), now },
   });
 }
+
+test("SQLite upgrades signal receipt timestamps without changing saved data", async () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec(`CREATE TABLE _chimpbase_workflow_signals (
+      id INTEGER PRIMARY KEY, workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
+      payload_json TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO _chimpbase_workflow_signals (workflow_id, signal_name, payload_json, created_at)
+      VALUES ('legacy', 'approve', '{"saved":true}', '2026-10-11 12:00:00')`);
+    await ensureSqliteInternalTables(db);
+    expect(db.query("SELECT payload_json, received_at_ms, consumed_at FROM _chimpbase_workflow_signals").all()).toEqual([
+      { payload_json: '{"saved":true}', received_at_ms: Date.parse("2026-10-11T12:00:00Z"), consumed_at: null },
+    ]);
+    db.query("UPDATE _chimpbase_workflow_signals SET received_at_ms = ?").run(Date.parse("2026-10-11T12:00:00.123Z"));
+    await ensureSqliteInternalTables(db);
+    expect(db.query("SELECT received_at_ms FROM _chimpbase_workflow_signals").get()).toEqual({
+      received_at_ms: Date.parse("2026-10-11T12:00:00.123Z"),
+    });
+  } finally { db.close(); }
+});
 
 for (const engine of ["memory", "sqlite"] as const) {
   test(`immediate signal timeout saves the run directive state (${engine})`, async () => {
@@ -54,6 +77,51 @@ for (const engine of ["memory", "sqlite"] as const) {
   });
 
   for (const style of ["steps", "run"] as const) {
+    for (const receiptOffsetMs of [-1, 0, 1]) {
+      for (const policy of ["fail", "continue", "callback"] as const) {
+        test(`signal receipt determines timeout with a delayed worker (${engine}, ${style}, ${receiptOffsetMs}, ${policy})`, async () => {
+          let now = Date.parse("2026-10-11T12:00:00.123Z");
+          const host = await createHost(engine, () => now);
+          type State = { outcome: string };
+          const onTimeout = policy === "callback" ? () => ({ outcome: "timeout" }) : policy;
+          const definition = style === "steps"
+            ? workflow<{}, State>({ name: "receipt", version: 1, initialState: () => ({ outcome: "waiting" }), steps: [
+              workflowWaitForSignalStep<{}, State, { outcome: string }>("approval", "approve", {
+                timeoutMs: 10, onTimeout, onSignal: ({ payload }) => ({ outcome: payload.outcome }),
+              }),
+            ] })
+            : workflow<{}, State>({ name: "receipt", version: 1, initialState: () => ({ outcome: "waiting" }), run(wf) {
+              if (wf.state.outcome !== "waiting") return wf.complete();
+              return wf.waitForSignal<{ outcome: string }>("approve", { timeoutMs: 10, stepId: "approval",
+                onTimeout: policy === "continue" ? () => ({ outcome: "continued" }) : onTimeout,
+                onSignal: ({ payload }) => ({ outcome: payload.outcome }),
+              });
+            } });
+          host.register(definition,
+            action("launch", async (ctx) => await ctx.workflow.start(definition, {}, { workflowId: "receipt" })),
+            action("send", async (ctx) => await ctx.workflow.signal("receipt", "approve", { outcome: "signal" })),
+            action("inspect", async (ctx) => await ctx.workflow.get("receipt")),
+          );
+          try {
+            await host.executeAction("launch");
+            await host.processNextQueueJob();
+            const deadline = now + 10;
+            expect((await host.executeAction("inspect")).result).toMatchObject({ status: "waiting_signal", wakeAtMs: deadline });
+            now = deadline + receiptOffsetMs;
+            await host.executeAction("send");
+            now = deadline + 100;
+            await host.processNextQueueJob();
+            const inTime = receiptOffsetMs < 0;
+            expect((await host.executeAction("inspect")).result).toMatchObject({
+              status: !inTime && policy === "fail" ? "failed" : "completed",
+              state: { outcome: inTime ? "signal" : policy === "callback" ? "timeout" : style === "run" && policy === "continue" ? "continued" : "waiting" },
+              wakeAtMs: null,
+            });
+          } finally { await host.close(); }
+        });
+      }
+    }
+
     for (const timeoutMs of [0, 10]) {
       test(`signal failure is terminal and commits preceding writes (${engine}, ${style}, ${timeoutMs})`, async () => {
         let now = Date.now();

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -20,6 +20,70 @@ interface WebhookResponse extends Omit<WebhookRegistration, "events"> {
 }
 
 const cleanupDirs: string[] = [];
+
+for (const scenario of ["success", "HTTP failure", "fetch rejection", "timeout", "cleanup rejection", "cleanup throw", "pending cleanup"] as const) {
+  test(`outbound delivery releases resources without changing its result (${scenario})`, async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-webhook-cleanup-"));
+    cleanupDirs.push(projectDir);
+    const host = await createChimpbase({
+      projectDir, storage: { engine: "memory" },
+      registrations: [
+        chimpbaseWebhooks({ allowedEvents: ["order.created"], deliveryTimeoutMs: 20 }),
+        action("publishCleanup", async (ctx) => { ctx.pubsub.publish("order.created", { orderId: 1 }); }),
+      ],
+    });
+    const originalFetch = globalThis.fetch;
+    const scheduled = spyOn(globalThis, "setTimeout");
+    const cleared = spyOn(globalThis, "clearTimeout");
+    let signal: AbortSignal | null | undefined;
+    let cancelCalls = 0;
+    const statusCode = scenario === "HTTP failure" ? 503 : scenario === "fetch rejection" || scenario === "timeout" ? null : 200;
+    const error = scenario === "HTTP failure" ? "HTTP 503" : scenario === "fetch rejection" ? "connection failed" : scenario === "timeout" ? "delivery timed out" : null;
+    globalThis.fetch = Object.assign(async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      signal = init?.signal;
+      if (scenario === "fetch rejection") throw new Error("connection failed");
+      if (scenario === "timeout") {
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("delivery timed out")), { once: true });
+        });
+      }
+      const response = new Response(new ReadableStream({
+        cancel() {
+          cancelCalls += 1;
+          if (scenario === "cleanup rejection") return Promise.reject(new Error("cancel failed"));
+          if (scenario === "pending cleanup") return new Promise<void>(() => {});
+        },
+      }), { status: statusCode! });
+      if (scenario === "cleanup throw") {
+        response.body!.cancel = () => { cancelCalls += 1; throw new Error("cancel failed"); };
+      }
+      return response;
+    }, { preconnect: originalFetch.preconnect });
+    try {
+      const webhookId = v.object({ id: v.string() }).parse((await host.executeAction("__chimpbase.webhooks.register", {
+        url: "https://example.invalid/hook", events: ["order.created"],
+      })).result).id;
+      await host.executeAction("publishCleanup");
+      if (error) await expect(host.processNextQueueJob()).rejects.toThrow(`webhook delivery failed: ${error}`);
+      else await host.processNextQueueJob();
+      expect((await host.executeAction("__chimpbase.webhooks.listDeliveries", webhookId)).result).toMatchObject([{
+        webhookId, event: "order.created", status: error ? "failed" : "delivered", statusCode, error, attempt: 1,
+      }]);
+      expect(cancelCalls).toBe(statusCode === null ? 0 : 1);
+      expect(signal?.aborted).toBe(scenario === "timeout");
+      expect(scheduled).toHaveBeenCalledTimes(1);
+      expect(scheduled.mock.calls[0]?.[1]).toBe(20);
+      expect(cleared).toHaveBeenCalledWith(scheduled.mock.results[0]?.value);
+    } finally {
+      const timer = scheduled.mock.results[0]?.value as ReturnType<typeof setTimeout> | undefined;
+      scheduled.mockRestore();
+      cleared.mockRestore();
+      clearTimeout(timer);
+      globalThis.fetch = originalFetch;
+      await host.close();
+    }
+  });
+}
 
 for (const engine of ["memory", "sqlite", "postgres"] as const) {
   for (const scenario of ["HTTP retry", "network retry", "exhausted retries"] as const) {

@@ -101,6 +101,7 @@ export async function ensureSqliteInternalTables(
       workflow_id TEXT NOT NULL,
       signal_name TEXT NOT NULL,
       payload_json TEXT NOT NULL,
+      received_at_ms INTEGER,
       consumed_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -166,4 +167,12 @@ export async function ensureSqliteInternalTables(
   )) {
     db.exec("ALTER TABLE _chimpbase_kv ADD COLUMN expires_at TEXT DEFAULT NULL");
   }
+  if (!db.query("PRAGMA table_info(_chimpbase_workflow_signals)").all().some(
+    (column) => typeof column === "object" && column !== null && "name" in column && column.name === "received_at_ms",
+  )) {
+    db.exec("ALTER TABLE _chimpbase_workflow_signals ADD COLUMN received_at_ms INTEGER");
+  }
+  db.exec(`UPDATE _chimpbase_workflow_signals
+    SET received_at_ms = CAST(strftime('%s', created_at) AS INTEGER) * 1000
+    WHERE received_at_ms IS NULL`);
 }

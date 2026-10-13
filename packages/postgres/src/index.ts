@@ -410,11 +410,19 @@ async function createPostgresInternalTables(pool: Queryable): Promise<void> {
         workflow_id TEXT NOT NULL,
         signal_name TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        received_at_ms BIGINT,
         consumed_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `,
   );
+
+  await pool.query(`
+    ALTER TABLE _chimpbase_workflow_signals ADD COLUMN IF NOT EXISTS received_at_ms BIGINT;
+    UPDATE _chimpbase_workflow_signals
+      SET received_at_ms = FLOOR(EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT
+      WHERE received_at_ms IS NULL
+  `);
 
   await pool.query(
     `
