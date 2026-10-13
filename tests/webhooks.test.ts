@@ -334,6 +334,35 @@ async function createWebhooksHost(options?: { withInbound?: boolean; withDedup?:
 }
 
 describe("@chimpbase/webhooks", () => {
+  test("native hex preserves leading zero secrets and outbound HMAC signatures", async () => {
+    const host = await createWebhooksHost();
+    host.register(action("publishHex", (ctx) => ctx.pubsub.publish("order.created", { label: "ação/😀" })));
+    const bytes = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const random = spyOn(crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(value: T): T => {
+      if (value !== null) new Uint8Array(value.buffer, value.byteOffset, value.byteLength).set(bytes);
+      return value;
+    });
+    const originalFetch = globalThis.fetch;
+    const sent: { headers: Headers; body: string }[] = [];
+    globalThis.fetch = Object.assign(async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (typeof init?.body !== "string") throw new Error("missing webhook body");
+      sent.push({ headers: new Headers(init.headers), body: init.body });
+      return new Response(null, { status: 204 });
+    }, { preconnect: originalFetch.preconnect });
+    try {
+      const registration = v.object({ secret: v.string() }).parse((await host.executeAction("__chimpbase.webhooks.register", {
+        url: "https://example.invalid/hook", events: ["order.created"],
+      })).result);
+      expect(registration.secret).toBe("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+      await host.executeAction("publishHex");
+      await host.processNextQueueJob();
+      expect(sent).toHaveLength(1);
+      const { headers, body } = sent[0]!;
+      const expected = createHmac("sha256", registration.secret).update(`${headers.get("x-chimpbase-timestamp")}.${body}`).digest("hex");
+      expect(headers.get("x-chimpbase-signature")).toBe(`sha256=${expected}`);
+    } finally { random.mockRestore(); globalThis.fetch = originalFetch; await host.close(); }
+  });
+
   test("native comparison preserves HMAC, Basic, Bearer and header verifier results", async () => {
     const body = '{"ok":true}';
     const signature = createHmac("sha256", "secret").update(body).digest("hex");

@@ -305,9 +305,7 @@ const DELIVERY_DLQ = "__chimpbase.webhooks.deliver.dlq";
 function generateSecret(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return Buffer.from(bytes).toString("hex");
 }
 
 function generateDeliveryId(): string {
@@ -332,9 +330,7 @@ async function computeHmac(algorithm: string, secret: string, payload: string): 
     key,
     new TextEncoder().encode(payload),
   );
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return Buffer.from(signature).toString("hex");
 }
 
 function normalizeHashAlgorithm(algorithm: string): string {

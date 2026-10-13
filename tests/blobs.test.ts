@@ -8,6 +8,7 @@ import { createChimpbase } from "../packages/bun/src/library.ts";
 import { action, route, v } from "../packages/runtime/index.ts";
 import {
   chimpbaseBlobs,
+  createBlobSigner,
   fsBlobDriver,
   memoryBlobDriver,
 } from "../packages/blobs/src/index.ts";
@@ -15,6 +16,35 @@ import type { ChimpbaseBlobDriver, ChimpbaseBlobMetaRow } from "../packages/core
 
 
 const cleanupDirs: string[] = [];
+
+test("native Base64URL signing preserves issued tokens, Unicode and padding boundaries", () => {
+  const random = spyOn(crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(value: T): T => {
+    if (value !== null) new Uint8Array(value.buffer, value.byteOffset, value.byteLength).fill(0);
+    return value;
+  });
+  const signer = createBlobSigner({ secret: "legacy-secret", baseUrl: "https://example.test", clock: () => 1000 });
+  // Issued by the previous signer with the same clock and nonce.
+  const issued = [
+    ["", "eyJidWNrZXQiOiJ1cGxvYWRzIiwia2V5IjoiIiwib3AiOiJnZXQiLCJleHAiOjYxLCJub25jZSI6IkFBQUFBQUFBQUFBQUFBQUEifQ.FixdTG6mw7qyyhX6Fl6a4W_k-CSb-2lBXjvPS6Yt9t4"],
+    ["a", "eyJidWNrZXQiOiJ1cGxvYWRzIiwia2V5IjoiYSIsIm9wIjoiZ2V0IiwiZXhwIjo2MSwibm9uY2UiOiJBQUFBQUFBQUFBQUFBQUFBIn0.ebI-lVCl85SXCQWdUElQrHoS07LpQ9T5AwO0j9sictA"],
+    ["aa", "eyJidWNrZXQiOiJ1cGxvYWRzIiwia2V5IjoiYWEiLCJvcCI6ImdldCIsImV4cCI6NjEsIm5vbmNlIjoiQUFBQUFBQUFBQUFBQUFBQSJ9.ZUFzdoHPv7__wssUY-XG9esZi_YIcw-S0wQ0SLk4KDs"],
+    ["ação/😀", "eyJidWNrZXQiOiJ1cGxvYWRzIiwia2V5IjoiYcOnw6NvL_CfmIAiLCJvcCI6ImdldCIsImV4cCI6NjEsIm5vbmNlIjoiQUFBQUFBQUFBQUFBQUFBQSJ9.dVnV0aZHy9dO-rJtU84KAk38WbZY1Qbw7941kFg-BuM"],
+  ] as const;
+  try {
+    for (const [key, token] of issued) {
+      const signed = signer.sign({ bucket: "uploads", key, op: "get", ttlSec: 60 });
+      expect(new URL(signed).searchParams.get("token")).toBe(token);
+      expect(signer.verify(token)).toMatchObject({ bucket: "uploads", key, op: "get", exp: 61 });
+      const [encoded, signature] = token.split(".");
+      expect(signer.verify(`${encoded}.${signature}=`)).toEqual(signer.verify(token));
+      expect(signer.verify(`${encoded}.${signature.replace(/-/g, "+").replace(/_/g, "/")}`)).toEqual(signer.verify(token));
+      for (const malformed of ["", encoded, `${encoded}.!`, `${encoded}.${signature.slice(1)}`, `${encoded}X.${signature}`,
+        `${encoded}.${signature[0] === "A" ? "B" : "A"}${signature.slice(1)}`]) {
+        expect(signer.verify(malformed)).toBeNull();
+      }
+    }
+  } finally { random.mockRestore(); }
+});
 
 test("mutating full or ranged memory blob reads preserves stored and copied bytes", async () => {
   const host = await createChimpbase({
