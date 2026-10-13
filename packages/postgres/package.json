@@ -2,40 +2,13 @@
   "name": "@chimpbase/postgres",
   "version": "0.7.0",
   "private": true,
-  "description": "Reusable Postgres storage adapter for Chimpbase hosts.",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/postgres"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "chimpbase",
-    "postgres",
-    "storage",
-    "adapter",
-    "kysely"
-  ],
-  "files": [
-    "dist"
-  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js",
       "default": "./dist/src/index.js"
     }
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "prepack": "node ../../scripts/build-package.mjs postgres"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",

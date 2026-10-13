@@ -2,29 +2,7 @@
   "name": "@chimpbase/node",
   "version": "0.7.0",
   "private": true,
-  "description": "Node.js host for building action-driven backends on Postgres or SQLite with minimal boilerplate.",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/node"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "node",
-    "postgres",
-    "sqlite",
-    "typescript",
-    "workflow",
-    "backend"
-  ],
-  "files": [
-    "dist"
-  ],
   "exports": {
     ".": {
       "types": "./dist/src/library.d.ts",
@@ -39,12 +17,6 @@
   },
   "bin": {
     "chimpbase-node": "./dist/src/cli.js"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "prepack": "node ../../scripts/build-package.mjs node"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",

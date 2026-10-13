@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -41,38 +41,55 @@ describe("chimpbase-node runtime", () => {
     const projectDir = await mkdtemp(join(tmpdir(), "chimpbase-node-sqlite-"));
     cleanupDirs.push(projectDir);
 
-    const build = Bun.spawnSync(
-      [
-        "node",
-        "./scripts/build-package.mjs",
-        "runtime",
-        "core",
-        "tooling",
-        "postgres",
-        "host",
-        "node",
-        "auth",
-        "blobs",
-        "webhooks",
-      ],
-      {
-        cwd: repoRoot,
-        env: process.env,
-        stderr: "pipe",
-        stdout: "pipe",
-      },
-    );
-
-    if (build.exitCode !== 0) {
-      throw new Error(
-        `failed to build Node runtime packages\n${build.stdout.toString()}\n${build.stderr.toString()}`,
+    if (process.env.CHIMPBASE_TEST_PREBUILT !== "1") {
+      const build = Bun.spawnSync(
+        [
+          "node",
+          "./scripts/build-package.mjs",
+          "runtime",
+          "core",
+          "tooling",
+          "postgres",
+          "host",
+          "node",
+          "auth",
+          "blobs",
+          "webhooks",
+        ],
+        {
+          cwd: repoRoot,
+          env: process.env,
+          stderr: "pipe",
+          stdout: "pipe",
+        },
       );
+
+      if (build.exitCode !== 0) {
+        throw new Error(
+          `failed to build Node runtime packages\n${build.stdout.toString()}\n${build.stderr.toString()}`,
+        );
+      }
+    }
+
+    let packageRoot = repoRoot;
+    if (process.env.CHIMPBASE_TEST_PREBUILT === "1") {
+      // Published self-imports need the public package root without private workspace manifests.
+      packageRoot = join(projectDir, "package");
+      await mkdir(packageRoot);
+      await cp(join(repoRoot, "package.json"), join(packageRoot, "package.json"));
+      const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as { files: string[] };
+      for (const path of manifest.files.filter((path) => path.endsWith("/dist"))) {
+        const target = join(packageRoot, path);
+        await mkdir(dirname(target), { recursive: true });
+        await cp(join(repoRoot, path), target, { recursive: true });
+      }
+      await symlink(join(repoRoot, "node_modules"), join(packageRoot, "node_modules"), "dir");
     }
 
     const scriptPath = resolve(projectDir, "index.mjs");
-    const nodeLibraryPath = resolve(repoRoot, "packages/node/dist/src/library.js").replaceAll("\\", "\\\\");
-    const nodeRuntimePath = resolve(repoRoot, "packages/node/dist/src/runtime.js");
-    const corePath = resolve(repoRoot, "packages/core/dist/index.js");
+    const nodeLibraryPath = resolve(packageRoot, "packages/node/dist/src/library.js").replaceAll("\\", "\\\\");
+    const nodeRuntimePath = resolve(packageRoot, "packages/node/dist/src/runtime.js");
+    const corePath = resolve(packageRoot, "packages/core/dist/index.js");
 
     await writeFile(
       scriptPath,
@@ -80,9 +97,9 @@ describe("chimpbase-node runtime", () => {
         `import { createChimpbase } from "${nodeLibraryPath}";`,
         `import { ChimpbaseNodeHost, nodeRuntimeShim } from ${JSON.stringify(nodeRuntimePath)};`,
         `import { normalizeProjectConfig, createSqliteEngineAdapter, createDefaultChimpbasePlatformShim } from ${JSON.stringify(corePath)};`,
-        `import { chimpbaseAuth } from ${JSON.stringify(resolve(repoRoot, "packages/auth/dist/src/index.js"))};`,
-        `import { createBlobSigner } from ${JSON.stringify(resolve(repoRoot, "packages/blobs/dist/src/index.js"))};`,
-        `import { chimpbaseWebhooks, hmac } from ${JSON.stringify(resolve(repoRoot, "packages/webhooks/dist/src/index.js"))};`,
+        `import { chimpbaseAuth } from ${JSON.stringify(resolve(packageRoot, "packages/auth/dist/src/index.js"))};`,
+        `import { createBlobSigner } from ${JSON.stringify(resolve(packageRoot, "packages/blobs/dist/src/index.js"))};`,
+        `import { chimpbaseWebhooks, hmac } from ${JSON.stringify(resolve(packageRoot, "packages/webhooks/dist/src/index.js"))};`,
         'import assert from "node:assert/strict";',
         'import { createHash, createHmac } from "node:crypto";',
         'import { DatabaseSync } from "node:sqlite";',

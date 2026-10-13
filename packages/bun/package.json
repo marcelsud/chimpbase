@@ -2,41 +2,13 @@
   "name": "@chimpbase/bun",
   "version": "0.7.0",
   "private": true,
-  "description": "Bun host for building action-driven backends on Postgres with minimal boilerplate.",
-  "license": "Apache-2.0",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/chimpbase/chimpbase.git",
-    "directory": "packages/bun"
-  },
-  "homepage": "https://github.com/chimpbase/chimpbase#readme",
-  "bugs": {
-    "url": "https://github.com/chimpbase/chimpbase/issues"
-  },
-  "keywords": [
-    "bun",
-    "postgres",
-    "typescript",
-    "workflow",
-    "queue",
-    "backend"
-  ],
-  "files": [
-    "src",
-    "README.md",
-    "LICENSE",
-    "NOTICE"
-  ],
   "exports": {
     ".": "./src/library.ts",
     "./cli": "./src/cli.ts"
   },
   "bin": {
     "chimpbase": "./src/cli.ts"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "dependencies": {
     "@chimpbase/core": "0.7.0",
